@@ -5,6 +5,12 @@
 
 A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Series) with advanced per-category rules and caching.
 
+## Screenshots
+
+![Configuration Interface](app1.png)
+
+![Filter Management](app2.png)
+
 ## Features
 
 - 📺 **Full Xtream Codes API Proxy** - Works with any Xtream-compatible player (TiviMate, XCIPTV, etc.)

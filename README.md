@@ -34,7 +34,7 @@ Or with docker-compose, create a `docker-compose.yml`:
 version: '3'
 services:
   xtreamfilter:
-    image: YOUR_USERNAME/xtreamfilter:latest
+    image: spanishst/xtreamfilter:latest
     container_name: xtreamfilter
     ports:
       - "8080:5000"
@@ -54,7 +54,7 @@ docker-compose up -d
 1. **Clone the repository:**
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/xtreamfilter.git
+git clone https://github.com/spanishst/xtreamfilter.git
 cd xtreamfilter
 ```
 

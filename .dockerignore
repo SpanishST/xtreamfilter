@@ -1,0 +1,30 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*.pyo
+.venv
+.env
+*.egg-info
+build
+dist
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Local data (users mount their own)
+data/
+
+# Development files
+*.md
+*.lock
+test.*
+pyproject.toml
+.python-version
+docker-compose.yml

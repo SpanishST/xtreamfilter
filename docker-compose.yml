@@ -1,0 +1,11 @@
+services:
+  xtreamfilter:
+    build: .
+    container_name: xtreamfilter
+    ports:
+      - "8080:5000"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Paris

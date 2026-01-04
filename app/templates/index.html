@@ -1,0 +1,1073 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XtreamFilter</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #00d4ff;
+            font-size: 2.5em;
+            text-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+        }
+        
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .card h2 {
+            color: #00d4ff;
+            margin-bottom: 20px;
+            font-size: 1.3em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .card h2::before {
+            content: '';
+            width: 4px;
+            height: 24px;
+            background: #00d4ff;
+            border-radius: 2px;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #b0b0b0;
+            font-size: 0.9em;
+        }
+        
+        input[type="text"],
+        input[type="password"],
+        select {
+            width: 100%;
+            padding: 12px 15px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.3);
+            color: #fff;
+            font-size: 1em;
+            transition: border-color 0.3s, box-shadow 0.3s;
+        }
+        
+        input:focus,
+        select:focus {
+            outline: none;
+            border-color: #00d4ff;
+            box-shadow: 0 0 10px rgba(0, 212, 255, 0.2);
+        }
+        
+        select {
+            cursor: pointer;
+        }
+        
+        select option {
+            background: #1a1a2e;
+            color: #fff;
+        }
+        
+        .hint {
+            font-size: 0.85em;
+            color: #888;
+            margin-top: 5px;
+        }
+        
+        .btn {
+            display: inline-block;
+            padding: 12px 30px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1em;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-decoration: none;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #00d4ff, #0099cc);
+            color: #000;
+            font-weight: 600;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(0, 212, 255, 0.4);
+        }
+        
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+        }
+        
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        
+        .btn-danger {
+            background: rgba(255, 71, 87, 0.2);
+            color: #ff4757;
+            border: 1px solid #ff4757;
+        }
+        
+        .btn-danger:hover {
+            background: #ff4757;
+            color: #fff;
+        }
+        
+        .btn-sm {
+            padding: 6px 15px;
+            font-size: 0.85em;
+        }
+        
+        .url-box {
+            background: rgba(0, 0, 0, 0.4);
+            padding: 15px 20px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 0.95em;
+            word-break: break-all;
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 15px;
+        }
+        
+        .url-box code {
+            color: #00d4ff;
+            flex: 1;
+        }
+        
+        .copy-btn {
+            background: rgba(0, 212, 255, 0.2);
+            border: 1px solid #00d4ff;
+            color: #00d4ff;
+            padding: 8px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.85em;
+            transition: all 0.3s;
+        }
+        
+        .copy-btn:hover {
+            background: #00d4ff;
+            color: #000;
+        }
+        
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .stat-item {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #00d4ff;
+        }
+        
+        .stat-label {
+            font-size: 0.8em;
+            color: #888;
+            margin-top: 5px;
+        }
+        
+        /* Filter Builder */
+        .filter-builder {
+            display: grid;
+            grid-template-columns: 120px 150px 1fr 100px auto;
+            gap: 10px;
+            align-items: end;
+            margin-bottom: 15px;
+        }
+        
+        .filter-builder .form-group {
+            margin-bottom: 0;
+        }
+        
+        .filter-builder input,
+        .filter-builder select {
+            padding: 10px 12px;
+        }
+        
+        /* Filter List */
+        .filter-list {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            padding: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .filter-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 15px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            margin-bottom: 8px;
+            transition: background 0.2s;
+        }
+        
+        .filter-item:last-child {
+            margin-bottom: 0;
+        }
+        
+        .filter-item:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        .filter-item .type {
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 0.75em;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        
+        .filter-item .type.include {
+            background: rgba(46, 213, 115, 0.2);
+            color: #2ed573;
+        }
+        
+        .filter-item .type.exclude {
+            background: rgba(255, 71, 87, 0.2);
+            color: #ff4757;
+        }
+        
+        .filter-item .match {
+            color: #888;
+            font-size: 0.85em;
+            min-width: 100px;
+        }
+        
+        .filter-item .value {
+            flex: 1;
+            font-family: monospace;
+            color: #fff;
+            word-break: break-all;
+        }
+        
+        .filter-item .delete-btn {
+            background: none;
+            border: none;
+            color: #ff4757;
+            cursor: pointer;
+            padding: 5px;
+            font-size: 1.2em;
+            opacity: 0.6;
+            transition: opacity 0.2s;
+        }
+        
+        .filter-item .delete-btn:hover {
+            opacity: 1;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 30px;
+            color: #666;
+        }
+        
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 20px;
+        }
+        
+        .tab {
+            padding: 10px 25px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px 8px 0 0;
+            color: #888;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .tab:hover {
+            color: #fff;
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        .tab.active {
+            background: rgba(0, 212, 255, 0.1);
+            border-color: #00d4ff;
+            color: #00d4ff;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        /* Quick Add */
+        .quick-add {
+            margin-top: 15px;
+        }
+        
+        .quick-add-title {
+            font-size: 0.9em;
+            color: #888;
+            margin-bottom: 10px;
+        }
+        
+        .quick-list {
+            max-height: 200px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            padding: 10px;
+        }
+        
+        .quick-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            border-radius: 5px;
+            font-size: 0.9em;
+            transition: background 0.2s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .quick-item:hover {
+            background: rgba(0, 212, 255, 0.1);
+        }
+        
+        .quick-item .add-icon {
+            color: #00d4ff;
+            font-weight: bold;
+        }
+        
+        .quick-buttons {
+            display: flex;
+            gap: 5px;
+        }
+        
+        .quick-buttons button {
+            width: 28px;
+            height: 28px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 14px;
+            transition: transform 0.1s;
+        }
+        
+        .quick-buttons button:hover {
+            transform: scale(1.1);
+        }
+        
+        .btn-include {
+            background: #2ecc71;
+            color: white;
+        }
+        
+        .btn-exclude {
+            background: #e74c3c;
+            color: white;
+        }
+        
+        .actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 25px;
+            flex-wrap: wrap;
+        }
+        
+        .preview-box {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 15px;
+            font-family: monospace;
+            font-size: 0.85em;
+        }
+        
+        .preview-box .stats-line {
+            color: #00d4ff;
+            margin-bottom: 10px;
+        }
+        
+        .preview-box .channel-list {
+            color: #888;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #888;
+        }
+        
+        .checkbox-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .checkbox-wrapper input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+        
+        @media (max-width: 900px) {
+            .filter-builder {
+                grid-template-columns: 1fr 1fr;
+            }
+            
+            .filter-builder .form-group:nth-child(3) {
+                grid-column: 1 / -1;
+            }
+            
+            .filter-builder .form-group:nth-child(4),
+            .filter-builder .form-group:nth-child(5) {
+                grid-column: span 1;
+            }
+        }
+        
+        @media (max-width: 600px) {
+            body {
+                padding: 10px;
+            }
+            
+            h1 {
+                font-size: 1.8em;
+            }
+            
+            .card {
+                padding: 15px;
+            }
+            
+            .filter-builder {
+                grid-template-columns: 1fr;
+            }
+            
+            .filter-builder .form-group {
+                grid-column: 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📺 XtreamFilter</h1>
+        
+        <!-- Playlist URL Card -->
+        <div class="card">
+            <h2>Connection Info</h2>
+            <p style="margin-bottom: 10px; color: #888; font-size: 0.9em;">📺 <strong>Xtream Codes API</strong> (recommended for IPTV apps - supports Live, VOD & Series):</p>
+            <div class="url-box" style="margin-bottom: 15px;">
+                <code id="xtream-url">http://YOUR_SERVER:8080</code>
+                <button class="copy-btn" onclick="copyXtreamUrl()">Copy</button>
+            </div>
+            <p style="margin: 10px 0 5px 0; color: #666; font-size: 0.85em;">Username/Password: use anything (e.g., <code>user</code> / <code>pass</code>)</p>
+            
+            <p style="margin: 20px 0 10px 0; color: #888; font-size: 0.9em;">📄 <strong>M3U Playlist</strong> (Live TV only, for basic players):</p>
+            <div class="url-box">
+                <code id="playlist-url">http://YOUR_SERVER:8080/playlist.m3u</code>
+                <button class="copy-btn" onclick="copyUrl()">Copy</button>
+            </div>
+        </div>
+        
+        <!-- Cache Status Card -->
+        <div class="card">
+            <h2>🗄️ Cache Status</h2>
+            <div class="stats" id="cache-stats">
+                <div class="stat-item">
+                    <div class="stat-value" id="cache-live">-</div>
+                    <div class="stat-label">Live Streams</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="cache-vod">-</div>
+                    <div class="stat-label">Movies</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="cache-series">-</div>
+                    <div class="stat-label">Series</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="cache-status">-</div>
+                    <div class="stat-label">Status</div>
+                </div>
+            </div>
+            <div style="margin-top: 15px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                <span style="color: #888; font-size: 0.85em;">Last refresh: <span id="cache-last-refresh">Never</span></span>
+                <span style="color: #888; font-size: 0.85em;">| TTL: <span id="cache-ttl">-</span>s</span>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="refreshCache()" id="refresh-cache-btn">🔄 Refresh Now</button>
+            </div>
+        </div>
+        
+        <!-- Credentials Card -->
+        <form method="POST" action="/save">
+            <div class="card">
+                <h2>Xtream Credentials</h2>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                    <div class="form-group">
+                        <label>Server URL</label>
+                        <input type="text" name="host" value="{{ config.xtream.host }}" placeholder="http://example.com:8080">
+                    </div>
+                    <div class="form-group">
+                        <label>Username</label>
+                        <input type="text" name="username" value="{{ config.xtream.username }}" placeholder="username">
+                    </div>
+                    <div class="form-group">
+                        <label>Password</label>
+                        <input type="password" name="password" value="{{ config.xtream.password }}" placeholder="password">
+                    </div>
+                </div>
+                
+                <h3 style="color: #00d4ff; margin: 20px 0 15px 0; font-size: 1.1em;">Content Types</h3>
+                <div style="display: flex; gap: 30px; flex-wrap: wrap;">
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" name="content_live" {% if config.content_types.live %}checked{% endif %} style="width: 18px; height: 18px;">
+                        <span>📺 Live TV</span>
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" name="content_vod" {% if config.content_types.vod %}checked{% endif %} style="width: 18px; height: 18px;">
+                        <span>🎬 Movies (VOD)</span>
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" name="content_series" {% if config.content_types.series %}checked{% endif %} style="width: 18px; height: 18px;">
+                        <span>📺 TV Series</span>
+                    </label>
+                </div>
+                <p style="color: #888; font-size: 0.85em; margin-top: 10px;">
+                    ⚠️ Note: Series can take longer to load as each series requires an additional API call to fetch episodes.
+                </p>
+                
+                <button type="submit" class="btn btn-primary btn-sm" style="margin-top: 15px;">Save Credentials</button>
+            </div>
+        </form>
+        
+        <!-- Filters Card -->
+        <div class="card">
+            <h2>Filter Rules</h2>
+            
+            <!-- Content Type Selector -->
+            <div class="tabs" style="margin-bottom: 15px;">
+                <div class="tab active" onclick="switchCategory('live')">📺 Live TV</div>
+                <div class="tab" onclick="switchCategory('vod')">🎬 Movies</div>
+                <div class="tab" onclick="switchCategory('series')">📺 Series</div>
+            </div>
+            
+            <!-- Filter Type Tabs -->
+            <div class="tabs" id="filter-type-tabs">
+                <div class="tab active" onclick="switchTab('groups')">📁 Group Filters</div>
+                <div class="tab" onclick="switchTab('channels')">📺 Channel/Name Filters</div>
+            </div>
+            
+            <!-- Group Filters Tab -->
+            <div id="tab-groups" class="tab-content active">
+                <div class="filter-builder">
+                    <div class="form-group">
+                        <label>Action</label>
+                        <select id="group-type">
+                            <option value="exclude">Exclude</option>
+                            <option value="include">Include Only</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Match Type</label>
+                        <select id="group-match">
+                            <option value="contains">Contains</option>
+                            <option value="not_contains">Not Contains</option>
+                            <option value="starts_with">Starts With</option>
+                            <option value="ends_with">Ends With</option>
+                            <option value="exact">Exact Match</option>
+                            <option value="regex">Regex</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Value</label>
+                        <input type="text" id="group-value" placeholder="e.g., AR|, ADULT, XXX">
+                    </div>
+                    <div class="form-group">
+                        <label>&nbsp;</label>
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" id="group-case">
+                            <span style="font-size: 0.85em;">Case</span>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>&nbsp;</label>
+                        <button type="button" class="btn btn-primary btn-sm" onclick="addFilter('groups')">Add</button>
+                    </div>
+                </div>
+                
+                <div class="filter-list" id="groups-filters-list">
+                    <div class="empty-state">No group filters configured</div>
+                </div>
+                
+                <div class="quick-add">
+                    <div class="quick-add-title">Quick Add - Click to exclude a group:</div>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="loadGroups()">Load Available Groups</button>
+                    <div class="quick-list" id="groups-list" style="display: none; margin-top: 10px;"></div>
+                </div>
+            </div>
+            
+            <!-- Channel Filters Tab -->
+            <div id="tab-channels" class="tab-content">
+                <div class="filter-builder">
+                    <div class="form-group">
+                        <label>Action</label>
+                        <select id="channel-type">
+                            <option value="exclude">Exclude</option>
+                            <option value="include">Include Only</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Match Type</label>
+                        <select id="channel-match">
+                            <option value="contains">Contains</option>
+                            <option value="not_contains">Not Contains</option>
+                            <option value="starts_with">Starts With</option>
+                            <option value="ends_with">Ends With</option>
+                            <option value="exact">Exact Match</option>
+                            <option value="regex">Regex</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Value</label>
+                        <input type="text" id="channel-value" placeholder="e.g., TEST, XXX, 18+">
+                    </div>
+                    <div class="form-group">
+                        <label>&nbsp;</label>
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" id="channel-case">
+                            <span style="font-size: 0.85em;">Case</span>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>&nbsp;</label>
+                        <button type="button" class="btn btn-primary btn-sm" onclick="addFilter('channels')">Add</button>
+                    </div>
+                </div>
+                
+                <div class="filter-list" id="channels-filters-list">
+                    <div class="empty-state">No channel filters configured</div>
+                </div>
+                
+                <div class="quick-add">
+                    <div class="quick-add-title">Search channels:</div>
+                    <input type="text" id="channel-search" placeholder="Type to search channels..." onkeyup="searchChannels(this.value)">
+                    <div class="quick-list" id="channels-list" style="display: none; margin-top: 10px;"></div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Preview Card -->
+        <div class="card">
+            <h2>Preview</h2>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="loadPreview()">🔄 Refresh Preview</button>
+            <div class="preview-box" id="preview-box">
+                <div class="loading">Click refresh to see filtered playlist preview</div>
+            </div>
+            
+            <div class="actions">
+                <a href="/playlist.m3u" class="btn btn-primary" target="_blank">📥 Download Playlist</a>
+                <a href="/playlist.m3u" class="btn btn-secondary" target="_blank">👁️ View Raw M3U</a>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Current category state
+        let currentCategory = 'live';
+        let filtersData = { live: {groups: [], channels: []}, vod: {groups: [], channels: []}, series: {groups: [], channels: []} };
+        
+        // Initialize
+        document.getElementById('playlist-url').textContent = window.location.origin + '/playlist.m3u';
+        document.getElementById('xtream-url').textContent = window.location.origin;
+        
+        // Load filters and cache status on page load
+        loadFilters();
+        loadCacheStatus();
+        
+        // Refresh cache status every 30 seconds
+        setInterval(loadCacheStatus, 30000);
+        
+        function copyUrl() {
+            const url = document.getElementById('playlist-url').textContent;
+            navigator.clipboard.writeText(url).then(() => {
+                const btn = event.target;
+                btn.textContent = 'Copied!';
+                setTimeout(() => btn.textContent = 'Copy', 2000);
+            });
+        }
+        
+        function copyXtreamUrl() {
+            const url = document.getElementById('xtream-url').textContent;
+            navigator.clipboard.writeText(url).then(() => {
+                const btn = event.target;
+                btn.textContent = 'Copied!';
+                setTimeout(() => btn.textContent = 'Copy', 2000);
+            });
+        }
+        
+        function loadCacheStatus() {
+            fetch('/api/cache/status')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('cache-live').textContent = data.counts.live_streams || 0;
+                    document.getElementById('cache-vod').textContent = data.counts.vod_streams || 0;
+                    document.getElementById('cache-series').textContent = data.counts.series || 0;
+                    document.getElementById('cache-ttl').textContent = data.ttl_seconds || 3600;
+                    
+                    // Status indicator
+                    let status = '⏳';
+                    if (data.refresh_in_progress) {
+                        status = '🔄';
+                        document.getElementById('refresh-cache-btn').disabled = true;
+                        document.getElementById('refresh-cache-btn').textContent = '⏳ Refreshing...';
+                    } else if (data.cache_valid) {
+                        status = '✅';
+                        document.getElementById('refresh-cache-btn').disabled = false;
+                        document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                    } else {
+                        status = '⚠️';
+                        document.getElementById('refresh-cache-btn').disabled = false;
+                        document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                    }
+                    document.getElementById('cache-status').textContent = status;
+                    
+                    // Last refresh time
+                    if (data.last_refresh) {
+                        const lastTime = new Date(data.last_refresh);
+                        const now = new Date();
+                        const diffMinutes = Math.floor((now - lastTime) / 60000);
+                        if (diffMinutes < 1) {
+                            document.getElementById('cache-last-refresh').textContent = 'Just now';
+                        } else if (diffMinutes < 60) {
+                            document.getElementById('cache-last-refresh').textContent = diffMinutes + ' min ago';
+                        } else {
+                            const diffHours = Math.floor(diffMinutes / 60);
+                            document.getElementById('cache-last-refresh').textContent = diffHours + 'h ' + (diffMinutes % 60) + 'm ago';
+                        }
+                    } else {
+                        document.getElementById('cache-last-refresh').textContent = 'Never';
+                    }
+                })
+                .catch(() => {});
+        }
+        
+        function refreshCache() {
+            document.getElementById('refresh-cache-btn').disabled = true;
+            document.getElementById('refresh-cache-btn').textContent = '⏳ Starting...';
+            
+            fetch('/api/cache/refresh', { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('refresh-cache-btn').textContent = '⏳ Refreshing...';
+                    // Poll for completion
+                    const pollInterval = setInterval(() => {
+                        loadCacheStatus();
+                        fetch('/api/cache/status')
+                            .then(r => r.json())
+                            .then(status => {
+                                if (!status.refresh_in_progress) {
+                                    clearInterval(pollInterval);
+                                }
+                            });
+                    }, 2000);
+                })
+                .catch(() => {
+                    document.getElementById('refresh-cache-btn').disabled = false;
+                    document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                });
+        }
+        
+        function switchCategory(category) {
+            currentCategory = category;
+            
+            // Update category tabs
+            const categoryTabs = document.querySelectorAll('.tabs')[0].querySelectorAll('.tab');
+            categoryTabs.forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            // Refresh displayed filters for new category
+            renderCurrentFilters();
+            
+            // Clear quick-add lists
+            document.getElementById('groups-list').style.display = 'none';
+            document.getElementById('channels-list').style.display = 'none';
+        }
+        
+        function switchTab(tab) {
+            // Update filter type tabs only (second set of tabs)
+            const filterTypeTabs = document.getElementById('filter-type-tabs').querySelectorAll('.tab');
+            filterTypeTabs.forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.getElementById('tab-' + tab).classList.add('active');
+        }
+        
+
+        
+        function loadFilters() {
+            fetch('/api/filters')
+                .then(r => r.json())
+                .then(data => {
+                    filtersData = data;
+                    renderCurrentFilters();
+                })
+                .catch(() => {});
+        }
+        
+        function renderCurrentFilters() {
+            const catFilters = filtersData[currentCategory] || {groups: [], channels: []};
+            renderFilters('groups', catFilters.groups || []);
+            renderFilters('channels', catFilters.channels || []);
+        }
+        
+        function renderFilters(target, filters) {
+            const container = document.getElementById(target + '-filters-list');
+            
+            if (!container) {
+                console.error('Container not found:', target + '-filters-list');
+                return;
+            }
+            
+            const categoryLabels = {live: 'Live TV', vod: 'Movies', series: 'Series'};
+            const categoryLabel = categoryLabels[currentCategory] || currentCategory;
+            
+            if (!filters || filters.length === 0) {
+                container.innerHTML = '<div class="empty-state">No ' + target + ' filters for ' + categoryLabel + '</div>';
+                return;
+            }
+            
+            const matchLabels = {
+                'contains': 'contains',
+                'not_contains': 'not contains',
+                'starts_with': 'starts with',
+                'ends_with': 'ends with',
+                'exact': 'equals',
+                'regex': 'regex'
+            };
+            
+            container.innerHTML = filters.map((f, i) => `
+                <div class="filter-item">
+                    <span class="type ${f.type}">${f.type}</span>
+                    <span class="match">${matchLabels[f.match] || f.match}</span>
+                    <span class="value">${escapeHtml(f.value)}${f.case_sensitive ? ' (case)' : ''}</span>
+                    <button class="delete-btn" onclick="deleteFilter('${target}', ${i})">✕</button>
+                </div>
+            `).join('');
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        function addFilter(target) {
+            const type = document.getElementById(target.slice(0, -1) + '-type').value;
+            const match = document.getElementById(target.slice(0, -1) + '-match').value;
+            const value = document.getElementById(target.slice(0, -1) + '-value').value.trim();
+            const caseSensitive = document.getElementById(target.slice(0, -1) + '-case').checked;
+            
+            if (!value) {
+                alert('Please enter a value');
+                return;
+            }
+            
+            fetch('/api/filters/add', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    category: currentCategory,
+                    target: target,
+                    type: type,
+                    match: match,
+                    value: value,
+                    case_sensitive: caseSensitive
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                filtersData = data.filters;
+                renderCurrentFilters();
+                document.getElementById(target.slice(0, -1) + '-value').value = '';
+            });
+        }
+        
+        function deleteFilter(target, index) {
+            fetch('/api/filters/delete', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    category: currentCategory,
+                    target: target,
+                    index: index
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                filtersData = data.filters;
+                renderCurrentFilters();
+            });
+        }
+        
+        function quickAddGroup(group, filterType) {
+            document.getElementById('group-type').value = filterType;
+            document.getElementById('group-match').value = 'exact';
+            document.getElementById('group-value').value = group;
+            addFilter('groups');
+        }
+        
+        function loadGroups() {
+            const list = document.getElementById('groups-list');
+            list.style.display = 'block';
+            list.innerHTML = '<div class="loading">Loading groups...</div>';
+            
+            fetch('/groups?type=' + currentCategory)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.groups && data.groups.length > 0) {
+                        list.innerHTML = data.groups.map(g => 
+                            `<div class="quick-item">
+                                <span>${escapeHtml(g)}</span>
+                                <span class="quick-buttons">
+                                    <button class="btn-include" onclick="quickAddGroup('${g.replace(/'/g, "\\'")}', 'include')" title="Include">✓</button>
+                                    <button class="btn-exclude" onclick="quickAddGroup('${g.replace(/'/g, "\\'")}', 'exclude')" title="Exclude">✗</button>
+                                </span>
+                            </div>`
+                        ).join('');
+                    } else {
+                        list.innerHTML = '<div class="loading">No groups found. Check credentials.</div>';
+                    }
+                })
+                .catch(() => {
+                    list.innerHTML = '<div class="loading">Error loading groups</div>';
+                });
+        }
+        
+        let searchTimeout;
+        function searchChannels(query) {
+            clearTimeout(searchTimeout);
+            const list = document.getElementById('channels-list');
+            
+            if (query.length < 2) {
+                list.style.display = 'none';
+                return;
+            }
+            
+            list.style.display = 'block';
+            list.innerHTML = '<div class="loading">Searching...</div>';
+            
+            searchTimeout = setTimeout(() => {
+                fetch('/channels?type=' + currentCategory + '&search=' + encodeURIComponent(query))
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.channels && data.channels.length > 0) {
+                            list.innerHTML = data.channels.map(c => 
+                                `<div class="quick-item">
+                                    <span>${escapeHtml(c)}</span>
+                                    <span class="quick-buttons">
+                                        <button class="btn-include" onclick="quickAddChannel('${c.replace(/'/g, "\\'")}', 'include')" title="Include">✓</button>
+                                        <button class="btn-exclude" onclick="quickAddChannel('${c.replace(/'/g, "\\'")}', 'exclude')" title="Exclude">✗</button>
+                                    </span>
+                                </div>`
+                            ).join('');
+                        } else {
+                            list.innerHTML = '<div class="loading">No channels found</div>';
+                        }
+                    })
+                    .catch(() => {
+                        list.innerHTML = '<div class="loading">Error searching channels</div>';
+                    });
+            }, 300);
+        }
+        
+        function quickAddChannel(channel, filterType) {
+            document.getElementById('channel-type').value = filterType;
+            document.getElementById('channel-match').value = 'exact';
+            document.getElementById('channel-value').value = channel;
+            addFilter('channels');
+        }
+        
+        function loadPreview() {
+            const box = document.getElementById('preview-box');
+            box.innerHTML = '<div class="loading">Generating preview...</div>';
+            
+            fetch('/preview')
+                .then(r => r.json())
+                .then(data => {
+                    let html = `<div class="stats-line">${data.stats || 'No stats available'}</div>`;
+                    html += '<div class="channel-list">';
+                    if (data.sample_channels && data.sample_channels.length > 0) {
+                        html += '<strong>Sample channels:</strong><br>';
+                        html += data.sample_channels.map(c => escapeHtml(c)).join('<br>');
+                    }
+                    html += '</div>';
+                    box.innerHTML = html;
+                })
+                .catch(() => {
+                    box.innerHTML = '<div class="loading">Error loading preview</div>';
+                });
+        }
+        
+        // Handle Enter key in filter inputs
+        document.querySelectorAll('.filter-builder input[type="text"]').forEach(input => {
+            input.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const target = this.id.includes('group') ? 'groups' : 'channels';
+                    addFilter(target);
+                }
+            });
+        });
+    </script>
+</body>
+</html>

@@ -134,10 +134,30 @@ http://localhost:8080
 
 | Endpoint | Description |
 |----------|-------------|
-| `/player_api.php` | Full Xtream API with filtering |
+| `/player_api.php` | Xtream API with filtering applied |
 | `/live/{user}/{pass}/{id}` | Live stream redirect |
 | `/movie/{user}/{pass}/{id}` | Movie stream redirect |
 | `/series/{user}/{pass}/{id}` | Series stream redirect |
+
+### Unfiltered Routes (Full Catalog)
+
+These routes bypass all filters and provide access to the complete catalog. Useful for devices that need the full content library.
+
+| Endpoint | Description |
+|----------|-------------|
+| `/full/player_api.php` | Unfiltered Xtream API (full catalog) |
+| `/full/live/{user}/{pass}/{id}` | Live stream redirect (unfiltered) |
+| `/full/movie/{user}/{pass}/{id}` | Movie stream redirect (unfiltered) |
+| `/full/series/{user}/{pass}/{id}` | Series stream redirect (unfiltered) |
+| `/playlist_full.m3u` | Unfiltered M3U playlist |
+| `/full.m3u` | Alias for unfiltered M3U playlist |
+
+**Usage example for IPTV players (unfiltered):**
+```
+Server: http://YOUR_SERVER_IP:8080/full
+Username: (from your provider)
+Password: (from your provider)
+```
 
 ### Web Interface & Management
 

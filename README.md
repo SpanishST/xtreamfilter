@@ -3,7 +3,7 @@
 [![Docker Hub](https://img.shields.io/docker/pulls/spanishst/xtreamfilter.svg)](https://hub.docker.com/r/spanishst/xtreamfilter)
 [![Docker Image Size](https://img.shields.io/docker/image-size/spanishst/xtreamfilter/latest)](https://hub.docker.com/r/spanishst/xtreamfilter)
 
-A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Series) with advanced per-category rules and caching.
+A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Series) from multiple sources with advanced per-category rules and caching.
 
 ## Screenshots
 
@@ -14,9 +14,11 @@ A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Se
 ## Features
 
 - 📺 **Full Xtream Codes API Proxy** - Works with any Xtream-compatible player (TiviMate, XCIPTV, etc.)
+- 🔗 **Multi-Source Support** - Combine multiple Xtream providers into a single unified playlist
 - 🎬 **Live TV, Movies & Series** - Filter all content types independently
-- 🔧 **Web-based Configuration** - Easy UI to manage settings and filters
-- 🎯 **Advanced Filtering** - Include/exclude filters with multiple match types
+- 🔧 **Web-based Configuration** - Easy UI to manage sources, settings and filters
+- 🎯 **Advanced Filtering** - Include/exclude filters with multiple match types per source
+- 🏷️ **Source Prefixing** - Optionally prefix group names to identify content origin
 - 🔄 **Smart Caching** - Background refresh with configurable TTL
 - 💾 **Persistent Cache** - Survives container restarts
 - 🐳 **Docker Ready** - Easy deployment with docker-compose
@@ -78,9 +80,9 @@ docker-compose up --build -d
 http://localhost:8080
 ```
 
-2. **Configure your Xtream credentials** in the web interface
+2. **Configure your Xtream sources** in the web interface (you can add multiple providers)
 
-4. **Add your filters** for Live TV, VOD, and Series categories
+4. **Add your filters** for each source - Live TV, VOD, and Series categories
 
 5. **Connect your IPTV player:**
 
@@ -95,6 +97,37 @@ http://localhost:8080
    ```
    http://YOUR_SERVER_IP:8080/playlist.m3u
    ```
+
+## Multi-Source Support
+
+XtreamFilter allows you to combine multiple Xtream Codes providers into a single unified playlist.
+
+### Adding Sources
+
+1. Open the web UI and go to the **Sources** section
+2. Click **Add Source** to add a new provider
+3. Enter the source details:
+   - **Name**: Friendly name for the source (e.g., "Provider A")
+   - **Host**: The Xtream server URL (e.g., `http://provider.example.com`)
+   - **Username/Password**: Your credentials for this provider
+   - **Prefix** (optional): Text to prepend to group names (e.g., `[ProvA]`)
+   - **Enabled**: Toggle to enable/disable this source
+
+### Source Prefixing
+
+When you have multiple sources, it can be helpful to know which content comes from which provider. The **Prefix** option prepends text to all group names from that source.
+
+**Example:**
+- Source 1 with prefix `[US]` → Groups become `[US] Sports`, `[US] Movies`, etc.
+- Source 2 with prefix `[UK]` → Groups become `[UK] Sports`, `[UK] News`, etc.
+- Source 3 with no prefix → Groups remain unchanged, seamlessly merged
+
+### Per-Source Filtering
+
+Each source has its own independent filter configuration:
+- Filters are applied before merging content from all sources
+- You can have different include/exclude rules per provider
+- Select a source in the UI to edit its specific filters
 
 ## Filter System
 
@@ -116,6 +149,16 @@ http://localhost:8080
 | `not_contains` | Matches if name does NOT contain value | `XXX` excludes adult content |
 | `exact` | Exact match only | `TF1` matches only "TF1" |
 | `regex` | Regular expression pattern | `.*\|FR\|.*` for regex patterns |
+| `all` | Matches everything | Use with "Exclude All" to start fresh |
+
+### Exclude All Feature
+
+The **Exclude All** option lets you start with a clean slate by excluding everything, then adding include rules to whitelist specific content:
+
+1. Click "Exclude All Groups" or "Exclude All Channels"
+2. Add "Include" filters for the specific content you want to keep
+
+This is useful when you only want a small subset of content from a large catalog.
 
 ### Filter Examples
 
@@ -168,14 +211,28 @@ Password: (from your provider)
 | `/get.php` | Alternative M3U URL |
 | `/health` | Health check |
 
+### Source Management API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/sources` | GET | List all sources |
+| `/api/sources` | POST | Add a new source |
+| `/api/sources/<id>` | GET | Get a specific source |
+| `/api/sources/<id>` | PUT | Update a source |
+| `/api/sources/<id>` | DELETE | Delete a source |
+| `/api/sources/<id>/filters` | GET | Get filters for a source |
+| `/api/sources/<id>/filters` | POST | Update all filters for a source |
+| `/api/sources/<id>/filters/add` | POST | Add a filter to a source |
+| `/api/sources/<id>/filters/delete` | POST | Delete a filter from a source |
+
 ### Filter Management API
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/filters` | GET | Get all filters |
-| `/api/filters` | POST | Update all filters |
-| `/api/filters/add` | POST | Add a single filter |
-| `/api/filters/delete` | POST | Delete a filter |
+| `/api/filters` | GET | Get all filters (legacy, first source) |
+| `/api/filters` | POST | Update all filters (legacy, first source) |
+| `/api/filters/add` | POST | Add a single filter (legacy) |
+| `/api/filters/delete` | POST | Delete a filter (legacy) |
 
 ### Cache Management API
 
@@ -209,21 +266,45 @@ Configuration is stored in `data/config.json` and includes:
 
 ```json
 {
-  "server": "http://provider.example.com",
-  "username": "your_username",
-  "password": "your_password",
+  "sources": [
+    {
+      "id": "source_1",
+      "name": "Provider A",
+      "host": "http://provider-a.example.com",
+      "username": "user1",
+      "password": "pass1",
+      "enabled": true,
+      "prefix": "[A] ",
+      "filters": {
+        "live": { "groups": [], "channels": [] },
+        "vod": { "groups": [], "channels": [] },
+        "series": { "groups": [], "channels": [] }
+      }
+    },
+    {
+      "id": "source_2",
+      "name": "Provider B",
+      "host": "http://provider-b.example.com",
+      "username": "user2",
+      "password": "pass2",
+      "enabled": true,
+      "prefix": "",
+      "filters": {
+        "live": { "groups": [], "channels": [] },
+        "vod": { "groups": [], "channels": [] },
+        "series": { "groups": [], "channels": [] }
+      }
+    }
+  ],
   "content_types": {
     "live": true,
     "vod": true,
     "series": true
-  },
-  "filters": {
-    "live": { "groups": [], "channels": [] },
-    "vod": { "groups": [], "channels": [] },
-    "series": { "groups": [], "channels": [] }
   }
 }
 ```
+
+> **Note:** Legacy single-source configurations (using `xtream` key) are automatically migrated to the new multi-source format on startup.
 
 ## Docker Compose
 

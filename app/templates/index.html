@@ -677,35 +677,19 @@
     <div class="container">
         <h1>📺 XtreamFilter</h1>
         
-        <!-- Playlist URL Card -->
+        <!-- Connection Info Card -->
         <div class="card">
             <h2>Connection Info</h2>
+            <p style="color: #888; font-size: 0.9em; margin-bottom: 15px;">
+                Each source has its own dedicated route. Configure a route in the source settings to get connection URLs.
+            </p>
             
-            <h3 style="color: #2ed573; margin-bottom: 15px; font-size: 1em;">🎯 Filtered (with your rules applied)</h3>
-            <p style="margin-bottom: 10px; color: #888; font-size: 0.9em;">📺 <strong>Xtream Codes API</strong> (recommended for IPTV apps - supports Live, VOD & Series):</p>
-            <div class="url-box" style="margin-bottom: 15px;">
-                <code id="xtream-url">http://YOUR_SERVER:8080</code>
-                <button class="copy-btn" onclick="copyToClipboard('xtream-url')">Copy</button>
-            </div>
-            <p style="margin-bottom: 10px; color: #888; font-size: 0.9em;">📄 <strong>M3U Playlist</strong> (Live TV only, for basic players):</p>
-            <div class="url-box">
-                <code id="playlist-url">http://YOUR_SERVER:8080/playlist.m3u</code>
-                <button class="copy-btn" onclick="copyToClipboard('playlist-url')">Copy</button>
+            <div id="connection-info-list">
+                <!-- Connection info per source will be rendered here by JavaScript -->
+                <p style="color: #666; font-style: italic;">Loading sources...</p>
             </div>
             
-            <h3 style="color: #ffa502; margin: 25px 0 15px 0; font-size: 1em;">📦 Unfiltered (full catalog)</h3>
-            <p style="margin-bottom: 10px; color: #888; font-size: 0.9em;">📺 <strong>Xtream Codes API</strong> (full access without filters):</p>
-            <div class="url-box" style="margin-bottom: 15px;">
-                <code id="xtream-url-full">http://YOUR_SERVER:8080/full</code>
-                <button class="copy-btn" onclick="copyToClipboard('xtream-url-full')">Copy</button>
-            </div>
-            <p style="margin-bottom: 10px; color: #888; font-size: 0.9em;">📄 <strong>M3U Playlist</strong> (full catalog):</p>
-            <div class="url-box">
-                <code id="playlist-url-full">http://YOUR_SERVER:8080/playlist_full.m3u</code>
-                <button class="copy-btn" onclick="copyToClipboard('playlist-url-full')">Copy</button>
-            </div>
-            
-            <p style="margin: 15px 0 5px 0; color: #666; font-size: 0.85em;">💡 Username/Password: use anything (e.g., <code>user</code> / <code>pass</code>)</p>
+            <p style="margin: 15px 0 5px 0; color: #666; font-size: 0.85em;">💡 Username/Password: use your provider credentials</p>
         </div>
         
         <!-- Cache Status Card -->
@@ -1010,12 +994,6 @@
         let sourcesData = [];  // All sources
         let filtersData = { live: {groups: [], channels: []}, vod: {groups: [], channels: []}, series: {groups: [], channels: []} };
         
-        // Initialize URLs
-        document.getElementById('playlist-url').textContent = window.location.origin + '/playlist.m3u';
-        document.getElementById('xtream-url').textContent = window.location.origin;
-        document.getElementById('playlist-url-full').textContent = window.location.origin + '/playlist_full.m3u';
-        document.getElementById('xtream-url-full').textContent = window.location.origin + '/full';
-        
         // Load sources, filters and cache status on page load
         loadSources();
         loadCacheStatus();
@@ -1033,6 +1011,7 @@
                 .then(data => {
                     sourcesData = data.sources || [];
                     renderSources();
+                    renderConnectionInfo();
                     updateFilterSourceSelect();
                 })
                 .catch(() => {});
@@ -1049,12 +1028,14 @@
             for (const source of sourcesData) {
                 const statusIcon = source.enabled ? '✅' : '⏸️';
                 const prefixBadge = source.prefix ? `<span class="group-badge">Prefix: ${source.prefix}</span>` : '';
+                const routeBadge = source.route ? `<span class="group-badge" style="background: #1a5e3d;">Route: /${source.route}/</span>` : '';
                 html += `
                     <div class="source-item" style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid rgba(255,255,255,0.1);">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
                             <div>
                                 <strong style="color: #00d4ff;">${statusIcon} ${source.name || 'Unnamed'}</strong>
                                 ${prefixBadge}
+                                ${routeBadge}
                             </div>
                             <div style="display: flex; gap: 5px;">
                                 <button class="btn btn-secondary btn-sm" onclick="editSource('${source.id}')">✏️ Edit</button>
@@ -1063,6 +1044,45 @@
                         </div>
                         <div style="color: #888; font-size: 0.85em;">
                             ${source.host || 'No host configured'}
+                        </div>
+                    </div>
+                `;
+            }
+            container.innerHTML = html;
+        }
+        
+        function renderConnectionInfo() {
+            const container = document.getElementById('connection-info-list');
+            const baseUrl = window.location.origin;
+            
+            const sourcesWithRoutes = sourcesData.filter(s => s.route);
+            
+            if (sourcesWithRoutes.length === 0) {
+                container.innerHTML = '<p style="color: #ffa502; font-style: italic;">⚠️ No sources have a route configured. Add a route to a source to get connection URLs.</p>';
+                return;
+            }
+            
+            let html = '';
+            for (const source of sourcesWithRoutes) {
+                const filteredUrl = `${baseUrl}/${source.route}`;
+                const fullUrl = `${baseUrl}/${source.route}/full`;
+                const filteredId = `conn-filtered-${source.id}`;
+                const fullId = `conn-full-${source.id}`;
+                
+                html += `
+                    <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid rgba(255,255,255,0.1);">
+                        <h3 style="color: #00d4ff; margin: 0 0 12px 0; font-size: 1em;">📡 ${source.name || 'Unnamed'}</h3>
+                        
+                        <p style="color: #2ed573; margin: 0 0 8px 0; font-size: 0.9em;">🎯 Filtered (with filters applied):</p>
+                        <div class="url-box" style="margin-bottom: 12px;">
+                            <code id="${filteredId}">${filteredUrl}</code>
+                            <button class="copy-btn" onclick="copyToClipboard('${filteredId}')">Copy</button>
+                        </div>
+                        
+                        <p style="color: #ffa502; margin: 0 0 8px 0; font-size: 0.9em;">📦 Unfiltered (full catalog):</p>
+                        <div class="url-box">
+                            <code id="${fullId}">${fullUrl}</code>
+                            <button class="copy-btn" onclick="copyToClipboard('${fullId}')">Copy</button>
                         </div>
                     </div>
                 `;
@@ -1156,6 +1176,11 @@
                                 <div class="hint">Prefix added to all group names from this source</div>
                             </div>
                             <div class="form-group">
+                                <label>Dedicated Route (optional)</label>
+                                <input type="text" id="edit-source-route" value="${source.route || ''}" placeholder="e.g., smarters">
+                                <div class="hint">If set, this source will be available at /<em>route</em>/player_api.php (no ID conflicts)</div>
+                            </div>
+                            <div class="form-group">
                                 <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                                     <input type="checkbox" id="edit-source-enabled" ${source.enabled ? 'checked' : ''} style="width: 18px; height: 18px;">
                                     <span>Source Enabled</span>
@@ -1184,6 +1209,7 @@
                 username: document.getElementById('edit-source-username').value,
                 password: document.getElementById('edit-source-password').value,
                 prefix: document.getElementById('edit-source-prefix').value,
+                route: document.getElementById('edit-source-route').value,
                 enabled: document.getElementById('edit-source-enabled').checked
             };
             

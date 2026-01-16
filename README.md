@@ -100,7 +100,7 @@ http://localhost:8080
 
 ## Multi-Source Support
 
-XtreamFilter allows you to combine multiple Xtream Codes providers into a single unified playlist.
+XtreamFilter allows you to manage multiple Xtream Codes providers, each with its own dedicated endpoint.
 
 ### Adding Sources
 
@@ -111,21 +111,52 @@ XtreamFilter allows you to combine multiple Xtream Codes providers into a single
    - **Host**: The Xtream server URL (e.g., `http://provider.example.com`)
    - **Username/Password**: Your credentials for this provider
    - **Prefix** (optional): Text to prepend to group names (e.g., `[ProvA]`)
+   - **Dedicated Route** (recommended): URL path for this source (e.g., `providera`)
    - **Enabled**: Toggle to enable/disable this source
+
+### Dedicated Source Routes
+
+Each source must have its own **dedicated route** to avoid ID conflicts between providers. When two sources have content with the same ID (common with series), using separate routes ensures correct playback.
+
+1. Edit a source in the web UI
+2. Set the **Dedicated Route** field (e.g., `smarters` or `strong`)
+3. Use the source-specific endpoint in your IPTV player:
+
+**Filtered endpoint (with your filter rules applied):**
+```
+Server: http://YOUR_SERVER_IP:8080/<route>
+Username: (from your provider)
+Password: (from your provider)
+```
+
+**Unfiltered endpoint (full catalog from this source):**
+```
+Server: http://YOUR_SERVER_IP:8080/<route>/full
+Username: (from your provider)
+Password: (from your provider)
+```
+
+**Example setup:**
+- Source "Smarters" with route `smarters`:
+  - Filtered: `http://YOUR_SERVER_IP:8080/smarters`
+  - Unfiltered: `http://YOUR_SERVER_IP:8080/smarters/full`
+- Source "Strong" with route `strong`:
+  - Filtered: `http://YOUR_SERVER_IP:8080/strong`
+  - Unfiltered: `http://YOUR_SERVER_IP:8080/strong/full`
+
+> **Note:** The root `/player_api.php` redirects to the first configured source. Always use dedicated routes for clarity.
 
 ### Source Prefixing
 
-When you have multiple sources, it can be helpful to know which content comes from which provider. The **Prefix** option prepends text to all group names from that source.
+The **Prefix** option prepends text to all group names from a source, helping identify content origin.
 
 **Example:**
-- Source 1 with prefix `[US]` → Groups become `[US] Sports`, `[US] Movies`, etc.
-- Source 2 with prefix `[UK]` → Groups become `[UK] Sports`, `[UK] News`, etc.
-- Source 3 with no prefix → Groups remain unchanged, seamlessly merged
+- Source with prefix `[US]` → Groups become `[US] Sports`, `[US] Movies`, etc.
 
 ### Per-Source Filtering
 
 Each source has its own independent filter configuration:
-- Filters are applied before merging content from all sources
+- Filters are applied per-source
 - You can have different include/exclude rules per provider
 - Select a source in the UI to edit its specific filters
 
@@ -173,34 +204,43 @@ This is useful when you only want a small subset of content from a large catalog
 
 ## API Endpoints
 
-### Xtream Codes API (for IPTV players)
+### Per-Source Dedicated Routes (Required)
+
+Each source with a dedicated route exposes these endpoints:
 
 | Endpoint | Description |
 |----------|-------------|
-| `/player_api.php` | Xtream API with filtering applied |
-| `/live/{user}/{pass}/{id}` | Live stream redirect |
-| `/movie/{user}/{pass}/{id}` | Movie stream redirect |
-| `/series/{user}/{pass}/{id}` | Series stream redirect |
+| `/<route>/player_api.php` | Filtered Xtream API for this source |
+| `/<route>/full/player_api.php` | Unfiltered Xtream API for this source |
+| `/<route>/live/{user}/{pass}/{id}` | Live stream redirect |
+| `/<route>/movie/{user}/{pass}/{id}` | Movie stream redirect |
+| `/<route>/series/{user}/{pass}/{id}` | Series stream redirect |
+| `/<route>/full/live/{user}/{pass}/{id}` | Live stream (unfiltered path) |
+| `/<route>/full/movie/{user}/{pass}/{id}` | Movie stream (unfiltered path) |
+| `/<route>/full/series/{user}/{pass}/{id}` | Series stream (unfiltered path) |
 
-### Unfiltered Routes (Full Catalog)
-
-These routes bypass all filters and provide access to the complete catalog. Useful for devices that need the full content library.
-
-| Endpoint | Description |
-|----------|-------------|
-| `/full/player_api.php` | Unfiltered Xtream API (full catalog) |
-| `/full/live/{user}/{pass}/{id}` | Live stream redirect (unfiltered) |
-| `/full/movie/{user}/{pass}/{id}` | Movie stream redirect (unfiltered) |
-| `/full/series/{user}/{pass}/{id}` | Series stream redirect (unfiltered) |
-| `/playlist_full.m3u` | Unfiltered M3U playlist |
-| `/full.m3u` | Alias for unfiltered M3U playlist |
-
-**Usage example for IPTV players (unfiltered):**
+**Filtered usage (with filter rules applied):**
 ```
-Server: http://YOUR_SERVER_IP:8080/full
+Server: http://YOUR_SERVER_IP:8080/smarters
 Username: (from your provider)
 Password: (from your provider)
 ```
+
+**Unfiltered usage (full catalog):**
+```
+Server: http://YOUR_SERVER_IP:8080/smarters/full
+Username: (from your provider)
+Password: (from your provider)
+```
+
+### Legacy Root Endpoints
+
+These endpoints redirect to the first configured source:
+
+| Endpoint | Description |
+|----------|-------------|
+| `/player_api.php` | Redirects to first source |
+| `/full/player_api.php` | Redirects to first source (full) |
 
 ### Web Interface & Management
 
@@ -275,6 +315,7 @@ Configuration is stored in `data/config.json` and includes:
       "password": "pass1",
       "enabled": true,
       "prefix": "[A] ",
+      "route": "providera",
       "filters": {
         "live": { "groups": [], "channels": [] },
         "vod": { "groups": [], "channels": [] },
@@ -289,6 +330,7 @@ Configuration is stored in `data/config.json` and includes:
       "password": "pass2",
       "enabled": true,
       "prefix": "",
+      "route": "",
       "filters": {
         "live": { "groups": [], "channels": [] },
         "vod": { "groups": [], "channels": [] },

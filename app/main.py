@@ -904,7 +904,7 @@ def update_source(source_id):
             if "enabled" in data:
                 source["enabled"] = data["enabled"]
             if "prefix" in data:
-                source["prefix"] = data["prefix"]
+                source["prefix"] = data["prefix"] if data["prefix"] else ""
             if "route" in data:
                 source["route"] = data["route"]
             if "filters" in data:

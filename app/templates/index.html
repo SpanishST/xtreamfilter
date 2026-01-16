@@ -1176,9 +1176,9 @@
                                 <div class="hint">Prefix added to all group names from this source</div>
                             </div>
                             <div class="form-group">
-                                <label>Dedicated Route (optional)</label>
-                                <input type="text" id="edit-source-route" value="${source.route || ''}" placeholder="e.g., smarters">
-                                <div class="hint">If set, this source will be available at /<em>route</em>/player_api.php (no ID conflicts)</div>
+                                <label>Dedicated Route <span style="color: #ff6b6b;">*</span></label>
+                                <input type="text" id="edit-source-route" value="${source.route || ''}" placeholder="e.g., smarters" required>
+                                <div class="hint">This source will be available at /<em>route</em>/player_api.php</div>
                             </div>
                             <div class="form-group">
                                 <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
@@ -1203,13 +1203,19 @@
         }
         
         function saveSourceEdit(sourceId) {
+            const route = document.getElementById('edit-source-route').value.trim();
+            if (!route) {
+                alert('Route is required!');
+                return;
+            }
+            
             const data = {
                 name: document.getElementById('edit-source-name').value,
                 host: document.getElementById('edit-source-host').value,
                 username: document.getElementById('edit-source-username').value,
                 password: document.getElementById('edit-source-password').value,
                 prefix: document.getElementById('edit-source-prefix').value,
-                route: document.getElementById('edit-source-route').value,
+                route: route,
                 enabled: document.getElementById('edit-source-enabled').checked
             };
             

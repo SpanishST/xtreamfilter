@@ -358,7 +358,7 @@
         }
         
         .quick-list {
-            max-height: 200px;
+            max-height: 400px;
             overflow-y: auto;
             background: rgba(0, 0, 0, 0.2);
             border-radius: 8px;
@@ -366,14 +366,19 @@
         }
         
         .quick-item {
-            padding: 8px 12px;
+            padding: 10px 15px;
             cursor: pointer;
             border-radius: 5px;
-            font-size: 0.9em;
+            font-size: 0.95em;
             transition: background 0.2s;
             display: flex;
             justify-content: space-between;
             align-items: center;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        
+        .quick-item:last-child {
+            border-bottom: none;
         }
         
         .quick-item:hover {
@@ -672,35 +677,19 @@
     <div class="container">
         <h1>📺 XtreamFilter</h1>
         
-        <!-- Playlist URL Card -->
+        <!-- Connection Info Card -->
         <div class="card">
             <h2>Connection Info</h2>
+            <p style="color: #888; font-size: 0.9em; margin-bottom: 15px;">
+                Each source has its own dedicated route. Configure a route in the source settings to get connection URLs.
+            </p>
             
-            <h3 style="color: #2ed573; margin-bottom: 15px; font-size: 1em;">🎯 Filtered (with your rules applied)</h3>
-            <p style="margin-bottom: 10px; color: #888; font-size: 0.9em;">📺 <strong>Xtream Codes API</strong> (recommended for IPTV apps - supports Live, VOD & Series):</p>
-            <div class="url-box" style="margin-bottom: 15px;">
-                <code id="xtream-url">http://YOUR_SERVER:8080</code>
-                <button class="copy-btn" onclick="copyToClipboard('xtream-url')">Copy</button>
-            </div>
-            <p style="margin-bottom: 10px; color: #888; font-size: 0.9em;">📄 <strong>M3U Playlist</strong> (Live TV only, for basic players):</p>
-            <div class="url-box">
-                <code id="playlist-url">http://YOUR_SERVER:8080/playlist.m3u</code>
-                <button class="copy-btn" onclick="copyToClipboard('playlist-url')">Copy</button>
+            <div id="connection-info-list">
+                <!-- Connection info per source will be rendered here by JavaScript -->
+                <p style="color: #666; font-style: italic;">Loading sources...</p>
             </div>
             
-            <h3 style="color: #ffa502; margin: 25px 0 15px 0; font-size: 1em;">📦 Unfiltered (full catalog)</h3>
-            <p style="margin-bottom: 10px; color: #888; font-size: 0.9em;">📺 <strong>Xtream Codes API</strong> (full access without filters):</p>
-            <div class="url-box" style="margin-bottom: 15px;">
-                <code id="xtream-url-full">http://YOUR_SERVER:8080/full</code>
-                <button class="copy-btn" onclick="copyToClipboard('xtream-url-full')">Copy</button>
-            </div>
-            <p style="margin-bottom: 10px; color: #888; font-size: 0.9em;">📄 <strong>M3U Playlist</strong> (full catalog):</p>
-            <div class="url-box">
-                <code id="playlist-url-full">http://YOUR_SERVER:8080/playlist_full.m3u</code>
-                <button class="copy-btn" onclick="copyToClipboard('playlist-url-full')">Copy</button>
-            </div>
-            
-            <p style="margin: 15px 0 5px 0; color: #666; font-size: 0.85em;">💡 Username/Password: use anything (e.g., <code>user</code> / <code>pass</code>)</p>
+            <p style="margin: 15px 0 5px 0; color: #666; font-size: 0.85em;">💡 Username/Password: use your provider credentials</p>
         </div>
         
         <!-- Cache Status Card -->
@@ -724,6 +713,21 @@
                     <div class="stat-label">Status</div>
                 </div>
             </div>
+            
+            <!-- Progress bar (hidden by default) -->
+            <div id="refresh-progress-container" style="display: none; margin-top: 15px;">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                    <span id="refresh-progress-step" style="color: #00d4ff; font-size: 0.85em;">Initializing...</span>
+                    <span id="refresh-progress-percent" style="color: #2ed573; font-size: 0.85em;">0%</span>
+                </div>
+                <div style="background: rgba(255,255,255,0.1); border-radius: 4px; height: 8px; overflow: hidden;">
+                    <div id="refresh-progress-bar" style="background: linear-gradient(90deg, #00d4ff, #2ed573); height: 100%; width: 0%; transition: width 0.3s ease;"></div>
+                </div>
+                <div style="margin-top: 5px; color: #888; font-size: 0.8em;">
+                    Source <span id="refresh-progress-source">0</span> of <span id="refresh-progress-total">0</span>
+                </div>
+            </div>
+            
             <div style="margin-top: 15px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
                 <span style="color: #888; font-size: 0.85em;">Last refresh: <span id="cache-last-refresh">Never</span></span>
                 <span style="color: #888; font-size: 0.85em;">| TTL: <span id="cache-ttl">-</span>s</span>
@@ -731,26 +735,26 @@
             </div>
         </div>
         
-        <!-- Credentials Card -->
+        <!-- Sources Card -->
+        <div class="card">
+            <h2>📡 Sources</h2>
+            <p style="color: #888; font-size: 0.9em; margin-bottom: 15px;">
+                Configure multiple Xtream sources. Each source can have its own filters and optional group prefix.
+            </p>
+            
+            <div id="sources-list">
+                <!-- Sources will be rendered here by JavaScript -->
+            </div>
+            
+            <button type="button" class="btn btn-primary" onclick="addNewSource()" style="margin-top: 15px;">
+                ➕ Add New Source
+            </button>
+        </div>
+        
+        <!-- Content Types Card -->
         <form method="POST" action="/save">
             <div class="card">
-                <h2>Xtream Credentials</h2>
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
-                    <div class="form-group">
-                        <label>Server URL</label>
-                        <input type="text" name="host" value="{{ config.xtream.host }}" placeholder="http://example.com:8080">
-                    </div>
-                    <div class="form-group">
-                        <label>Username</label>
-                        <input type="text" name="username" value="{{ config.xtream.username }}" placeholder="username">
-                    </div>
-                    <div class="form-group">
-                        <label>Password</label>
-                        <input type="password" name="password" value="{{ config.xtream.password }}" placeholder="password">
-                    </div>
-                </div>
-                
-                <h3 style="color: #00d4ff; margin: 20px 0 15px 0; font-size: 1.1em;">Content Types</h3>
+                <h2>Content Types</h2>
                 <div style="display: flex; gap: 30px; flex-wrap: wrap;">
                     <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                         <input type="checkbox" name="content_live" {% if config.content_types.live %}checked{% endif %} style="width: 18px; height: 18px;">
@@ -769,13 +773,26 @@
                     ⚠️ Note: Series can take longer to load as each series requires an additional API call to fetch episodes.
                 </p>
                 
-                <button type="submit" class="btn btn-primary btn-sm" style="margin-top: 15px;">Save Credentials</button>
+                <button type="submit" class="btn btn-primary btn-sm" style="margin-top: 15px;">Save Settings</button>
             </div>
         </form>
         
-        <!-- Filters Card -->
+        <!-- Filters Card - Now per source -->
         <div class="card">
             <h2>Filter Rules</h2>
+            <p style="color: #888; font-size: 0.9em; margin-bottom: 15px;">
+                Filters are configured per source. Select a source to edit its filters.
+            </p>
+            
+            <!-- Source Selector for filters -->
+            <div class="form-group" style="margin-bottom: 15px;">
+                <label>Select Source</label>
+                <select id="filter-source-select" onchange="onFilterSourceChange()">
+                    <option value="">-- Select a source --</option>
+                </select>
+            </div>
+            
+            <div id="filter-editor-container" style="display: none;">
             
             <!-- Content Type Selector -->
             <div class="tabs" style="margin-bottom: 15px;">
@@ -809,6 +826,7 @@
                             <option value="ends_with">Ends With</option>
                             <option value="exact">Exact Match</option>
                             <option value="regex">Regex</option>
+                            <option value="all">All (Match Everything)</option>
                         </select>
                     </div>
                     <div class="form-group">
@@ -828,14 +846,17 @@
                     </div>
                 </div>
                 
+                <div style="margin-bottom: 15px;">
+                    <button type="button" class="btn btn-danger btn-sm" onclick="addExcludeAllFilter('groups')" title="Exclude all groups, then use Include rules to whitelist">⛔ Exclude All Groups</button>
+                </div>
+                
                 <div class="filter-list" id="groups-filters-list">
                     <div class="empty-state">No group filters configured</div>
                 </div>
                 
                 <div class="quick-add">
-                    <div class="quick-add-title">Quick Add - Click to exclude a group:</div>
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="loadGroups()">Load Available Groups</button>
-                    <div class="quick-list" id="groups-list" style="display: none; margin-top: 10px;"></div>
+                    <div class="quick-add-title">Quick Add - Browse available groups:</div>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="openGroupsBrowser()">📁 Browse Groups</button>
                 </div>
             </div>
             
@@ -858,6 +879,7 @@
                             <option value="ends_with">Ends With</option>
                             <option value="exact">Exact Match</option>
                             <option value="regex">Regex</option>
+                            <option value="all">All (Match Everything)</option>
                         </select>
                     </div>
                     <div class="form-group">
@@ -877,6 +899,10 @@
                     </div>
                 </div>
                 
+                <div style="margin-bottom: 15px;">
+                    <button type="button" class="btn btn-danger btn-sm" onclick="addExcludeAllFilter('channels')" title="Exclude all channels, then use Include rules to whitelist">⛔ Exclude All Channels</button>
+                </div>
+                
                 <div class="filter-list" id="channels-filters-list">
                     <div class="empty-state">No channel filters configured</div>
                 </div>
@@ -890,6 +916,8 @@
                     <div class="quick-list" id="channels-list" style="display: none; margin-top: 10px;"></div>
                 </div>
             </div>
+            
+            </div><!-- End filter-editor-container -->
         </div>
         
         <!-- Preview Card -->
@@ -903,6 +931,27 @@
             <div class="actions">
                 <a href="/playlist.m3u" class="btn btn-primary" target="_blank">📥 Download Playlist</a>
                 <a href="/playlist.m3u" class="btn btn-secondary" target="_blank">👁️ View Raw M3U</a>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Groups Browser Modal -->
+    <div class="modal" id="groups-browser-modal">
+        <div class="modal-content" style="max-width: 700px;">
+            <div class="modal-header">
+                <h3>📁 Browse Groups - <span id="groups-browser-type-label">Live TV</span></h3>
+                <button class="modal-close" onclick="closeGroupsBrowser()">✕</button>
+            </div>
+            <div class="modal-body" style="padding: 20px;">
+                <div style="margin-bottom: 15px;">
+                    <input type="text" id="groups-search" placeholder="🔍 Search groups..." onkeyup="filterGroupsList()" style="width: 100%;">
+                </div>
+                <div class="quick-list" id="groups-browser-list" style="max-height: 450px;">
+                    <div class="loading">Loading groups...</div>
+                </div>
+                <div style="margin-top: 15px; color: #888; font-size: 0.85em;">
+                    <span id="groups-count">0</span> groups found. Click ✓ to include or ✗ to exclude.
+                </div>
             </div>
         </div>
     </div>
@@ -956,20 +1005,261 @@
     <script>
         // Current category state
         let currentCategory = 'live';
+        let currentSourceId = null;  // Currently selected source for filter editing
+        let sourcesData = [];  // All sources
         let filtersData = { live: {groups: [], channels: []}, vod: {groups: [], channels: []}, series: {groups: [], channels: []} };
         
-        // Initialize URLs
-        document.getElementById('playlist-url').textContent = window.location.origin + '/playlist.m3u';
-        document.getElementById('xtream-url').textContent = window.location.origin;
-        document.getElementById('playlist-url-full').textContent = window.location.origin + '/playlist_full.m3u';
-        document.getElementById('xtream-url-full').textContent = window.location.origin + '/full';
-        
-        // Load filters and cache status on page load
-        loadFilters();
+        // Load sources, filters and cache status on page load
+        loadSources();
         loadCacheStatus();
         
         // Refresh cache status every 30 seconds
         setInterval(loadCacheStatus, 30000);
+        
+        // ============================================
+        // SOURCE MANAGEMENT
+        // ============================================
+        
+        function loadSources() {
+            fetch('/api/sources')
+                .then(r => r.json())
+                .then(data => {
+                    sourcesData = data.sources || [];
+                    renderSources();
+                    renderConnectionInfo();
+                    updateFilterSourceSelect();
+                })
+                .catch(() => {});
+        }
+        
+        function renderSources() {
+            const container = document.getElementById('sources-list');
+            if (sourcesData.length === 0) {
+                container.innerHTML = '<div class="empty-state">No sources configured. Add a source to get started.</div>';
+                return;
+            }
+            
+            let html = '';
+            for (const source of sourcesData) {
+                const statusIcon = source.enabled ? '✅' : '⏸️';
+                const prefixBadge = source.prefix ? `<span class="group-badge">Prefix: ${source.prefix}</span>` : '';
+                const routeBadge = source.route ? `<span class="group-badge" style="background: #1a5e3d;">Route: /${source.route}/</span>` : '';
+                html += `
+                    <div class="source-item" style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid rgba(255,255,255,0.1);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                            <div>
+                                <strong style="color: #00d4ff;">${statusIcon} ${source.name || 'Unnamed'}</strong>
+                                ${prefixBadge}
+                                ${routeBadge}
+                            </div>
+                            <div style="display: flex; gap: 5px;">
+                                <button class="btn btn-secondary btn-sm" onclick="editSource('${source.id}')">✏️ Edit</button>
+                                <button class="btn btn-danger btn-sm" onclick="deleteSource('${source.id}')">🗑️</button>
+                            </div>
+                        </div>
+                        <div style="color: #888; font-size: 0.85em;">
+                            ${source.host || 'No host configured'}
+                        </div>
+                    </div>
+                `;
+            }
+            container.innerHTML = html;
+        }
+        
+        function renderConnectionInfo() {
+            const container = document.getElementById('connection-info-list');
+            const baseUrl = window.location.origin;
+            
+            const sourcesWithRoutes = sourcesData.filter(s => s.route);
+            
+            if (sourcesWithRoutes.length === 0) {
+                container.innerHTML = '<p style="color: #ffa502; font-style: italic;">⚠️ No sources have a route configured. Add a route to a source to get connection URLs.</p>';
+                return;
+            }
+            
+            let html = '';
+            for (const source of sourcesWithRoutes) {
+                const filteredUrl = `${baseUrl}/${source.route}`;
+                const fullUrl = `${baseUrl}/${source.route}/full`;
+                const filteredId = `conn-filtered-${source.id}`;
+                const fullId = `conn-full-${source.id}`;
+                
+                html += `
+                    <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid rgba(255,255,255,0.1);">
+                        <h3 style="color: #00d4ff; margin: 0 0 12px 0; font-size: 1em;">📡 ${source.name || 'Unnamed'}</h3>
+                        
+                        <p style="color: #2ed573; margin: 0 0 8px 0; font-size: 0.9em;">🎯 Filtered (with filters applied):</p>
+                        <div class="url-box" style="margin-bottom: 12px;">
+                            <code id="${filteredId}">${filteredUrl}</code>
+                            <button class="copy-btn" onclick="copyToClipboard('${filteredId}')">Copy</button>
+                        </div>
+                        
+                        <p style="color: #ffa502; margin: 0 0 8px 0; font-size: 0.9em;">📦 Unfiltered (full catalog):</p>
+                        <div class="url-box">
+                            <code id="${fullId}">${fullUrl}</code>
+                            <button class="copy-btn" onclick="copyToClipboard('${fullId}')">Copy</button>
+                        </div>
+                    </div>
+                `;
+            }
+            container.innerHTML = html;
+        }
+        
+        function updateFilterSourceSelect() {
+            const select = document.getElementById('filter-source-select');
+            let html = '<option value="">-- Select a source --</option>';
+            for (const source of sourcesData) {
+                html += `<option value="${source.id}">${source.name || source.id}</option>`;
+            }
+            select.innerHTML = html;
+        }
+        
+        function onFilterSourceChange() {
+            const sourceId = document.getElementById('filter-source-select').value;
+            const container = document.getElementById('filter-editor-container');
+            
+            if (sourceId) {
+                currentSourceId = sourceId;
+                container.style.display = 'block';
+                loadSourceFilters(sourceId);
+            } else {
+                currentSourceId = null;
+                container.style.display = 'none';
+            }
+        }
+        
+        function loadSourceFilters(sourceId) {
+            fetch(`/api/sources/${sourceId}/filters`)
+                .then(r => r.json())
+                .then(data => {
+                    filtersData = data.filters || { live: {groups: [], channels: []}, vod: {groups: [], channels: []}, series: {groups: [], channels: []} };
+                    renderCurrentFilters();
+                })
+                .catch(() => {});
+        }
+        
+        function addNewSource() {
+            const name = prompt('Enter source name:', 'New Source');
+            if (!name) return;
+            
+            fetch('/api/sources', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ name: name })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.source) {
+                    editSource(data.source.id);
+                }
+                loadSources();
+            });
+        }
+        
+        function editSource(sourceId) {
+            const source = sourcesData.find(s => s.id === sourceId);
+            if (!source) return;
+            
+            // Create a simple edit modal/form
+            const html = `
+                <div class="modal active" id="source-edit-modal" onclick="if(event.target===this)closeSourceEdit()">
+                    <div class="modal-content" style="max-width: 500px;">
+                        <div class="modal-header">
+                            <h3>Edit Source</h3>
+                            <button class="modal-close" onclick="closeSourceEdit()">✕</button>
+                        </div>
+                        <div class="modal-body" style="padding: 20px;">
+                            <div class="form-group">
+                                <label>Source Name</label>
+                                <input type="text" id="edit-source-name" value="${source.name || ''}">
+                            </div>
+                            <div class="form-group">
+                                <label>Server URL</label>
+                                <input type="text" id="edit-source-host" value="${source.host || ''}" placeholder="http://example.com:8080">
+                            </div>
+                            <div class="form-group">
+                                <label>Username</label>
+                                <input type="text" id="edit-source-username" value="${source.username || ''}">
+                            </div>
+                            <div class="form-group">
+                                <label>Password</label>
+                                <input type="password" id="edit-source-password" value="${source.password || ''}">
+                            </div>
+                            <div class="form-group">
+                                <label>Group Prefix (optional)</label>
+                                <input type="text" id="edit-source-prefix" value="${source.prefix || ''}" placeholder="e.g., [Source1] ">
+                                <div class="hint">Prefix added to all group names from this source</div>
+                            </div>
+                            <div class="form-group">
+                                <label>Dedicated Route <span style="color: #ff6b6b;">*</span></label>
+                                <input type="text" id="edit-source-route" value="${source.route || ''}" placeholder="e.g., smarters" required>
+                                <div class="hint">This source will be available at /<em>route</em>/player_api.php</div>
+                            </div>
+                            <div class="form-group">
+                                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                    <input type="checkbox" id="edit-source-enabled" ${source.enabled ? 'checked' : ''} style="width: 18px; height: 18px;">
+                                    <span>Source Enabled</span>
+                                </label>
+                            </div>
+                            <div style="display: flex; gap: 10px; margin-top: 20px;">
+                                <button class="btn btn-primary" onclick="saveSourceEdit('${sourceId}')">Save</button>
+                                <button class="btn btn-secondary" onclick="closeSourceEdit()">Cancel</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.insertAdjacentHTML('beforeend', html);
+        }
+        
+        function closeSourceEdit() {
+            const modal = document.getElementById('source-edit-modal');
+            if (modal) modal.remove();
+        }
+        
+        function saveSourceEdit(sourceId) {
+            const route = document.getElementById('edit-source-route').value.trim();
+            if (!route) {
+                alert('Route is required!');
+                return;
+            }
+            
+            const data = {
+                name: document.getElementById('edit-source-name').value,
+                host: document.getElementById('edit-source-host').value,
+                username: document.getElementById('edit-source-username').value,
+                password: document.getElementById('edit-source-password').value,
+                prefix: document.getElementById('edit-source-prefix').value,
+                route: route,
+                enabled: document.getElementById('edit-source-enabled').checked
+            };
+            
+            fetch(`/api/sources/${sourceId}`, {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            })
+            .then(r => r.json())
+            .then(() => {
+                closeSourceEdit();
+                loadSources();
+            });
+        }
+        
+        function deleteSource(sourceId) {
+            if (!confirm('Are you sure you want to delete this source?')) return;
+            
+            fetch(`/api/sources/${sourceId}`, { method: 'DELETE' })
+                .then(r => r.json())
+                .then(() => {
+                    loadSources();
+                    // Clear filter editor if this was the selected source
+                    if (currentSourceId === sourceId) {
+                        document.getElementById('filter-source-select').value = '';
+                        onFilterSourceChange();
+                    }
+                });
+        }
         
         function copyToClipboard(elementId) {
             const url = document.getElementById(elementId).textContent;
@@ -989,20 +1279,34 @@
                     document.getElementById('cache-series').textContent = data.counts.series || 0;
                     document.getElementById('cache-ttl').textContent = data.ttl_seconds || 3600;
                     
+                    const progressContainer = document.getElementById('refresh-progress-container');
+                    
                     // Status indicator
                     let status = '⏳';
                     if (data.refresh_in_progress) {
                         status = '🔄';
                         document.getElementById('refresh-cache-btn').disabled = true;
                         document.getElementById('refresh-cache-btn').textContent = '⏳ Refreshing...';
+                        
+                        // Show and update progress bar
+                        progressContainer.style.display = 'block';
+                        const progress = data.refresh_progress || {};
+                        const percent = Math.min(progress.percent || 0, 100);
+                        document.getElementById('refresh-progress-bar').style.width = percent + '%';
+                        document.getElementById('refresh-progress-percent').textContent = percent + '%';
+                        document.getElementById('refresh-progress-step').textContent = progress.current_step || 'Processing...';
+                        document.getElementById('refresh-progress-source').textContent = progress.current_source || 0;
+                        document.getElementById('refresh-progress-total').textContent = progress.total_sources || 0;
                     } else if (data.cache_valid) {
                         status = '✅';
                         document.getElementById('refresh-cache-btn').disabled = false;
                         document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                        progressContainer.style.display = 'none';
                     } else {
                         status = '⚠️';
                         document.getElementById('refresh-cache-btn').disabled = false;
                         document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                        progressContainer.style.display = 'none';
                     }
                     document.getElementById('cache-status').textContent = status;
                     
@@ -1029,26 +1333,31 @@
         function refreshCache() {
             document.getElementById('refresh-cache-btn').disabled = true;
             document.getElementById('refresh-cache-btn').textContent = '⏳ Starting...';
+            document.getElementById('refresh-progress-container').style.display = 'block';
+            document.getElementById('refresh-progress-bar').style.width = '0%';
+            document.getElementById('refresh-progress-percent').textContent = '0%';
+            document.getElementById('refresh-progress-step').textContent = 'Starting...';
             
             fetch('/api/cache/refresh', { method: 'POST' })
                 .then(r => r.json())
                 .then(data => {
                     document.getElementById('refresh-cache-btn').textContent = '⏳ Refreshing...';
-                    // Poll for completion
+                    // Poll for completion every second
                     const pollInterval = setInterval(() => {
-                        loadCacheStatus();
                         fetch('/api/cache/status')
                             .then(r => r.json())
                             .then(status => {
+                                loadCacheStatus();
                                 if (!status.refresh_in_progress) {
                                     clearInterval(pollInterval);
                                 }
                             });
-                    }, 2000);
+                    }, 1000);
                 })
                 .catch(() => {
                     document.getElementById('refresh-cache-btn').disabled = false;
                     document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                    document.getElementById('refresh-progress-container').style.display = 'none';
                 });
         }
         
@@ -1081,13 +1390,8 @@
 
         
         function loadFilters() {
-            fetch('/api/filters')
-                .then(r => r.json())
-                .then(data => {
-                    filtersData = data;
-                    renderCurrentFilters();
-                })
-                .catch(() => {});
+            // This is now handled by loadSourceFilters when a source is selected
+            // Keep for backward compatibility, but do nothing
         }
         
         function renderCurrentFilters() {
@@ -1118,17 +1422,21 @@
                 'starts_with': 'starts with',
                 'ends_with': 'ends with',
                 'exact': 'equals',
-                'regex': 'regex'
+                'regex': 'regex',
+                'all': '⛔ ALL'
             };
             
-            container.innerHTML = filters.map((f, i) => `
-                <div class="filter-item">
+            container.innerHTML = filters.map((f, i) => {
+                const isAll = f.match === 'all';
+                const valueDisplay = isAll ? '(everything)' : escapeHtml(f.value) + (f.case_sensitive ? ' (case)' : '');
+                return `
+                <div class="filter-item" style="${isAll ? 'background: rgba(255,71,87,0.2); border-color: #ff4757;' : ''}">
                     <span class="type ${f.type}">${f.type}</span>
                     <span class="match">${matchLabels[f.match] || f.match}</span>
-                    <span class="value">${escapeHtml(f.value)}${f.case_sensitive ? ' (case)' : ''}</span>
+                    <span class="value">${valueDisplay}</span>
                     <button class="delete-btn" onclick="deleteFilter('${target}', ${i})">✕</button>
                 </div>
-            `).join('');
+            `}).join('');
         }
         
         function escapeHtml(text) {
@@ -1137,18 +1445,55 @@
             return div.innerHTML;
         }
         
+        function addExcludeAllFilter(target) {
+            if (!currentSourceId) {
+                alert('Please select a source first');
+                return;
+            }
+            
+            if (!confirm(`This will exclude ALL ${target}. You can then use "Include Only" rules to whitelist specific items. Continue?`)) {
+                return;
+            }
+            
+            fetch(`/api/sources/${currentSourceId}/filters/add`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    category: currentCategory,
+                    target: target,
+                    type: 'exclude',
+                    match: 'all',
+                    value: '*',
+                    case_sensitive: false
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                filtersData = data.filters;
+                renderCurrentFilters();
+            });
+        }
+        
         function addFilter(target) {
+            if (!currentSourceId) {
+                alert('Please select a source first');
+                return;
+            }
+            
             const type = document.getElementById(target.slice(0, -1) + '-type').value;
             const match = document.getElementById(target.slice(0, -1) + '-match').value;
-            const value = document.getElementById(target.slice(0, -1) + '-value').value.trim();
+            let value = document.getElementById(target.slice(0, -1) + '-value').value.trim();
             const caseSensitive = document.getElementById(target.slice(0, -1) + '-case').checked;
             
-            if (!value) {
+            // For "all" match type, value is not required
+            if (match === 'all') {
+                value = '*';
+            } else if (!value) {
                 alert('Please enter a value');
                 return;
             }
             
-            fetch('/api/filters/add', {
+            fetch(`/api/sources/${currentSourceId}/filters/add`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
@@ -1169,7 +1514,9 @@
         }
         
         function deleteFilter(target, index) {
-            fetch('/api/filters/delete', {
+            if (!currentSourceId) return;
+            
+            fetch(`/api/sources/${currentSourceId}/filters/delete`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
@@ -1192,31 +1539,107 @@
             addFilter('groups');
         }
         
-        function loadGroups() {
-            const list = document.getElementById('groups-list');
-            list.style.display = 'block';
+        // Groups Browser Modal
+        let allGroupsData = [];
+        
+        function openGroupsBrowser() {
+            if (!currentSourceId) {
+                alert('Please select a source first');
+                return;
+            }
+            
+            const categoryLabels = {live: 'Live TV', vod: 'Movies', series: 'Series'};
+            document.getElementById('groups-browser-type-label').textContent = categoryLabels[currentCategory] || currentCategory;
+            document.getElementById('groups-browser-modal').classList.add('active');
+            document.getElementById('groups-search').value = '';
+            loadGroupsForBrowser();
+        }
+        
+        function closeGroupsBrowser() {
+            document.getElementById('groups-browser-modal').classList.remove('active');
+        }
+        
+        function loadGroupsForBrowser() {
+            const list = document.getElementById('groups-browser-list');
             list.innerHTML = '<div class="loading">Loading groups...</div>';
             
-            fetch('/groups?type=' + currentCategory)
+            const sourceParam = currentSourceId ? `&source_id=${currentSourceId}` : '';
+            fetch('/groups?type=' + currentCategory + sourceParam)
                 .then(r => r.json())
                 .then(data => {
-                    if (data.groups && data.groups.length > 0) {
-                        list.innerHTML = data.groups.map(g => 
-                            `<div class="quick-item">
-                                <span>${escapeHtml(g)}</span>
-                                <span class="quick-buttons">
-                                    <button class="btn-include" onclick="quickAddGroup('${g.replace(/'/g, "\\'")}', 'include')" title="Include">✓</button>
-                                    <button class="btn-exclude" onclick="quickAddGroup('${g.replace(/'/g, "\\'")}', 'exclude')" title="Exclude">✗</button>
-                                </span>
-                            </div>`
-                        ).join('');
-                    } else {
-                        list.innerHTML = '<div class="loading">No groups found. Check credentials.</div>';
-                    }
+                    allGroupsData = data.groups || [];
+                    document.getElementById('groups-count').textContent = allGroupsData.length;
+                    renderGroupsList(allGroupsData);
                 })
                 .catch(() => {
                     list.innerHTML = '<div class="loading">Error loading groups</div>';
                 });
+        }
+        
+        function filterGroupsList() {
+            const search = document.getElementById('groups-search').value.toLowerCase();
+            const filtered = allGroupsData.filter(g => g.toLowerCase().includes(search));
+            document.getElementById('groups-count').textContent = filtered.length;
+            renderGroupsList(filtered);
+        }
+        
+        function renderGroupsList(groups) {
+            const list = document.getElementById('groups-browser-list');
+            
+            if (groups.length === 0) {
+                list.innerHTML = '<div class="loading">No groups found</div>';
+                return;
+            }
+            
+            list.innerHTML = groups.map(g => {
+                const escapedGroup = g.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                return `<div class="quick-item">
+                    <span style="flex: 1; word-break: break-word;">${escapeHtml(g)}</span>
+                    <span class="quick-buttons" style="flex-shrink: 0;">
+                        <button class="btn-include" onclick="quickAddGroupFromBrowser('${escapedGroup}', 'include')" title="Include Only">✓</button>
+                        <button class="btn-exclude" onclick="quickAddGroupFromBrowser('${escapedGroup}', 'exclude')" title="Exclude">✗</button>
+                    </span>
+                </div>`;
+            }).join('');
+        }
+        
+        function quickAddGroupFromBrowser(group, filterType) {
+            if (!currentSourceId) {
+                alert('Please select a source first');
+                return;
+            }
+            
+            fetch(`/api/sources/${currentSourceId}/filters/add`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    category: currentCategory,
+                    target: 'groups',
+                    type: filterType,
+                    match: 'exact',
+                    value: group,
+                    case_sensitive: false
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                filtersData = data.filters;
+                renderCurrentFilters();
+                // Visual feedback
+                const btn = event.target;
+                const originalText = btn.textContent;
+                btn.textContent = '✔';
+                btn.style.background = '#27ae60';
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.style.background = '';
+                }, 1000);
+            });
+        }
+        
+        function loadGroups() {
+            // Deprecated - now using openGroupsBrowser()
+            openGroupsBrowser();
         }
         
         let searchTimeout;

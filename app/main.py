@@ -40,6 +40,13 @@ _api_cache = {
     "sources": {},  # Per-source cached data
     "last_refresh": None,
     "refresh_in_progress": False,
+    "refresh_progress": {
+        "current_source": 0,
+        "total_sources": 0,
+        "current_source_name": "",
+        "current_step": "",
+        "percent": 0
+    },
 }
 _cache_lock = threading.Lock()
 
@@ -216,6 +223,13 @@ def refresh_cache():
             logger.info("Refresh already in progress, skipping")
             return False
         _api_cache["refresh_in_progress"] = True
+        _api_cache["refresh_progress"] = {
+            "current_source": 0,
+            "total_sources": 0,
+            "current_source_name": "",
+            "current_step": "Initializing...",
+            "percent": 0
+        }
 
     config = load_config()
     sources = config.get("sources", [])
@@ -233,40 +247,66 @@ def refresh_cache():
             "filters": config.get("filters", {}),
         }]
 
-    if not sources:
-        logger.info("Cannot refresh - no sources configured")
+    # Filter enabled sources
+    enabled_sources = [s for s in sources if s.get("enabled", True) and s.get("host") and s.get("username") and s.get("password")]
+    
+    if not enabled_sources:
+        logger.info("Cannot refresh - no valid sources configured")
         with _cache_lock:
             _api_cache["refresh_in_progress"] = False
+            _api_cache["refresh_progress"]["percent"] = 0
+            _api_cache["refresh_progress"]["current_step"] = "No sources"
         return False
 
-    logger.info(f"Starting full refresh at {datetime.now().isoformat()} for {len(sources)} source(s)")
+    total_sources = len(enabled_sources)
+    with _cache_lock:
+        _api_cache["refresh_progress"]["total_sources"] = total_sources
+
+    logger.info(f"Starting full refresh at {datetime.now().isoformat()} for {total_sources} source(s)")
 
     new_sources_cache = {}
     total_stats = {"live_cats": 0, "live_streams": 0, "vod_cats": 0, "vod_streams": 0, "series_cats": 0, "series": 0}
 
-    for source in sources:
-        if not source.get("enabled", True):
-            logger.info(f"Skipping disabled source: {source.get('name', source.get('id'))}")
-            continue
-
+    for source_idx, source in enumerate(enabled_sources):
         source_id = source.get("id", "default")
+        source_name = source.get("name", source_id)
         host = source.get("host", "").rstrip("/")
         username = source.get("username", "")
         password = source.get("password", "")
 
-        if not host or not username or not password:
-            logger.info(f"Skipping source {source_id} - incomplete credentials")
-            continue
+        # Update progress
+        with _cache_lock:
+            _api_cache["refresh_progress"]["current_source"] = source_idx + 1
+            _api_cache["refresh_progress"]["current_source_name"] = source_name
 
-        logger.info(f"Refreshing source: {source.get('name', source_id)}")
+        logger.info(f"Refreshing source: {source_name}")
 
         try:
-            # Fetch all data for this source
+            # Fetch all data for this source with progress updates
+            def update_step(step_name, step_num):
+                with _cache_lock:
+                    _api_cache["refresh_progress"]["current_step"] = f"{source_name}: {step_name}"
+                    # Each source has 6 steps, calculate overall percent
+                    base_percent = (source_idx / total_sources) * 100
+                    step_percent = (step_num / 6) * (100 / total_sources)
+                    _api_cache["refresh_progress"]["percent"] = int(base_percent + step_percent)
+
+            update_step("Live categories", 0)
             live_cats = fetch_from_upstream(host, username, password, "get_live_categories") or []
+            
+            update_step("VOD categories", 1)
             vod_cats = fetch_from_upstream(host, username, password, "get_vod_categories") or []
+            
+            update_step("Series categories", 2)
             series_cats = fetch_from_upstream(host, username, password, "get_series_categories") or []
+            
+            update_step("Live streams", 3)
             live_streams = fetch_from_upstream(host, username, password, "get_live_streams") or []
+            
+            update_step("VOD streams", 4)
             vod_streams = fetch_from_upstream(host, username, password, "get_vod_streams") or []
+            
+            update_step("Series", 5)
             series = fetch_from_upstream(host, username, password, "get_series") or []
 
             new_sources_cache[source_id] = {
@@ -296,6 +336,13 @@ def refresh_cache():
         _api_cache["sources"] = new_sources_cache
         _api_cache["last_refresh"] = datetime.now().isoformat()
         _api_cache["refresh_in_progress"] = False
+        _api_cache["refresh_progress"] = {
+            "current_source": total_sources,
+            "total_sources": total_sources,
+            "current_source_name": "",
+            "current_step": "Complete",
+            "percent": 100
+        }
 
     # Rebuild stream-to-source mapping
     rebuild_stream_source_map()
@@ -1797,6 +1844,7 @@ def cache_status():
     with _cache_lock:
         last_refresh = _api_cache.get("last_refresh")
         refresh_in_progress = _api_cache.get("refresh_in_progress", False)
+        refresh_progress = _api_cache.get("refresh_progress", {})
         sources_cache = _api_cache.get("sources", {})
     
     # Aggregate counts from all sources
@@ -1836,6 +1884,7 @@ def cache_status():
             "next_refresh": next_refresh,
             "cache_valid": cache_valid,
             "refresh_in_progress": refresh_in_progress,
+            "refresh_progress": refresh_progress,
             "ttl_seconds": ttl,
             "sources_count": len(sources_cache),
             "counts": {

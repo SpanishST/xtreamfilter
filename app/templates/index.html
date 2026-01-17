@@ -713,6 +713,21 @@
                     <div class="stat-label">Status</div>
                 </div>
             </div>
+            
+            <!-- Progress bar (hidden by default) -->
+            <div id="refresh-progress-container" style="display: none; margin-top: 15px;">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                    <span id="refresh-progress-step" style="color: #00d4ff; font-size: 0.85em;">Initializing...</span>
+                    <span id="refresh-progress-percent" style="color: #2ed573; font-size: 0.85em;">0%</span>
+                </div>
+                <div style="background: rgba(255,255,255,0.1); border-radius: 4px; height: 8px; overflow: hidden;">
+                    <div id="refresh-progress-bar" style="background: linear-gradient(90deg, #00d4ff, #2ed573); height: 100%; width: 0%; transition: width 0.3s ease;"></div>
+                </div>
+                <div style="margin-top: 5px; color: #888; font-size: 0.8em;">
+                    Source <span id="refresh-progress-source">0</span> of <span id="refresh-progress-total">0</span>
+                </div>
+            </div>
+            
             <div style="margin-top: 15px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
                 <span style="color: #888; font-size: 0.85em;">Last refresh: <span id="cache-last-refresh">Never</span></span>
                 <span style="color: #888; font-size: 0.85em;">| TTL: <span id="cache-ttl">-</span>s</span>
@@ -1264,20 +1279,34 @@
                     document.getElementById('cache-series').textContent = data.counts.series || 0;
                     document.getElementById('cache-ttl').textContent = data.ttl_seconds || 3600;
                     
+                    const progressContainer = document.getElementById('refresh-progress-container');
+                    
                     // Status indicator
                     let status = '⏳';
                     if (data.refresh_in_progress) {
                         status = '🔄';
                         document.getElementById('refresh-cache-btn').disabled = true;
                         document.getElementById('refresh-cache-btn').textContent = '⏳ Refreshing...';
+                        
+                        // Show and update progress bar
+                        progressContainer.style.display = 'block';
+                        const progress = data.refresh_progress || {};
+                        const percent = Math.min(progress.percent || 0, 100);
+                        document.getElementById('refresh-progress-bar').style.width = percent + '%';
+                        document.getElementById('refresh-progress-percent').textContent = percent + '%';
+                        document.getElementById('refresh-progress-step').textContent = progress.current_step || 'Processing...';
+                        document.getElementById('refresh-progress-source').textContent = progress.current_source || 0;
+                        document.getElementById('refresh-progress-total').textContent = progress.total_sources || 0;
                     } else if (data.cache_valid) {
                         status = '✅';
                         document.getElementById('refresh-cache-btn').disabled = false;
                         document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                        progressContainer.style.display = 'none';
                     } else {
                         status = '⚠️';
                         document.getElementById('refresh-cache-btn').disabled = false;
                         document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                        progressContainer.style.display = 'none';
                     }
                     document.getElementById('cache-status').textContent = status;
                     
@@ -1304,26 +1333,31 @@
         function refreshCache() {
             document.getElementById('refresh-cache-btn').disabled = true;
             document.getElementById('refresh-cache-btn').textContent = '⏳ Starting...';
+            document.getElementById('refresh-progress-container').style.display = 'block';
+            document.getElementById('refresh-progress-bar').style.width = '0%';
+            document.getElementById('refresh-progress-percent').textContent = '0%';
+            document.getElementById('refresh-progress-step').textContent = 'Starting...';
             
             fetch('/api/cache/refresh', { method: 'POST' })
                 .then(r => r.json())
                 .then(data => {
                     document.getElementById('refresh-cache-btn').textContent = '⏳ Refreshing...';
-                    // Poll for completion
+                    // Poll for completion every second
                     const pollInterval = setInterval(() => {
-                        loadCacheStatus();
                         fetch('/api/cache/status')
                             .then(r => r.json())
                             .then(status => {
+                                loadCacheStatus();
                                 if (!status.refresh_in_progress) {
                                     clearInterval(pollInterval);
                                 }
                             });
-                    }, 2000);
+                    }, 1000);
                 })
                 .catch(() => {
                     document.getElementById('refresh-cache-btn').disabled = false;
                     document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                    document.getElementById('refresh-progress-container').style.display = 'none';
                 });
         }
         

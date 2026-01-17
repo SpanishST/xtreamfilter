@@ -3,7 +3,7 @@
 [![Docker Hub](https://img.shields.io/docker/pulls/spanishst/xtreamfilter.svg)](https://hub.docker.com/r/spanishst/xtreamfilter)
 [![Docker Image Size](https://img.shields.io/docker/image-size/spanishst/xtreamfilter/latest)](https://hub.docker.com/r/spanishst/xtreamfilter)
 
-A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Series) from multiple sources with advanced per-category rules and caching.
+A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Series) from multiple sources with per-source dedicated routes, advanced filtering, and caching.
 
 ## Screenshots
 
@@ -14,12 +14,14 @@ A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Se
 ## Features
 
 - 📺 **Full Xtream Codes API Proxy** - Works with any Xtream-compatible player (TiviMate, XCIPTV, etc.)
-- 🔗 **Multi-Source Support** - Combine multiple Xtream providers into a single unified playlist
+- 🔗 **Multi-Source Support** - Configure multiple Xtream providers with dedicated routes per source
+- 🛣️ **Per-Source Routing** - Each source has its own URL path to avoid ID conflicts
 - 🎬 **Live TV, Movies & Series** - Filter all content types independently
 - 🔧 **Web-based Configuration** - Easy UI to manage sources, settings and filters
 - 🎯 **Advanced Filtering** - Include/exclude filters with multiple match types per source
+- 🚫 **Exclude All** - Start with empty and whitelist only what you want
 - 🏷️ **Source Prefixing** - Optionally prefix group names to identify content origin
-- 🔄 **Smart Caching** - Background refresh with configurable TTL
+- 🔄 **Smart Caching** - Background refresh with configurable TTL and progress bar
 - 💾 **Persistent Cache** - Survives container restarts
 - 🐳 **Docker Ready** - Easy deployment with docker-compose
 
@@ -80,22 +82,17 @@ docker-compose up --build -d
 http://localhost:8080
 ```
 
-2. **Configure your Xtream sources** in the web interface (you can add multiple providers)
+2. **Add your Xtream source(s)** in the Sources section:
+   - Name, Host, Username, Password
+   - **Dedicated Route** (required): URL path for this source (e.g., `myprovider`)
 
-4. **Add your filters** for each source - Live TV, VOD, and Series categories
+3. **Configure your filters** for each source - Live TV, VOD, and Series
 
-5. **Connect your IPTV player:**
-
-   **Option A - Xtream Codes API (Recommended):**
+4. **Connect your IPTV player** using the dedicated route:
    ```
-   Server: http://YOUR_SERVER_IP:8080
+   Server: http://YOUR_SERVER_IP:8080/<route>
    Username: (from your provider)
    Password: (from your provider)
-   ```
-
-   **Option B - M3U Playlist:**
-   ```
-   http://YOUR_SERVER_IP:8080/playlist.m3u
    ```
 
 ## Multi-Source Support
@@ -110,17 +107,21 @@ XtreamFilter allows you to manage multiple Xtream Codes providers, each with its
    - **Name**: Friendly name for the source (e.g., "Provider A")
    - **Host**: The Xtream server URL (e.g., `http://provider.example.com`)
    - **Username/Password**: Your credentials for this provider
-   - **Prefix** (optional): Text to prepend to group names (e.g., `[ProvA]`)
-   - **Dedicated Route** (recommended): URL path for this source (e.g., `providera`)
+   - **Prefix** (optional): Text to prepend to group names (e.g., `[ProvA] `)
+   - **Dedicated Route** (required): URL path for this source (e.g., `providera`)
    - **Enabled**: Toggle to enable/disable this source
 
 ### Dedicated Source Routes
 
-Each source must have its own **dedicated route** to avoid ID conflicts between providers. When two sources have content with the same ID (common with series), using separate routes ensures correct playback.
+Each source **must have** a dedicated route. This ensures:
+- No ID conflicts between providers (two sources may have series with the same ID)
+- Clean separation of content per source
+- Correct playback for all content types
 
-1. Edit a source in the web UI
+**Configure in the web UI:**
+1. Edit a source
 2. Set the **Dedicated Route** field (e.g., `smarters` or `strong`)
-3. Use the source-specific endpoint in your IPTV player:
+3. Use the source-specific endpoint in your IPTV player
 
 **Filtered endpoint (with your filter rules applied):**
 ```
@@ -136,7 +137,7 @@ Username: (from your provider)
 Password: (from your provider)
 ```
 
-**Example setup:**
+**Example with two sources:**
 - Source "Smarters" with route `smarters`:
   - Filtered: `http://YOUR_SERVER_IP:8080/smarters`
   - Unfiltered: `http://YOUR_SERVER_IP:8080/smarters/full`
@@ -144,21 +145,21 @@ Password: (from your provider)
   - Filtered: `http://YOUR_SERVER_IP:8080/strong`
   - Unfiltered: `http://YOUR_SERVER_IP:8080/strong/full`
 
-> **Note:** The root `/player_api.php` redirects to the first configured source. Always use dedicated routes for clarity.
+> **Single Source Mode:** If you only have one source configured, the root `/player_api.php` will automatically serve that source, so you can use either the root or the dedicated route.
 
 ### Source Prefixing
 
-The **Prefix** option prepends text to all group names from a source, helping identify content origin.
+The **Prefix** option prepends text to all group names from a source, helping identify content origin when viewing in your player.
 
 **Example:**
-- Source with prefix `[US]` → Groups become `[US] Sports`, `[US] Movies`, etc.
+- Source with prefix `[US] ` → Groups become `[US] Sports`, `[US] Movies`, etc.
 
 ### Per-Source Filtering
 
 Each source has its own independent filter configuration:
 - Filters are applied per-source
 - You can have different include/exclude rules per provider
-- Select a source in the UI to edit its specific filters
+- Select a source in the filter dropdown to edit its specific filters
 
 ## Filter System
 
@@ -174,13 +175,15 @@ Each source has its own independent filter configuration:
 ### Match Modes
 | Mode | Description | Example |
 |------|-------------|---------|
-| `starts_with` | Matches if name starts with value | `FR\|` matches "FR\| TF1" |
+| `starts_with` | Matches if name starts with value | `FR\|` matches "FR\| TF1" but NOT "ABC FR\| News" |
 | `ends_with` | Matches if name ends with value | `HD` matches "Canal+ HD" |
-| `contains` | Matches if name contains value | `Sports` matches "beIN Sports 1" |
+| `contains` | Matches if name contains value anywhere | `Sports` matches "beIN Sports 1" |
 | `not_contains` | Matches if name does NOT contain value | `XXX` excludes adult content |
-| `exact` | Exact match only | `TF1` matches only "TF1" |
-| `regex` | Regular expression pattern | `.*\|FR\|.*` for regex patterns |
+| `exact` | Exact match only (case insensitive by default) | `TF1` matches only "TF1" |
+| `regex` | Regular expression pattern | `^FR\|.*` for regex patterns |
 | `all` | Matches everything | Use with "Exclude All" to start fresh |
+
+> **Note:** `starts_with` only matches at the **beginning** of the name. If you want to match anywhere, use `contains`.
 
 ### Exclude All Feature
 
@@ -199,12 +202,36 @@ This is useful when you only want a small subset of content from a large catalog
 **Exclude adult content (all categories):**
 - Type: `exclude`, Match: `contains`, Value: `XXX`
 
-**Include French movies:**
-- Type: `include`, Match: `starts_with`, Value: `FR -`
+**Include specific streaming services:**
+- Type: `include`, Match: `exact`, Value: `NETFLIX SERIES`
+- Type: `include`, Match: `exact`, Value: `DISNEY+ MOVIES`
+
+**Start fresh and whitelist:**
+1. Add: Type: `exclude`, Match: `all`, Value: `*`
+2. Add: Type: `include`, Match: `starts_with`, Value: `FR|`
+
+## Cache System
+
+The proxy caches all data from upstream servers for fast responses:
+
+- **Default TTL:** 1 hour (3600 seconds)
+- **Background Refresh:** Automatic refresh before cache expires
+- **Progress Bar:** Visual progress indicator during refresh
+- **Disk Persistence:** Cache survives container restarts
+- **Per-Source Caching:** Each source is cached independently
+- **Manual Control:** Refresh or clear cache via UI button
+
+### Cache Status
+
+The web UI shows:
+- Total Live Streams, Movies, and Series counts
+- Cache validity status (✅ valid, ⚠️ expired, 🔄 refreshing)
+- Last refresh time
+- Progress bar during refresh with current step
 
 ## API Endpoints
 
-### Per-Source Dedicated Routes (Required)
+### Per-Source Dedicated Routes
 
 Each source with a dedicated route exposes these endpoints:
 
@@ -219,28 +246,15 @@ Each source with a dedicated route exposes these endpoints:
 | `/<route>/full/movie/{user}/{pass}/{id}` | Movie stream (unfiltered path) |
 | `/<route>/full/series/{user}/{pass}/{id}` | Series stream (unfiltered path) |
 
-**Filtered usage (with filter rules applied):**
-```
-Server: http://YOUR_SERVER_IP:8080/smarters
-Username: (from your provider)
-Password: (from your provider)
-```
-
-**Unfiltered usage (full catalog):**
-```
-Server: http://YOUR_SERVER_IP:8080/smarters/full
-Username: (from your provider)
-Password: (from your provider)
-```
-
-### Legacy Root Endpoints
-
-These endpoints redirect to the first configured source:
+### Root Endpoints
 
 | Endpoint | Description |
 |----------|-------------|
-| `/player_api.php` | Redirects to first source |
-| `/full/player_api.php` | Redirects to first source (full) |
+| `/player_api.php` | Serves first configured source (or redirects) |
+| `/full/player_api.php` | Serves first source unfiltered |
+| `/live/{user}/{pass}/{id}` | Live stream (auto-routes to correct source) |
+| `/movie/{user}/{pass}/{id}` | Movie stream (auto-routes to correct source) |
+| `/series/{user}/{pass}/{id}` | Series stream (auto-routes to correct source) |
 
 ### Web Interface & Management
 
@@ -248,7 +262,6 @@ These endpoints redirect to the first configured source:
 |----------|-------------|
 | `/` | Web configuration UI |
 | `/playlist.m3u` | Filtered M3U playlist |
-| `/get.php` | Alternative M3U URL |
 | `/health` | Health check |
 
 ### Source Management API
@@ -257,80 +270,35 @@ These endpoints redirect to the first configured source:
 |----------|--------|-------------|
 | `/api/sources` | GET | List all sources |
 | `/api/sources` | POST | Add a new source |
-| `/api/sources/<id>` | GET | Get a specific source |
 | `/api/sources/<id>` | PUT | Update a source |
 | `/api/sources/<id>` | DELETE | Delete a source |
 | `/api/sources/<id>/filters` | GET | Get filters for a source |
 | `/api/sources/<id>/filters` | POST | Update all filters for a source |
-| `/api/sources/<id>/filters/add` | POST | Add a filter to a source |
-| `/api/sources/<id>/filters/delete` | POST | Delete a filter from a source |
-
-### Filter Management API
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/filters` | GET | Get all filters (legacy, first source) |
-| `/api/filters` | POST | Update all filters (legacy, first source) |
-| `/api/filters/add` | POST | Add a single filter (legacy) |
-| `/api/filters/delete` | POST | Delete a filter (legacy) |
 
 ### Cache Management API
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/cache/status` | GET | Cache status and stats |
-| `/api/cache/refresh` | POST | Trigger cache refresh |
+| `/api/cache/status` | GET | Cache status, stats, and refresh progress |
+| `/api/cache/refresh` | POST | Trigger background cache refresh |
 | `/api/cache/clear` | POST | Clear all cached data |
-
-### Data Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `/groups?type=live\|vod\|series` | List available groups |
-| `/channels?type=live&search=query` | Search channels |
-| `/stats` | Playlist statistics |
-| `/preview` | Preview filtered content |
-
-## Caching System
-
-The proxy caches all data from the upstream server to provide fast responses:
-
-- **Default TTL:** 1 hour (3600 seconds)
-- **Background Refresh:** Automatic refresh before cache expires
-- **Disk Persistence:** Cache survives container restarts
-- **Manual Control:** Refresh or clear cache via UI or API
 
 ## Configuration
 
-Configuration is stored in `data/config.json` and includes:
+Configuration is stored in `data/config.json`:
 
 ```json
 {
   "sources": [
     {
-      "id": "source_1",
-      "name": "Provider A",
-      "host": "http://provider-a.example.com",
-      "username": "user1",
-      "password": "pass1",
-      "enabled": true,
-      "prefix": "[A] ",
-      "route": "providera",
-      "filters": {
-        "live": { "groups": [], "channels": [] },
-        "vod": { "groups": [], "channels": [] },
-        "series": { "groups": [], "channels": [] }
-      }
-    },
-    {
-      "id": "source_2",
-      "name": "Provider B",
-      "host": "http://provider-b.example.com",
-      "username": "user2",
-      "password": "pass2",
+      "id": "abc123",
+      "name": "My Provider",
+      "host": "http://provider.example.com",
+      "username": "myuser",
+      "password": "mypass",
       "enabled": true,
       "prefix": "",
-      "route": "",
+      "route": "myprovider",
       "filters": {
         "live": { "groups": [], "channels": [] },
         "vod": { "groups": [], "channels": [] },
@@ -346,7 +314,7 @@ Configuration is stored in `data/config.json` and includes:
 }
 ```
 
-> **Note:** Legacy single-source configurations (using `xtream` key) are automatically migrated to the new multi-source format on startup.
+Cache is stored in `data/api_cache.json` and automatically rebuilt on startup.
 
 ## Docker Compose
 
@@ -375,3 +343,8 @@ python main.py
 
 The app will be available at `http://localhost:5000`
 
+## Running Tests
+
+```bash
+uv run pytest tests/ -v
+```

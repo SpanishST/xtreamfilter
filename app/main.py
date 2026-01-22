@@ -30,6 +30,112 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
+# Stream chunk size for proxying (64KB)
+STREAM_CHUNK_SIZE = 65536
+
+
+def get_proxy_enabled():
+    """Check if proxy mode is enabled in config"""
+    config = load_config()
+    return config.get("options", {}).get("proxy_streams", True)
+
+
+def proxy_stream(upstream_url, stream_type="live"):
+    """
+    Proxy a stream from upstream server to the client.
+    
+    Handles:
+    - Range headers for seeking in VOD content
+    - Streaming response to avoid loading entire file in memory
+    - Proper content-type forwarding
+    
+    Args:
+        upstream_url: The full upstream URL to fetch from
+        stream_type: Type of stream ("live", "vod", "series") - affects timeout behavior
+    
+    Returns:
+        Flask Response object with streaming content
+    """
+    # Build headers for upstream request
+    upstream_headers = HEADERS.copy()
+    
+    # Forward Range header if present (for seeking in VOD)
+    if "Range" in request.headers:
+        upstream_headers["Range"] = request.headers["Range"]
+    
+    # Forward other relevant headers
+    if "Accept" in request.headers:
+        upstream_headers["Accept"] = request.headers["Accept"]
+    
+    try:
+        # Set timeout based on stream type
+        # Live streams need longer/no timeout, VOD can have shorter connect timeout
+        if stream_type == "live":
+            # Live streams: short connect timeout, no read timeout (stream indefinitely)
+            timeout = (10, None)
+        else:
+            # VOD/Series: reasonable timeouts
+            timeout = (10, 300)
+        
+        # Make streaming request to upstream
+        upstream_response = requests.get(
+            upstream_url,
+            headers=upstream_headers,
+            stream=True,
+            timeout=timeout,
+            allow_redirects=True,
+        )
+        
+        # Build response headers
+        response_headers = {}
+        
+        # Forward content-related headers
+        headers_to_forward = [
+            "Content-Type",
+            "Content-Length", 
+            "Content-Range",
+            "Accept-Ranges",
+            "Content-Disposition",
+        ]
+        
+        for header in headers_to_forward:
+            if header in upstream_response.headers:
+                response_headers[header] = upstream_response.headers[header]
+        
+        # Default content type if not provided
+        if "Content-Type" not in response_headers:
+            if stream_type == "live":
+                response_headers["Content-Type"] = "video/mp2t"
+            else:
+                response_headers["Content-Type"] = "video/mp4"
+        
+        # Create streaming response
+        def generate():
+            try:
+                for chunk in upstream_response.iter_content(chunk_size=STREAM_CHUNK_SIZE):
+                    if chunk:
+                        yield chunk
+            except Exception as e:
+                logger.warning(f"Stream proxy error: {e}")
+            finally:
+                upstream_response.close()
+        
+        return Response(
+            generate(),
+            status=upstream_response.status_code,
+            headers=response_headers,
+        )
+        
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout connecting to upstream: {upstream_url}")
+        return Response("Upstream timeout", status=504)
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection error to upstream: {e}")
+        return Response("Upstream connection error", status=502)
+    except Exception as e:
+        logger.error(f"Proxy error: {e}")
+        return Response(f"Proxy error: {e}", status=500)
+
 # ============================================
 # CACHING SYSTEM
 # ============================================
@@ -429,7 +535,7 @@ def load_config():
             "vod": True,
             "series": True,
         },
-        "options": {"cache_enabled": True, "cache_ttl": 3600},
+        "options": {"cache_enabled": True, "cache_ttl": 3600, "proxy_streams": True},
     }
 
     if os.path.exists(CONFIG_FILE):
@@ -1578,40 +1684,52 @@ def player_api_source(source_route):
 @app.route("/<source_route>/<username>/<password>/<stream_id>")
 @app.route("/<source_route>/<username>/<password>/<stream_id>.<ext>")
 def proxy_live_stream_source(source_route, username, password, stream_id, ext="ts"):
-    """Redirect live stream requests to the source specified by route"""
+    """Proxy live stream requests from the source specified by route"""
     if source_route in ("full", "live", "movie", "series", "api", "static"):
         return Response("Not found", status=404)
     source = get_source_by_route(source_route)
     if not source:
         return Response(f"Source route '{source_route}' not found", status=404)
     host = source["host"].rstrip("/")
-    return redirect(f"{host}/{source['username']}/{source['password']}/{stream_id}.{ext}", code=302)
+    upstream_url = f"{host}/{source['username']}/{source['password']}/{stream_id}.{ext}"
+    
+    if get_proxy_enabled():
+        return proxy_stream(upstream_url, stream_type="live")
+    return redirect(upstream_url, code=302)
 
 
 @app.route("/<source_route>/movie/<username>/<password>/<stream_id>")
 @app.route("/<source_route>/movie/<username>/<password>/<stream_id>.<ext>")
 def proxy_movie_stream_source(source_route, username, password, stream_id, ext="mp4"):
-    """Redirect VOD/movie stream requests to the source specified by route"""
+    """Proxy VOD/movie stream requests from the source specified by route"""
     if source_route in ("full", "live", "movie", "series", "api", "static"):
         return Response("Not found", status=404)
     source = get_source_by_route(source_route)
     if not source:
         return Response(f"Source route '{source_route}' not found", status=404)
     host = source["host"].rstrip("/")
-    return redirect(f"{host}/movie/{source['username']}/{source['password']}/{stream_id}.{ext}", code=302)
+    upstream_url = f"{host}/movie/{source['username']}/{source['password']}/{stream_id}.{ext}"
+    
+    if get_proxy_enabled():
+        return proxy_stream(upstream_url, stream_type="vod")
+    return redirect(upstream_url, code=302)
 
 
 @app.route("/<source_route>/series/<username>/<password>/<stream_id>")
 @app.route("/<source_route>/series/<username>/<password>/<stream_id>.<ext>")
 def proxy_series_stream_source(source_route, username, password, stream_id, ext="mp4"):
-    """Redirect series stream requests to the source specified by route"""
+    """Proxy series stream requests from the source specified by route"""
     if source_route in ("full", "live", "movie", "series", "api", "static"):
         return Response("Not found", status=404)
     source = get_source_by_route(source_route)
     if not source:
         return Response(f"Source route '{source_route}' not found", status=404)
     host = source["host"].rstrip("/")
-    return redirect(f"{host}/series/{source['username']}/{source['password']}/{stream_id}.{ext}", code=302)
+    upstream_url = f"{host}/series/{source['username']}/{source['password']}/{stream_id}.{ext}"
+    
+    if get_proxy_enabled():
+        return proxy_stream(upstream_url, stream_type="series")
+    return redirect(upstream_url, code=302)
 
 
 # ============================================
@@ -1738,73 +1856,97 @@ def player_api_source_full(source_route):
 @app.route("/<source_route>/full/<username>/<password>/<stream_id>")
 @app.route("/<source_route>/full/<username>/<password>/<stream_id>.<ext>")
 def proxy_live_stream_source_full(source_route, username, password, stream_id, ext="ts"):
-    """Redirect live stream requests to the source (unfiltered path)"""
+    """Proxy live stream requests from the source (unfiltered path)"""
     if source_route in ("full", "live", "movie", "series", "api", "static"):
         return Response("Not found", status=404)
     source = get_source_by_route(source_route)
     if not source:
         return Response(f"Source route '{source_route}' not found", status=404)
     host = source["host"].rstrip("/")
-    return redirect(f"{host}/{source['username']}/{source['password']}/{stream_id}.{ext}", code=302)
+    upstream_url = f"{host}/{source['username']}/{source['password']}/{stream_id}.{ext}"
+    
+    if get_proxy_enabled():
+        return proxy_stream(upstream_url, stream_type="live")
+    return redirect(upstream_url, code=302)
 
 
 @app.route("/<source_route>/full/movie/<username>/<password>/<stream_id>")
 @app.route("/<source_route>/full/movie/<username>/<password>/<stream_id>.<ext>")
 def proxy_movie_stream_source_full(source_route, username, password, stream_id, ext="mp4"):
-    """Redirect VOD/movie stream requests to the source (unfiltered path)"""
+    """Proxy VOD/movie stream requests from the source (unfiltered path)"""
     if source_route in ("full", "live", "movie", "series", "api", "static"):
         return Response("Not found", status=404)
     source = get_source_by_route(source_route)
     if not source:
         return Response(f"Source route '{source_route}' not found", status=404)
     host = source["host"].rstrip("/")
-    return redirect(f"{host}/movie/{source['username']}/{source['password']}/{stream_id}.{ext}", code=302)
+    upstream_url = f"{host}/movie/{source['username']}/{source['password']}/{stream_id}.{ext}"
+    
+    if get_proxy_enabled():
+        return proxy_stream(upstream_url, stream_type="vod")
+    return redirect(upstream_url, code=302)
 
 
 @app.route("/<source_route>/full/series/<username>/<password>/<stream_id>")
 @app.route("/<source_route>/full/series/<username>/<password>/<stream_id>.<ext>")
 def proxy_series_stream_source_full(source_route, username, password, stream_id, ext="mp4"):
-    """Redirect series stream requests to the source (unfiltered path)"""
+    """Proxy series stream requests from the source (unfiltered path)"""
     if source_route in ("full", "live", "movie", "series", "api", "static"):
         return Response("Not found", status=404)
     source = get_source_by_route(source_route)
     if not source:
         return Response(f"Source route '{source_route}' not found", status=404)
     host = source["host"].rstrip("/")
-    return redirect(f"{host}/series/{source['username']}/{source['password']}/{stream_id}.{ext}", code=302)
+    upstream_url = f"{host}/series/{source['username']}/{source['password']}/{stream_id}.{ext}"
+    
+    if get_proxy_enabled():
+        return proxy_stream(upstream_url, stream_type="series")
+    return redirect(upstream_url, code=302)
 
 
-# Stream proxy routes - redirect to upstream server
+# Stream proxy routes - proxy to upstream server
 @app.route("/live/<username>/<password>/<stream_id>")
 @app.route("/live/<username>/<password>/<stream_id>.<ext>")
 @app.route("/<username>/<password>/<stream_id>")
 @app.route("/<username>/<password>/<stream_id>.<ext>")
 def proxy_live_stream(username, password, stream_id, ext="ts"):
-    """Redirect live stream requests to upstream server (finds correct source)"""
+    """Proxy live stream requests to upstream server (finds correct source)"""
     host, upstream_user, upstream_pass = get_source_credentials_for_stream(stream_id, "live")
     if not host:
         return Response("Source not found", status=404)
-    return redirect(f"{host}/{upstream_user}/{upstream_pass}/{stream_id}.{ext}", code=302)
+    upstream_url = f"{host}/{upstream_user}/{upstream_pass}/{stream_id}.{ext}"
+    
+    if get_proxy_enabled():
+        return proxy_stream(upstream_url, stream_type="live")
+    return redirect(upstream_url, code=302)
 
 
 @app.route("/movie/<username>/<password>/<stream_id>")
 @app.route("/movie/<username>/<password>/<stream_id>.<ext>")
 def proxy_movie_stream(username, password, stream_id, ext="mp4"):
-    """Redirect VOD/movie stream requests to upstream server (finds correct source)"""
+    """Proxy VOD/movie stream requests to upstream server (finds correct source)"""
     host, upstream_user, upstream_pass = get_source_credentials_for_stream(stream_id, "vod")
     if not host:
         return Response("Source not found", status=404)
-    return redirect(f"{host}/movie/{upstream_user}/{upstream_pass}/{stream_id}.{ext}", code=302)
+    upstream_url = f"{host}/movie/{upstream_user}/{upstream_pass}/{stream_id}.{ext}"
+    
+    if get_proxy_enabled():
+        return proxy_stream(upstream_url, stream_type="vod")
+    return redirect(upstream_url, code=302)
 
 
 @app.route("/series/<username>/<password>/<stream_id>")
 @app.route("/series/<username>/<password>/<stream_id>.<ext>")
 def proxy_series_stream(username, password, stream_id, ext="mp4"):
-    """Redirect series stream requests to upstream server (finds correct source)"""
+    """Proxy series stream requests to upstream server (finds correct source)"""
     host, upstream_user, upstream_pass = get_source_credentials_for_stream(stream_id, "series")
     if not host:
         return Response("Source not found", status=404)
-    return redirect(f"{host}/series/{upstream_user}/{upstream_pass}/{stream_id}.{ext}", code=302)
+    upstream_url = f"{host}/series/{upstream_user}/{upstream_pass}/{stream_id}.{ext}"
+    
+    if get_proxy_enabled():
+        return proxy_stream(upstream_url, stream_type="series")
+    return redirect(upstream_url, code=302)
 
 
 @app.route("/xmltv.php")
@@ -1836,6 +1978,51 @@ def proxy_xmltv():
 # ============================================
 # CACHE MANAGEMENT API
 # ============================================
+
+
+@app.route("/api/options", methods=["GET"])
+def get_options():
+    """Get current options"""
+    config = load_config()
+    return jsonify(config.get("options", {}))
+
+
+@app.route("/api/options", methods=["POST"])
+def update_options():
+    """Update options"""
+    config = load_config()
+    data = request.get_json()
+    
+    if "options" not in config:
+        config["options"] = {}
+    
+    # Update provided options
+    for key, value in data.items():
+        config["options"][key] = value
+    
+    save_config(config)
+    return jsonify({"status": "ok", "options": config["options"]})
+
+
+@app.route("/api/options/proxy", methods=["GET"])
+def get_proxy_status():
+    """Get proxy streaming status"""
+    return jsonify({"proxy_enabled": get_proxy_enabled()})
+
+
+@app.route("/api/options/proxy", methods=["POST"])
+def set_proxy_status():
+    """Enable or disable proxy streaming"""
+    config = load_config()
+    data = request.get_json()
+    
+    if "options" not in config:
+        config["options"] = {}
+    
+    config["options"]["proxy_streams"] = data.get("enabled", True)
+    save_config(config)
+    
+    return jsonify({"status": "ok", "proxy_enabled": config["options"]["proxy_streams"]})
 
 
 @app.route("/api/cache/status")

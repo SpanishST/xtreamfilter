@@ -717,6 +717,7 @@
                 <span style="color: #888; font-size: 0.85em;">Last refresh: <span id="cache-last-refresh">Never</span></span>
                 <span style="color: #888; font-size: 0.85em;">| TTL: <span id="cache-ttl">-</span>s</span>
                 <button type="button" class="btn btn-secondary btn-sm" onclick="refreshCache()" id="refresh-cache-btn">🔄 Refresh Now</button>
+                <button type="button" class="btn btn-sm" onclick="cancelRefresh()" id="cancel-refresh-btn" style="display: none; background: #dc3545;">✕ Cancel</button>
             </div>
         </div>
         
@@ -1047,13 +1048,19 @@
         let currentSourceId = null;  // Currently selected source for filter editing
         let sourcesData = [];  // All sources
         let filtersData = { live: {groups: [], channels: []}, vod: {groups: [], channels: []}, series: {groups: [], channels: []} };
+        // Track refresh polling interval
+        let refreshPollInterval = null;
         
         // Load sources, filters and cache status on page load
         loadSources();
         loadCacheStatus();
         
-        // Refresh cache status every 30 seconds
-        setInterval(loadCacheStatus, 30000);
+        // Refresh cache status every 30 seconds (when not actively refreshing)
+        setInterval(() => {
+            if (!refreshPollInterval) {
+                loadCacheStatus();
+            }
+        }, 30000);
         
         // ============================================
         // SOURCE MANAGEMENT
@@ -1347,6 +1354,7 @@
                         status = '🔄';
                         document.getElementById('refresh-cache-btn').disabled = true;
                         document.getElementById('refresh-cache-btn').textContent = '⏳ Refreshing...';
+                        document.getElementById('cancel-refresh-btn').style.display = 'inline-block';
                         
                         // Show and update progress bar
                         progressContainer.style.display = 'block';
@@ -1357,16 +1365,33 @@
                         document.getElementById('refresh-progress-step').textContent = progress.current_step || 'Processing...';
                         document.getElementById('refresh-progress-source').textContent = progress.current_source || 0;
                         document.getElementById('refresh-progress-total').textContent = progress.total_sources || 0;
+                        
+                        // Start fast polling if not already running
+                        if (!refreshPollInterval) {
+                            refreshPollInterval = setInterval(loadCacheStatus, 1000);
+                        }
                     } else if (data.cache_valid) {
                         status = '✅';
                         document.getElementById('refresh-cache-btn').disabled = false;
                         document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                        document.getElementById('cancel-refresh-btn').style.display = 'none';
                         progressContainer.style.display = 'none';
+                        // Stop fast polling
+                        if (refreshPollInterval) {
+                            clearInterval(refreshPollInterval);
+                            refreshPollInterval = null;
+                        }
                     } else {
                         status = '⚠️';
                         document.getElementById('refresh-cache-btn').disabled = false;
                         document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                        document.getElementById('cancel-refresh-btn').style.display = 'none';
                         progressContainer.style.display = 'none';
+                        // Stop fast polling
+                        if (refreshPollInterval) {
+                            clearInterval(refreshPollInterval);
+                            refreshPollInterval = null;
+                        }
                     }
                     document.getElementById('cache-status').textContent = status;
                     
@@ -1417,8 +1442,28 @@
                 .catch(() => {
                     document.getElementById('refresh-cache-btn').disabled = false;
                     document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                    document.getElementById('cancel-refresh-btn').style.display = 'none';
                     document.getElementById('refresh-progress-container').style.display = 'none';
                 });
+        }
+        
+        function cancelRefresh() {
+            if (!confirm('Cancel the current refresh? Use this if the refresh appears stuck.')) return;
+            
+            fetch('/api/cache/cancel-refresh', { method: 'POST' })
+                .then(r => r.json())
+                .then(() => {
+                    document.getElementById('refresh-cache-btn').disabled = false;
+                    document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                    document.getElementById('cancel-refresh-btn').style.display = 'none';
+                    document.getElementById('refresh-progress-container').style.display = 'none';
+                    if (refreshPollInterval) {
+                        clearInterval(refreshPollInterval);
+                        refreshPollInterval = null;
+                    }
+                    loadCacheStatus();
+                })
+                .catch(() => {});
         }
         
         function switchCategory(category) {

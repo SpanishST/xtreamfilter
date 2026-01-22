@@ -21,6 +21,7 @@ DATA_DIR = os.environ.get("DATA_DIR", "/data" if os.path.exists("/data") else ".
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 CACHE_FILE = os.path.join(DATA_DIR, "playlist_cache.m3u")
 API_CACHE_FILE = os.path.join(DATA_DIR, "api_cache.json")
+PROGRESS_FILE = os.path.join(DATA_DIR, "refresh_progress.json")
 
 # Headers to mimic a browser request
 HEADERS = {
@@ -235,6 +236,44 @@ _stream_source_map = {
 _stream_map_lock = threading.Lock()
 
 
+def save_refresh_progress(progress_data):
+    """Save refresh progress to file for cross-worker visibility"""
+    try:
+        os.makedirs(os.path.dirname(PROGRESS_FILE), exist_ok=True)
+        with open(PROGRESS_FILE, "w") as f:
+            json.dump(progress_data, f)
+    except Exception as e:
+        logger.warning(f"Failed to save progress: {e}")
+
+
+def load_refresh_progress():
+    """Load refresh progress from file"""
+    try:
+        if os.path.exists(PROGRESS_FILE):
+            with open(PROGRESS_FILE) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {
+        "in_progress": False,
+        "current_source": 0,
+        "total_sources": 0,
+        "current_source_name": "",
+        "current_step": "",
+        "percent": 0,
+        "started_at": None
+    }
+
+
+def clear_refresh_progress():
+    """Clear the progress file when refresh is complete"""
+    try:
+        if os.path.exists(PROGRESS_FILE):
+            os.remove(PROGRESS_FILE)
+    except Exception:
+        pass
+
+
 def get_cache_ttl():
     """Get cache TTL from config (in seconds)"""
     config = load_config()
@@ -394,18 +433,34 @@ def refresh_cache():
     """Refresh all cached data from all configured sources"""
     global _api_cache
 
+    # Check if already in progress (using file-based check for cross-worker visibility)
+    existing_progress = load_refresh_progress()
+    if existing_progress.get("in_progress"):
+        # Check if it's stale (more than 10 minutes old)
+        started_at = existing_progress.get("started_at")
+        if started_at:
+            try:
+                started_time = datetime.fromisoformat(started_at)
+                if (datetime.now() - started_time).total_seconds() < 600:
+                    logger.info("Refresh already in progress, skipping")
+                    return False
+            except (ValueError, TypeError):
+                pass
+
+    # Mark as in progress (file-based for cross-worker visibility)
+    progress = {
+        "in_progress": True,
+        "current_source": 0,
+        "total_sources": 0,
+        "current_source_name": "",
+        "current_step": "Initializing...",
+        "percent": 0,
+        "started_at": datetime.now().isoformat()
+    }
+    save_refresh_progress(progress)
+
     with _cache_lock:
-        if _api_cache.get("refresh_in_progress"):
-            logger.info("Refresh already in progress, skipping")
-            return False
         _api_cache["refresh_in_progress"] = True
-        _api_cache["refresh_progress"] = {
-            "current_source": 0,
-            "total_sources": 0,
-            "current_source_name": "",
-            "current_step": "Initializing...",
-            "percent": 0
-        }
 
     config = load_config()
     sources = config.get("sources", [])
@@ -430,13 +485,12 @@ def refresh_cache():
         logger.info("Cannot refresh - no valid sources configured")
         with _cache_lock:
             _api_cache["refresh_in_progress"] = False
-            _api_cache["refresh_progress"]["percent"] = 0
-            _api_cache["refresh_progress"]["current_step"] = "No sources"
+        clear_refresh_progress()
         return False
 
     total_sources = len(enabled_sources)
-    with _cache_lock:
-        _api_cache["refresh_progress"]["total_sources"] = total_sources
+    progress["total_sources"] = total_sources
+    save_refresh_progress(progress)
 
     logger.info(f"Starting full refresh at {datetime.now().isoformat()} for {total_sources} source(s)")
 
@@ -450,40 +504,49 @@ def refresh_cache():
         username = source.get("username", "")
         password = source.get("password", "")
 
-        # Update progress
-        with _cache_lock:
-            _api_cache["refresh_progress"]["current_source"] = source_idx + 1
-            _api_cache["refresh_progress"]["current_source_name"] = source_name
+        # Update progress to file
+        progress = load_refresh_progress()
+        progress["current_source"] = source_idx + 1
+        progress["current_source_name"] = source_name
+        save_refresh_progress(progress)
 
         logger.info(f"Refreshing source: {source_name}")
 
         try:
             # Fetch all data for this source with progress updates
-            def update_step(step_name, step_num):
-                with _cache_lock:
-                    _api_cache["refresh_progress"]["current_step"] = f"{source_name}: {step_name}"
-                    # Each source has 6 steps, calculate overall percent
-                    base_percent = (source_idx / total_sources) * 100
-                    step_percent = (step_num / 6) * (100 / total_sources)
-                    _api_cache["refresh_progress"]["percent"] = int(base_percent + step_percent)
+            def update_step(step_name, step_num, src_idx=source_idx, src_name=source_name, total=total_sources):
+                progress = load_refresh_progress()
+                progress["current_step"] = f"{src_name}: {step_name}"
+                # Each source has 6 steps, calculate overall percent
+                base_percent = (src_idx / total) * 100
+                step_percent = (step_num / 6) * (100 / total)
+                progress["percent"] = int(base_percent + step_percent)
+                save_refresh_progress(progress)
+                logger.info(f"[{src_name}] Step {step_num}/6: {step_name} (progress: {progress['percent']}%)")
 
             update_step("Live categories", 0)
             live_cats = fetch_from_upstream(host, username, password, "get_live_categories") or []
+            logger.info(f"[{source_name}] Fetched {len(live_cats)} live categories")
             
             update_step("VOD categories", 1)
             vod_cats = fetch_from_upstream(host, username, password, "get_vod_categories") or []
+            logger.info(f"[{source_name}] Fetched {len(vod_cats)} VOD categories")
             
             update_step("Series categories", 2)
             series_cats = fetch_from_upstream(host, username, password, "get_series_categories") or []
+            logger.info(f"[{source_name}] Fetched {len(series_cats)} series categories")
             
             update_step("Live streams", 3)
             live_streams = fetch_from_upstream(host, username, password, "get_live_streams") or []
+            logger.info(f"[{source_name}] Fetched {len(live_streams)} live streams")
             
             update_step("VOD streams", 4)
             vod_streams = fetch_from_upstream(host, username, password, "get_vod_streams") or []
+            logger.info(f"[{source_name}] Fetched {len(vod_streams)} VOD streams")
             
             update_step("Series", 5)
             series = fetch_from_upstream(host, username, password, "get_series") or []
+            logger.info(f"[{source_name}] Fetched {len(series)} series")
 
             new_sources_cache[source_id] = {
                 "live_categories": live_cats,
@@ -512,13 +575,16 @@ def refresh_cache():
         _api_cache["sources"] = new_sources_cache
         _api_cache["last_refresh"] = datetime.now().isoformat()
         _api_cache["refresh_in_progress"] = False
-        _api_cache["refresh_progress"] = {
-            "current_source": total_sources,
-            "total_sources": total_sources,
-            "current_source_name": "",
-            "current_step": "Complete",
-            "percent": 100
-        }
+
+    # Update file-based progress to complete
+    save_refresh_progress({
+        "in_progress": False,
+        "current_source": total_sources,
+        "total_sources": total_sources,
+        "current_source_name": "",
+        "current_step": "Complete",
+        "percent": 100
+    })
 
     # Rebuild stream-to-source mapping
     rebuild_stream_source_map()
@@ -538,12 +604,22 @@ def fetch_from_upstream(host, username, password, action):
     url = f"{host}/player_api.php"
     params = {"username": username, "password": password, "action": action}
 
+    logger.debug(f"Fetching {action} from upstream...")
     try:
+        import time
+        start_time = time.time()
         response = requests.get(url, params=params, headers=HEADERS, timeout=120)
+        elapsed = time.time() - start_time
         if response.status_code == 200:
-            return response.json()
+            data = response.json()
+            logger.debug(f"Fetched {action}: {len(data) if isinstance(data, list) else 'ok'} items in {elapsed:.1f}s")
+            return data
+        else:
+            logger.warning(f"Fetch {action} failed with status {response.status_code} in {elapsed:.1f}s")
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout fetching {action} (>120s)")
     except Exception as e:
-        logger.info(f"Error fetching {action}: {e}")
+        logger.error(f"Error fetching {action}: {e}")
     return None
 
 
@@ -2394,10 +2470,12 @@ def set_proxy_status():
 @app.route("/api/cache/status")
 def cache_status():
     """Get cache status and statistics"""
+    # Read progress from file (visible across all workers)
+    refresh_progress = load_refresh_progress()
+    refresh_in_progress = refresh_progress.get("in_progress", False)
+    
     with _cache_lock:
         last_refresh = _api_cache.get("last_refresh")
-        refresh_in_progress = _api_cache.get("refresh_in_progress", False)
-        refresh_progress = _api_cache.get("refresh_progress", {})
         sources_cache = _api_cache.get("sources", {})
     
     # Aggregate counts from all sources
@@ -2465,6 +2543,15 @@ def trigger_cache_refresh():
     thread.start()
 
     return jsonify({"status": "refresh_started", "message": "Cache refresh has been triggered in the background"})
+
+
+@app.route("/api/cache/cancel-refresh", methods=["POST"])
+def cancel_cache_refresh():
+    """Cancel/clear a stuck refresh state"""
+    clear_refresh_progress()
+    with _cache_lock:
+        _api_cache["refresh_in_progress"] = False
+    return jsonify({"status": "ok", "message": "Refresh state cleared"})
 
 
 @app.route("/api/cache/clear", methods=["POST"])

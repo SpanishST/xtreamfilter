@@ -33,6 +33,66 @@ HEADERS = {
 # Stream chunk size for proxying (64KB)
 STREAM_CHUNK_SIZE = 65536
 
+# Virtual ID offset for merged playlists (10 million per source)
+# This allows up to 10 million streams per source before collision
+VIRTUAL_ID_OFFSET = 10_000_000
+
+
+def encode_virtual_id(source_index, original_id):
+    """
+    Encode a source index and original stream ID into a virtual ID.
+    This creates unique IDs across all sources for merged playlists.
+    
+    Args:
+        source_index: Index of the source (0, 1, 2, ...)
+        original_id: Original stream/series ID from the source
+    
+    Returns:
+        Virtual ID that uniquely identifies this stream across all sources
+    """
+    try:
+        return source_index * VIRTUAL_ID_OFFSET + int(original_id)
+    except (ValueError, TypeError):
+        return original_id
+
+
+def decode_virtual_id(virtual_id):
+    """
+    Decode a virtual ID back to source index and original ID.
+    
+    Args:
+        virtual_id: The virtual ID to decode
+    
+    Returns:
+        Tuple of (source_index, original_id)
+    """
+    try:
+        vid = int(virtual_id)
+        source_index = vid // VIRTUAL_ID_OFFSET
+        original_id = vid % VIRTUAL_ID_OFFSET
+        return source_index, original_id
+    except (ValueError, TypeError):
+        return 0, virtual_id
+
+
+def get_source_by_index(index):
+    """Get source configuration by its index in the enabled sources list"""
+    config = load_config()
+    enabled_sources = [s for s in config.get("sources", []) if s.get("enabled", True)]
+    if 0 <= index < len(enabled_sources):
+        return enabled_sources[index]
+    return None
+
+
+def get_source_index(source_id):
+    """Get the index of a source by its ID"""
+    config = load_config()
+    enabled_sources = [s for s in config.get("sources", []) if s.get("enabled", True)]
+    for i, source in enumerate(enabled_sources):
+        if source.get("id") == source_id:
+            return i
+    return 0
+
 
 def get_proxy_enabled():
     """Check if proxy mode is enabled in config"""
@@ -735,8 +795,14 @@ def should_include(value, filter_rules):
     return True
 
 
-def generate_m3u(config):
-    """Generate filtered M3U playlist from cached data, merging all sources"""
+def generate_m3u(config, use_virtual_ids=True):
+    """Generate filtered M3U playlist from cached data, merging all sources.
+    
+    Args:
+        config: Configuration dictionary
+        use_virtual_ids: If True, use virtual IDs for merged playlist (default).
+                        If False, use original IDs (for per-source playlists).
+    """
     sources = config.get("sources", [])
     content_types = config.get("content_types", {"live": True, "vod": True, "series": True})
     
@@ -758,14 +824,17 @@ def generate_m3u(config):
 
     # Use this server's URL for stream proxying
     server_url = request.host_url.rstrip("/")
+    
+    # Determine base path for stream URLs
+    stream_base = "/merged" if use_virtual_ids else ""
 
     lines = ["#EXTM3U"]
     stats = {"live": 0, "vod": 0, "series": 0, "excluded": 0, "sources": 0}
 
-    for source in sources:
-        if not source.get("enabled", True):
-            continue
-        
+    # Get list of enabled sources for indexing
+    enabled_sources = [s for s in sources if s.get("enabled", True)]
+
+    for source_index, source in enumerate(enabled_sources):
         source_id = source.get("id", "default")
         prefix = source.get("prefix", "")
         filters = source.get("filters", {})
@@ -805,8 +874,9 @@ def generate_m3u(config):
                 # Apply prefix to group if set
                 display_group = f"{prefix}{group}" if prefix else group
                 
-                # Use local proxy URL (stream routing will find the right source)
-                stream_url = f"{server_url}/user/pass/{stream_id}.ts"
+                # Use virtual ID for merged playlist, original ID for per-source
+                url_id = encode_virtual_id(source_index, stream_id) if use_virtual_ids else stream_id
+                stream_url = f"{server_url}{stream_base}/user/pass/{url_id}.ts"
                 lines.append(f'#EXTINF:-1 tvg-id="{epg_id}" tvg-logo="{icon}" group-title="{display_group}",{name}')
                 lines.append(stream_url)
                 stats["live"] += 1
@@ -838,7 +908,8 @@ def generate_m3u(config):
                     continue
 
                 display_group = f"{prefix}{group}" if prefix else group
-                stream_url = f"{server_url}/movie/user/pass/{stream_id}.{extension}"
+                url_id = encode_virtual_id(source_index, stream_id) if use_virtual_ids else stream_id
+                stream_url = f"{server_url}{stream_base}/movie/user/pass/{url_id}.{extension}"
                 lines.append(f'#EXTINF:-1 tvg-logo="{icon}" group-title="{display_group}",{name}')
                 lines.append(stream_url)
                 stats["vod"] += 1
@@ -1452,29 +1523,11 @@ def preview():
 @app.route("/player_api.php")
 def player_api():
     """
-    Root Xtream Codes API endpoint - redirects to first source with a route,
-    or returns an error if no routes are configured.
+    Root Xtream Codes API endpoint - redirects to merged API.
+    This provides a unified view of all sources with virtual IDs.
     """
-    config = load_config()
-    sources = config.get("sources", [])
-    
-    # Find first enabled source with a route
-    for source in sources:
-        if source.get("enabled", True) and source.get("route"):
-            # Redirect to the dedicated route
-            return player_api_source(source.get("route"))
-    
-    # No source with route found - return helpful error
-    available_routes = [s.get("route") for s in sources if s.get("enabled", True) and s.get("route")]
-    if available_routes:
-        return jsonify({
-            "error": "Please use a dedicated source route",
-            "available_routes": [f"/{r}/player_api.php" for r in available_routes]
-        }), 400
-    
-    return jsonify({
-        "error": "No sources configured with dedicated routes. Please configure a route for each source in the web UI."
-    }), 400
+    # Redirect to merged API which combines all sources
+    return player_api_merged()
 
 
 @app.route("/full/player_api.php")
@@ -1501,6 +1554,281 @@ def player_api_full():
     return jsonify({
         "error": "No sources configured with dedicated routes. Please configure a route for each source in the web UI."
     }), 400
+
+
+# ============================================
+# MERGED XTREAM API (All sources combined with virtual IDs)
+# ============================================
+
+@app.route("/merged/player_api.php")
+def player_api_merged():
+    """
+    Merged Xtream API - combines all sources with virtual IDs.
+    Stream IDs are remapped to be unique across all sources.
+    """
+    config = load_config()
+    enabled_sources = [s for s in config.get("sources", []) if s.get("enabled", True)]
+    action = request.args.get("action", "")
+
+    if not enabled_sources:
+        return jsonify({"error": "No sources configured"}), 400
+
+    try:
+        # No action = authentication
+        if not action:
+            # Use first source for auth info
+            source = enabled_sources[0]
+            host = source["host"].rstrip("/")
+            response = requests.get(
+                f"{host}/player_api.php",
+                params={"username": source["username"], "password": source["password"]},
+                headers=HEADERS,
+                timeout=30,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if "server_info" in data:
+                    data["server_info"]["url"] = request.host_url.rstrip("/") + "/merged"
+                    data["server_info"]["port"] = "80"
+                    data["server_info"]["https_port"] = "443"
+                return jsonify(data)
+            return Response(response.content, status=response.status_code)
+
+        # Get Live Categories - merge from all sources
+        elif action == "get_live_categories":
+            result = []
+            seen_names = set()
+            for idx, source in enumerate(enabled_sources):
+                source_id = source.get("id")
+                prefix = source.get("prefix", "")
+                filters = source.get("filters", {}).get("live", {}).get("groups", [])
+                for cat in get_cached("live_categories", source_id):
+                    cat_name = cat.get("category_name", "")
+                    if should_include(cat_name, filters):
+                        display_name = f"{prefix}{cat_name}" if prefix else cat_name
+                        if display_name not in seen_names:
+                            seen_names.add(display_name)
+                            cat_copy = cat.copy()
+                            cat_copy["category_name"] = display_name
+                            cat_copy["category_id"] = encode_virtual_id(idx, cat.get("category_id", 0))
+                            result.append(cat_copy)
+            return jsonify(result)
+
+        # Get VOD Categories
+        elif action == "get_vod_categories":
+            result = []
+            seen_names = set()
+            for idx, source in enumerate(enabled_sources):
+                source_id = source.get("id")
+                prefix = source.get("prefix", "")
+                filters = source.get("filters", {}).get("vod", {}).get("groups", [])
+                for cat in get_cached("vod_categories", source_id):
+                    cat_name = cat.get("category_name", "")
+                    if should_include(cat_name, filters):
+                        display_name = f"{prefix}{cat_name}" if prefix else cat_name
+                        if display_name not in seen_names:
+                            seen_names.add(display_name)
+                            cat_copy = cat.copy()
+                            cat_copy["category_name"] = display_name
+                            cat_copy["category_id"] = encode_virtual_id(idx, cat.get("category_id", 0))
+                            result.append(cat_copy)
+            return jsonify(result)
+
+        # Get Series Categories
+        elif action == "get_series_categories":
+            result = []
+            seen_names = set()
+            for idx, source in enumerate(enabled_sources):
+                source_id = source.get("id")
+                prefix = source.get("prefix", "")
+                filters = source.get("filters", {}).get("series", {}).get("groups", [])
+                for cat in get_cached("series_categories", source_id):
+                    cat_name = cat.get("category_name", "")
+                    if should_include(cat_name, filters):
+                        display_name = f"{prefix}{cat_name}" if prefix else cat_name
+                        if display_name not in seen_names:
+                            seen_names.add(display_name)
+                            cat_copy = cat.copy()
+                            cat_copy["category_name"] = display_name
+                            cat_copy["category_id"] = encode_virtual_id(idx, cat.get("category_id", 0))
+                            result.append(cat_copy)
+            return jsonify(result)
+
+        # Get Live Streams - merge with virtual IDs
+        elif action == "get_live_streams":
+            result = []
+            for idx, source in enumerate(enabled_sources):
+                source_id = source.get("id")
+                filters = source.get("filters", {})
+                group_filters = filters.get("live", {}).get("groups", [])
+                channel_filters = filters.get("live", {}).get("channels", [])
+                categories = get_cached("live_categories", source_id)
+                cat_map = {str(c.get("category_id", "")): c.get("category_name", "") for c in categories}
+                
+                for stream in get_cached("live_streams", source_id):
+                    cat_id = str(stream.get("category_id", ""))
+                    group_name = cat_map.get(cat_id, "")
+                    channel_name = stream.get("name", "")
+                    if should_include(group_name, group_filters) and should_include(channel_name, channel_filters):
+                        stream_copy = stream.copy()
+                        stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
+                        stream_copy["category_id"] = encode_virtual_id(idx, stream.get("category_id", 0))
+                        result.append(stream_copy)
+            return jsonify(result)
+
+        # Get VOD Streams
+        elif action == "get_vod_streams":
+            result = []
+            for idx, source in enumerate(enabled_sources):
+                source_id = source.get("id")
+                filters = source.get("filters", {})
+                group_filters = filters.get("vod", {}).get("groups", [])
+                channel_filters = filters.get("vod", {}).get("channels", [])
+                categories = get_cached("vod_categories", source_id)
+                cat_map = {str(c.get("category_id", "")): c.get("category_name", "") for c in categories}
+                
+                for stream in get_cached("vod_streams", source_id):
+                    cat_id = str(stream.get("category_id", ""))
+                    group_name = cat_map.get(cat_id, "")
+                    channel_name = stream.get("name", "")
+                    if should_include(group_name, group_filters) and should_include(channel_name, channel_filters):
+                        stream_copy = stream.copy()
+                        stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
+                        stream_copy["category_id"] = encode_virtual_id(idx, stream.get("category_id", 0))
+                        result.append(stream_copy)
+            return jsonify(result)
+
+        # Get Series
+        elif action == "get_series":
+            result = []
+            for idx, source in enumerate(enabled_sources):
+                source_id = source.get("id")
+                filters = source.get("filters", {})
+                group_filters = filters.get("series", {}).get("groups", [])
+                channel_filters = filters.get("series", {}).get("channels", [])
+                categories = get_cached("series_categories", source_id)
+                cat_map = {str(c.get("category_id", "")): c.get("category_name", "") for c in categories}
+                
+                for series in get_cached("series", source_id):
+                    cat_id = str(series.get("category_id", ""))
+                    group_name = cat_map.get(cat_id, "")
+                    series_name = series.get("name", "")
+                    if should_include(group_name, group_filters) and should_include(series_name, channel_filters):
+                        series_copy = series.copy()
+                        series_copy["series_id"] = encode_virtual_id(idx, series.get("series_id", 0))
+                        series_copy["category_id"] = encode_virtual_id(idx, series.get("category_id", 0))
+                        result.append(series_copy)
+            return jsonify(result)
+
+        # Get Series Info - decode virtual ID and fetch from correct source
+        elif action == "get_series_info":
+            virtual_series_id = request.args.get("series_id", "")
+            source_idx, original_id = decode_virtual_id(virtual_series_id)
+            source = get_source_by_index(source_idx)
+            if not source:
+                return jsonify({"error": "Source not found"}), 404
+            
+            host = source["host"].rstrip("/")
+            params = {
+                "username": source["username"],
+                "password": source["password"],
+                "action": "get_series_info",
+                "series_id": original_id
+            }
+            response = requests.get(f"{host}/player_api.php", params=params, headers=HEADERS, timeout=60)
+            
+            if response.status_code == 200:
+                data = response.json()
+                # Remap episode IDs to virtual IDs
+                if "episodes" in data:
+                    for season, episodes in data["episodes"].items():
+                        for ep in episodes:
+                            if "id" in ep:
+                                ep["id"] = encode_virtual_id(source_idx, ep["id"])
+                return jsonify(data)
+            return Response(response.content, status=response.status_code, content_type="application/json")
+
+        # Get VOD Info
+        elif action == "get_vod_info":
+            virtual_vod_id = request.args.get("vod_id", "")
+            source_idx, original_id = decode_virtual_id(virtual_vod_id)
+            source = get_source_by_index(source_idx)
+            if not source:
+                return jsonify({"error": "Source not found"}), 404
+            
+            host = source["host"].rstrip("/")
+            params = {
+                "username": source["username"],
+                "password": source["password"],
+                "action": "get_vod_info",
+                "vod_id": original_id
+            }
+            response = requests.get(f"{host}/player_api.php", params=params, headers=HEADERS, timeout=60)
+            return Response(response.content, status=response.status_code, content_type="application/json")
+
+        # Unknown action
+        else:
+            return jsonify({"error": f"Unknown action: {action}"}), 400
+
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Upstream server timeout"}), 504
+    except Exception as e:
+        logger.error(f"Merged API error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# Merged stream routes - decode virtual ID and proxy to correct source
+@app.route("/merged/live/<username>/<password>/<stream_id>")
+@app.route("/merged/live/<username>/<password>/<stream_id>.<ext>")
+@app.route("/merged/<username>/<password>/<stream_id>")
+@app.route("/merged/<username>/<password>/<stream_id>.<ext>")
+def proxy_live_stream_merged(username, password, stream_id, ext="ts"):
+    """Proxy live stream using virtual ID to find correct source."""
+    source_idx, original_id = decode_virtual_id(stream_id)
+    source = get_source_by_index(source_idx)
+    if not source:
+        return Response("Source not found", status=404)
+    
+    host = source["host"].rstrip("/")
+    upstream_url = f"{host}/{source['username']}/{source['password']}/{original_id}.{ext}"
+    
+    if get_proxy_enabled():
+        return proxy_stream(upstream_url, stream_type="live")
+    return redirect(upstream_url, code=302)
+
+
+@app.route("/merged/movie/<username>/<password>/<stream_id>")
+@app.route("/merged/movie/<username>/<password>/<stream_id>.<ext>")
+def proxy_movie_stream_merged(username, password, stream_id, ext="mp4"):
+    """Proxy VOD/movie stream using virtual ID."""
+    source_idx, original_id = decode_virtual_id(stream_id)
+    source = get_source_by_index(source_idx)
+    if not source:
+        return Response("Source not found", status=404)
+    
+    host = source["host"].rstrip("/")
+    upstream_url = f"{host}/movie/{source['username']}/{source['password']}/{original_id}.{ext}"
+    
+    if get_proxy_enabled():
+        return proxy_stream(upstream_url, stream_type="vod")
+    return redirect(upstream_url, code=302)
+
+
+@app.route("/merged/series/<username>/<password>/<stream_id>")
+@app.route("/merged/series/<username>/<password>/<stream_id>.<ext>")
+def proxy_series_stream_merged(username, password, stream_id, ext="mp4"):
+    """Proxy series stream using virtual ID."""
+    source_idx, original_id = decode_virtual_id(stream_id)
+    source = get_source_by_index(source_idx)
+    if not source:
+        return Response("Source not found", status=404)
+    
+    host = source["host"].rstrip("/")
+    upstream_url = f"{host}/series/{source['username']}/{source['password']}/{original_id}.{ext}"
+    
+    if get_proxy_enabled():
+        return proxy_stream(upstream_url, stream_type="series")
+    return redirect(upstream_url, code=302)
 
 
 # ============================================
@@ -1950,29 +2278,57 @@ def proxy_series_stream(username, password, stream_id, ext="mp4"):
 
 
 @app.route("/xmltv.php")
+@app.route("/merged/xmltv.php")
 def proxy_xmltv():
-    """Proxy EPG/XMLTV requests"""
+    """Proxy EPG/XMLTV requests - merges EPG from all sources"""
     config = load_config()
-    xtream = config["xtream"]
-    host = xtream["host"].rstrip("/")
-    upstream_user = xtream["username"]
-    upstream_pass = xtream["password"]
-
-    try:
-        response = requests.get(
-            f"{host}/xmltv.php",
-            params={"username": upstream_user, "password": upstream_pass},
-            headers=HEADERS,
-            timeout=120,
-            stream=True,
-        )
-        return Response(
-            response.iter_content(chunk_size=8192),
-            status=response.status_code,
-            content_type=response.headers.get("content-type", "application/xml"),
-        )
-    except Exception as e:
-        return Response(f"<!-- Error: {e} -->", content_type="application/xml")
+    enabled_sources = [s for s in config.get("sources", []) if s.get("enabled", True)]
+    
+    # Fallback to legacy config
+    if not enabled_sources and config.get("xtream", {}).get("host"):
+        xtream = config["xtream"]
+        host = xtream["host"].rstrip("/")
+        upstream_user = xtream["username"]
+        upstream_pass = xtream["password"]
+        
+        try:
+            response = requests.get(
+                f"{host}/xmltv.php",
+                params={"username": upstream_user, "password": upstream_pass},
+                headers=HEADERS,
+                timeout=120,
+                stream=True,
+            )
+            return Response(
+                response.iter_content(chunk_size=8192),
+                status=response.status_code,
+                content_type=response.headers.get("content-type", "application/xml"),
+            )
+        except Exception as e:
+            return Response(f"<!-- Error: {e} -->", content_type="application/xml")
+    
+    # Use first source for EPG (TODO: merge EPG from all sources in future)
+    if enabled_sources:
+        source = enabled_sources[0]
+        host = source["host"].rstrip("/")
+        
+        try:
+            response = requests.get(
+                f"{host}/xmltv.php",
+                params={"username": source["username"], "password": source["password"]},
+                headers=HEADERS,
+                timeout=120,
+                stream=True,
+            )
+            return Response(
+                response.iter_content(chunk_size=8192),
+                status=response.status_code,
+                content_type=response.headers.get("content-type", "application/xml"),
+            )
+        except Exception as e:
+            return Response(f"<!-- Error: {e} -->", content_type="application/xml")
+    
+    return Response("<!-- No sources configured -->", content_type="application/xml")
 
 
 # ============================================

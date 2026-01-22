@@ -1683,7 +1683,6 @@ def player_api_merged():
         # Get Live Categories - merge from all sources
         elif action == "get_live_categories":
             result = []
-            seen_names = set()
             for idx, source in enumerate(enabled_sources):
                 source_id = source.get("id")
                 prefix = source.get("prefix", "")
@@ -1692,18 +1691,15 @@ def player_api_merged():
                     cat_name = cat.get("category_name", "")
                     if should_include(cat_name, filters):
                         display_name = f"{prefix}{cat_name}" if prefix else cat_name
-                        if display_name not in seen_names:
-                            seen_names.add(display_name)
-                            cat_copy = cat.copy()
-                            cat_copy["category_name"] = display_name
-                            cat_copy["category_id"] = encode_virtual_id(idx, cat.get("category_id", 0))
-                            result.append(cat_copy)
+                        cat_copy = cat.copy()
+                        cat_copy["category_name"] = display_name
+                        cat_copy["category_id"] = encode_virtual_id(idx, cat.get("category_id", 0))
+                        result.append(cat_copy)
             return jsonify(result)
 
         # Get VOD Categories
         elif action == "get_vod_categories":
             result = []
-            seen_names = set()
             for idx, source in enumerate(enabled_sources):
                 source_id = source.get("id")
                 prefix = source.get("prefix", "")
@@ -1712,18 +1708,15 @@ def player_api_merged():
                     cat_name = cat.get("category_name", "")
                     if should_include(cat_name, filters):
                         display_name = f"{prefix}{cat_name}" if prefix else cat_name
-                        if display_name not in seen_names:
-                            seen_names.add(display_name)
-                            cat_copy = cat.copy()
-                            cat_copy["category_name"] = display_name
-                            cat_copy["category_id"] = encode_virtual_id(idx, cat.get("category_id", 0))
-                            result.append(cat_copy)
+                        cat_copy = cat.copy()
+                        cat_copy["category_name"] = display_name
+                        cat_copy["category_id"] = encode_virtual_id(idx, cat.get("category_id", 0))
+                        result.append(cat_copy)
             return jsonify(result)
 
         # Get Series Categories
         elif action == "get_series_categories":
             result = []
-            seen_names = set()
             for idx, source in enumerate(enabled_sources):
                 source_id = source.get("id")
                 prefix = source.get("prefix", "")
@@ -1732,12 +1725,10 @@ def player_api_merged():
                     cat_name = cat.get("category_name", "")
                     if should_include(cat_name, filters):
                         display_name = f"{prefix}{cat_name}" if prefix else cat_name
-                        if display_name not in seen_names:
-                            seen_names.add(display_name)
-                            cat_copy = cat.copy()
-                            cat_copy["category_name"] = display_name
-                            cat_copy["category_id"] = encode_virtual_id(idx, cat.get("category_id", 0))
-                            result.append(cat_copy)
+                        cat_copy = cat.copy()
+                        cat_copy["category_name"] = display_name
+                        cat_copy["category_id"] = encode_virtual_id(idx, cat.get("category_id", 0))
+                        result.append(cat_copy)
             return jsonify(result)
 
         # Get Live Streams - merge with virtual IDs

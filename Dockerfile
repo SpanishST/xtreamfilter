@@ -15,4 +15,7 @@ RUN mkdir -p /data
 EXPOSE 5000
 
 # Run with gunicorn for production
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", "main:app"]
+# - 4 workers for parallel stream handling
+# - 8 threads per worker for concurrent connections
+# - Increased timeout for long-running streams
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "--threads", "8", "--timeout", "0", "--keep-alive", "65", "main:app"]

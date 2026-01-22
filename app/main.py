@@ -30,8 +30,9 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
-# Stream chunk size for proxying (64KB)
-STREAM_CHUNK_SIZE = 65536
+# Stream chunk size for proxying
+# 1MB chunks work better for high-bitrate 4K streams
+STREAM_CHUNK_SIZE = 1024 * 1024  # 1MB
 
 # Virtual ID offset for merged playlists (10 million per source)
 # This allows up to 10 million streams per source before collision
@@ -169,12 +170,20 @@ def proxy_stream(upstream_url, stream_type="live"):
             else:
                 response_headers["Content-Type"] = "video/mp4"
         
-        # Create streaming response
+        # Add headers to prevent buffering issues
+        response_headers["X-Accel-Buffering"] = "no"  # Disable nginx buffering
+        response_headers["Cache-Control"] = "no-cache, no-store"
+        
+        # Create streaming response with optimized generator
         def generate():
             try:
+                # Use larger chunks for better throughput
                 for chunk in upstream_response.iter_content(chunk_size=STREAM_CHUNK_SIZE):
                     if chunk:
                         yield chunk
+            except GeneratorExit:
+                # Client disconnected - this is normal
+                pass
             except Exception as e:
                 logger.warning(f"Stream proxy error: {e}")
             finally:
@@ -184,6 +193,7 @@ def proxy_stream(upstream_url, stream_type="live"):
             generate(),
             status=upstream_response.status_code,
             headers=response_headers,
+            direct_passthrough=True,  # Bypass Flask's response processing for better performance
         )
         
     except requests.exceptions.Timeout:

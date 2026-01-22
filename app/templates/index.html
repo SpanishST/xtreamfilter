@@ -677,21 +677,6 @@
     <div class="container">
         <h1>📺 XtreamFilter</h1>
         
-        <!-- Connection Info Card -->
-        <div class="card">
-            <h2>Connection Info</h2>
-            <p style="color: #888; font-size: 0.9em; margin-bottom: 15px;">
-                Each source has its own dedicated route. Configure a route in the source settings to get connection URLs.
-            </p>
-            
-            <div id="connection-info-list">
-                <!-- Connection info per source will be rendered here by JavaScript -->
-                <p style="color: #666; font-style: italic;">Loading sources...</p>
-            </div>
-            
-            <p style="margin: 15px 0 5px 0; color: #666; font-size: 0.85em;">💡 Username/Password: use your provider credentials</p>
-        </div>
-        
         <!-- Cache Status Card -->
         <div class="card">
             <h2>🗄️ Cache Status</h2>
@@ -735,6 +720,60 @@
             </div>
         </div>
         
+        <!-- Connection URLs Card -->
+        <div class="card">
+            <h2>🔗 Connection URLs</h2>
+            <p style="color: #888; font-size: 0.9em; margin-bottom: 15px;">
+                Use these URLs to connect your IPTV app. The merged endpoint combines all sources with unique IDs.
+            </p>
+            
+            <div style="display: flex; flex-direction: column; gap: 15px;">
+                <!-- Merged API (Recommended) -->
+                <div style="background: rgba(0, 212, 255, 0.1); border: 1px solid rgba(0, 212, 255, 0.3); border-radius: 10px; padding: 15px;">
+                    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                        <span style="background: #00d4ff; color: #000; padding: 2px 8px; border-radius: 4px; font-size: 0.75em; font-weight: bold;">RECOMMENDED</span>
+                        <strong style="color: #00d4ff;">Merged API (All Sources)</strong>
+                    </div>
+                    <p style="color: #aaa; font-size: 0.85em; margin-bottom: 10px;">Combines all sources into one unified playlist with no ID conflicts.</p>
+                    <div style="display: flex; flex-direction: column; gap: 8px;">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <code id="merged-api-url" style="flex: 1; background: rgba(0,0,0,0.3); padding: 10px; border-radius: 6px; font-size: 0.85em; overflow-x: auto; white-space: nowrap;">Loading...</code>
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="copyToClipboard('merged-api-url')" title="Copy">📋</button>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <span style="color: #888; font-size: 0.8em; min-width: 80px;">M3U Playlist:</span>
+                            <code id="merged-m3u-url" style="flex: 1; background: rgba(0,0,0,0.3); padding: 10px; border-radius: 6px; font-size: 0.85em; overflow-x: auto; white-space: nowrap;">Loading...</code>
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="copyToClipboard('merged-m3u-url')" title="Copy">📋</button>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <span style="color: #888; font-size: 0.8em; min-width: 80px;">EPG/XMLTV:</span>
+                            <code id="merged-epg-url" style="flex: 1; background: rgba(0,0,0,0.3); padding: 10px; border-radius: 6px; font-size: 0.85em; overflow-x: auto; white-space: nowrap;">Loading...</code>
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="copyToClipboard('merged-epg-url')" title="Copy">📋</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Per-Source Routes -->
+                <div style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 10px; padding: 15px;">
+                    <strong style="color: #ccc;">Per-Source Routes</strong>
+                    <p style="color: #888; font-size: 0.85em; margin: 10px 0;">Access individual sources directly (uses original IDs).</p>
+                    <div id="source-urls-list" style="display: flex; flex-direction: column; gap: 8px;">
+                        <span style="color: #666; font-style: italic;">Configure a route for each source to see URLs here.</span>
+                    </div>
+                </div>
+                
+                <!-- Proxy Status -->
+                <div style="display: flex; align-items: center; gap: 15px; padding: 10px; background: rgba(255,255,255,0.03); border-radius: 8px;">
+                    <span style="color: #888;">Stream Proxying:</span>
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" id="proxy-enabled-toggle" onchange="toggleProxyMode(this.checked)" style="width: 18px; height: 18px;">
+                        <span id="proxy-status-label" style="color: #2ed573;">Enabled</span>
+                    </label>
+                    <span style="color: #666; font-size: 0.8em;">(When enabled, all streams pass through this server)</span>
+                </div>
+            </div>
+        </div>
+
         <!-- Sources Card -->
         <div class="card">
             <h2>📡 Sources</h2>
@@ -1067,42 +1106,63 @@
         }
         
         function renderConnectionInfo() {
-            const container = document.getElementById('connection-info-list');
             const baseUrl = window.location.origin;
             
+            // Update merged URLs
+            document.getElementById('merged-api-url').textContent = `${baseUrl}/merged/player_api.php?username=USER&password=PASS`;
+            document.getElementById('merged-m3u-url').textContent = `${baseUrl}/playlist.m3u`;
+            document.getElementById('merged-epg-url').textContent = `${baseUrl}/merged/xmltv.php`;
+            
+            // Update per-source URLs
+            const sourceUrlsContainer = document.getElementById('source-urls-list');
             const sourcesWithRoutes = sourcesData.filter(s => s.route);
             
             if (sourcesWithRoutes.length === 0) {
-                container.innerHTML = '<p style="color: #ffa502; font-style: italic;">⚠️ No sources have a route configured. Add a route to a source to get connection URLs.</p>';
-                return;
+                sourceUrlsContainer.innerHTML = '<span style="color: #666; font-style: italic;">Configure a route for each source to see URLs here.</span>';
+            } else {
+                let sourceHtml = '';
+                for (const source of sourcesWithRoutes) {
+                    const apiUrl = `${baseUrl}/${source.route}/player_api.php`;
+                    sourceHtml += `
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <span style="color: #00d4ff; font-size: 0.85em; min-width: 120px;">${source.name || source.route}:</span>
+                            <code id="source-url-${source.id}" style="flex: 1; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 6px; font-size: 0.8em; overflow-x: auto; white-space: nowrap;">${apiUrl}</code>
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="copyToClipboard('source-url-${source.id}')" title="Copy">📋</button>
+                        </div>
+                    `;
+                }
+                sourceUrlsContainer.innerHTML = sourceHtml;
             }
             
-            let html = '';
-            for (const source of sourcesWithRoutes) {
-                const filteredUrl = `${baseUrl}/${source.route}`;
-                const fullUrl = `${baseUrl}/${source.route}/full`;
-                const filteredId = `conn-filtered-${source.id}`;
-                const fullId = `conn-full-${source.id}`;
-                
-                html += `
-                    <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid rgba(255,255,255,0.1);">
-                        <h3 style="color: #00d4ff; margin: 0 0 12px 0; font-size: 1em;">📡 ${source.name || 'Unnamed'}</h3>
-                        
-                        <p style="color: #2ed573; margin: 0 0 8px 0; font-size: 0.9em;">🎯 Filtered (with filters applied):</p>
-                        <div class="url-box" style="margin-bottom: 12px;">
-                            <code id="${filteredId}">${filteredUrl}</code>
-                            <button class="copy-btn" onclick="copyToClipboard('${filteredId}')">Copy</button>
-                        </div>
-                        
-                        <p style="color: #ffa502; margin: 0 0 8px 0; font-size: 0.9em;">📦 Unfiltered (full catalog):</p>
-                        <div class="url-box">
-                            <code id="${fullId}">${fullUrl}</code>
-                            <button class="copy-btn" onclick="copyToClipboard('${fullId}')">Copy</button>
-                        </div>
-                    </div>
-                `;
-            }
-            container.innerHTML = html;
+            // Load proxy status
+            loadProxyStatus();
+        }
+        
+        function loadProxyStatus() {
+            fetch('/api/options/proxy')
+                .then(r => r.json())
+                .then(data => {
+                    const enabled = data.proxy_enabled !== false;
+                    document.getElementById('proxy-enabled-toggle').checked = enabled;
+                    document.getElementById('proxy-status-label').textContent = enabled ? 'Enabled' : 'Disabled';
+                    document.getElementById('proxy-status-label').style.color = enabled ? '#2ed573' : '#ff6b6b';
+                })
+                .catch(() => {});
+        }
+        
+        function toggleProxyMode(enabled) {
+            fetch('/api/options/proxy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: enabled })
+            })
+            .then(r => r.json())
+            .then(data => {
+                const isEnabled = data.proxy_enabled !== false;
+                document.getElementById('proxy-status-label').textContent = isEnabled ? 'Enabled' : 'Disabled';
+                document.getElementById('proxy-status-label').style.color = isEnabled ? '#2ed573' : '#ff6b6b';
+            })
+            .catch(() => {});
         }
         
         function updateFilterSourceSelect() {

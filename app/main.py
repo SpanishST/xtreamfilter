@@ -1377,7 +1377,7 @@ def playlist():
     return Response(
         m3u_content,
         mimetype="audio/x-mpegurl",
-        headers={"Content-Disposition": 'inline; filename="playlist.m3u"', "Cache-Control": "no-cache"},
+        headers={"Content-Disposition": 'attachment; filename="playlist.m3u"', "Cache-Control": "no-cache"},
     )
 
 
@@ -1401,7 +1401,7 @@ def playlist_full():
     return Response(
         m3u_content,
         mimetype="audio/x-mpegurl",
-        headers={"Content-Disposition": 'inline; filename="playlist_full.m3u"', "Cache-Control": "no-cache"},
+        headers={"Content-Disposition": 'attachment; filename="playlist_full.m3u"', "Cache-Control": "no-cache"},
     )
 
 

@@ -3,7 +3,7 @@
 [![Docker Hub](https://img.shields.io/docker/pulls/spanishst/xtreamfilter.svg)](https://hub.docker.com/r/spanishst/xtreamfilter)
 [![Docker Image Size](https://img.shields.io/docker/image-size/spanishst/xtreamfilter/latest)](https://hub.docker.com/r/spanishst/xtreamfilter)
 
-A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Series) from multiple sources with per-source dedicated routes, advanced filtering, and caching.
+A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Series) from multiple sources with per-source dedicated routes, merged playlists, stream proxying, and advanced filtering.
 
 ## Screenshots
 
@@ -15,13 +15,15 @@ A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Se
 
 - 📺 **Full Xtream Codes API Proxy** - Works with any Xtream-compatible player (TiviMate, XCIPTV, etc.)
 - 🔗 **Multi-Source Support** - Configure multiple Xtream providers with dedicated routes per source
+- 🎬 **Merged Playlist** - Combine all sources into a single unified endpoint with virtual IDs
+- 🛡️ **Stream Proxy** - Optionally proxy all streams through the server (hides upstream URLs, better for 4K)
 - 🛣️ **Per-Source Routing** - Each source has its own URL path to avoid ID conflicts
 - 🎬 **Live TV, Movies & Series** - Filter all content types independently
 - 🔧 **Web-based Configuration** - Easy UI to manage sources, settings and filters
 - 🎯 **Advanced Filtering** - Include/exclude filters with multiple match types per source
 - 🚫 **Exclude All** - Start with empty and whitelist only what you want
 - 🏷️ **Source Prefixing** - Optionally prefix group names to identify content origin
-- 🔄 **Smart Caching** - Background refresh with configurable TTL and progress bar
+- 🔄 **Smart Caching** - Background refresh with configurable TTL and real-time progress bar
 - 💾 **Persistent Cache** - Survives container restarts
 - 🐳 **Docker Ready** - Easy deployment with docker-compose
 
@@ -88,16 +90,82 @@ http://localhost:8080
 
 3. **Configure your filters** for each source - Live TV, VOD, and Series
 
-4. **Connect your IPTV player** using the dedicated route:
-   ```
-   Server: http://YOUR_SERVER_IP:8080/<route>
-   Username: (from your provider)
-   Password: (from your provider)
-   ```
+4. **Connect your IPTV player** using one of the connection URLs shown in the UI
+
+## Connection URLs
+
+XtreamFilter provides multiple ways to connect your IPTV player:
+
+### Merged Endpoint (Recommended for Multi-Source)
+
+Combines all sources into a single playlist with virtual IDs that prevent conflicts:
+
+```
+Server: http://YOUR_SERVER_IP:8080/merged
+Username: proxy
+Password: proxy
+```
+
+- All sources appear in one unified playlist
+- Virtual IDs ensure no conflicts between sources (each source gets a 10M ID range)
+- Filters from each source are applied
+
+### Per-Source Endpoints
+
+Each source has its own dedicated endpoint:
+
+**Filtered endpoint (with your filter rules applied):**
+```
+Server: http://YOUR_SERVER_IP:8080/<route>
+Username: (from your provider)
+Password: (from your provider)
+```
+
+**Unfiltered endpoint (full catalog from this source):**
+```
+Server: http://YOUR_SERVER_IP:8080/<route>/full
+Username: (from your provider)
+Password: (from your provider)
+```
+
+### M3U Playlists
+
+Generate M3U playlists for players that don't support Xtream API:
+
+| URL | Description |
+|-----|-------------|
+| `/playlist.m3u` | All sources combined (merged with virtual IDs) |
+| `/<route>/playlist.m3u` | Single source filtered |
+| `/<route>/full/playlist.m3u` | Single source unfiltered |
+
+## Stream Proxy Mode
+
+When enabled, all streams are proxied through the XtreamFilter server instead of redirecting clients directly to upstream servers.
+
+### Benefits
+
+- **Privacy**: Upstream server URLs are hidden from clients
+- **4K Performance**: Better buffering with 1MB chunks and optimized settings
+- **Single Point of Control**: All traffic flows through your server
+
+### Toggle
+
+Enable/disable via the web UI in the **Connection URLs** card, or via API:
+
+```bash
+# Enable proxy
+curl -X POST http://localhost:8080/api/proxy/enable
+
+# Disable proxy  
+curl -X POST http://localhost:8080/api/proxy/disable
+
+# Check status
+curl http://localhost:8080/api/proxy/status
+```
+
+When **disabled**, clients receive a 302 redirect to the upstream URL.
 
 ## Multi-Source Support
-
-XtreamFilter allows you to manage multiple Xtream Codes providers, each with its own dedicated endpoint.
 
 ### Adding Sources
 
@@ -118,25 +186,6 @@ Each source **must have** a dedicated route. This ensures:
 - Clean separation of content per source
 - Correct playback for all content types
 
-**Configure in the web UI:**
-1. Edit a source
-2. Set the **Dedicated Route** field (e.g., `smarters` or `strong`)
-3. Use the source-specific endpoint in your IPTV player
-
-**Filtered endpoint (with your filter rules applied):**
-```
-Server: http://YOUR_SERVER_IP:8080/<route>
-Username: (from your provider)
-Password: (from your provider)
-```
-
-**Unfiltered endpoint (full catalog from this source):**
-```
-Server: http://YOUR_SERVER_IP:8080/<route>/full
-Username: (from your provider)
-Password: (from your provider)
-```
-
 **Example with two sources:**
 - Source "Smarters" with route `smarters`:
   - Filtered: `http://YOUR_SERVER_IP:8080/smarters`
@@ -144,8 +193,6 @@ Password: (from your provider)
 - Source "Strong" with route `strong`:
   - Filtered: `http://YOUR_SERVER_IP:8080/strong`
   - Unfiltered: `http://YOUR_SERVER_IP:8080/strong/full`
-
-> **Single Source Mode:** If you only have one source configured, the root `/player_api.php` will automatically serve that source, so you can use either the root or the dedicated route.
 
 ### Source Prefixing
 
@@ -183,8 +230,6 @@ Each source has its own independent filter configuration:
 | `regex` | Regular expression pattern | `^FR\|.*` for regex patterns |
 | `all` | Matches everything | Use with "Exclude All" to start fresh |
 
-> **Note:** `starts_with` only matches at the **beginning** of the name. If you want to match anywhere, use `contains`.
-
 ### Exclude All Feature
 
 The **Exclude All** option lets you start with a clean slate by excluding everything, then adding include rules to whitelist specific content:
@@ -216,10 +261,11 @@ The proxy caches all data from upstream servers for fast responses:
 
 - **Default TTL:** 1 hour (3600 seconds)
 - **Background Refresh:** Automatic refresh before cache expires
-- **Progress Bar:** Visual progress indicator during refresh
+- **Real-time Progress:** Visual progress bar with step-by-step updates
+- **Cross-Worker Sync:** Progress is visible even when page is reloaded
 - **Disk Persistence:** Cache survives container restarts
 - **Per-Source Caching:** Each source is cached independently
-- **Manual Control:** Refresh or clear cache via UI button
+- **Cancel Button:** Abort stuck refreshes if needed
 
 ### Cache Status
 
@@ -227,9 +273,18 @@ The web UI shows:
 - Total Live Streams, Movies, and Series counts
 - Cache validity status (✅ valid, ⚠️ expired, 🔄 refreshing)
 - Last refresh time
-- Progress bar during refresh with current step
+- Progress bar during refresh with current step and source
 
 ## API Endpoints
+
+### Merged Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `/merged/player_api.php` | Unified Xtream API with all sources merged |
+| `/merged/live/{user}/{pass}/{id}` | Live stream (virtual ID decoded automatically) |
+| `/merged/movie/{user}/{pass}/{id}` | Movie stream (virtual ID decoded automatically) |
+| `/merged/series/{user}/{pass}/{id}` | Series stream (virtual ID decoded automatically) |
 
 ### Per-Source Dedicated Routes
 
@@ -239,12 +294,20 @@ Each source with a dedicated route exposes these endpoints:
 |----------|-------------|
 | `/<route>/player_api.php` | Filtered Xtream API for this source |
 | `/<route>/full/player_api.php` | Unfiltered Xtream API for this source |
-| `/<route>/live/{user}/{pass}/{id}` | Live stream redirect |
-| `/<route>/movie/{user}/{pass}/{id}` | Movie stream redirect |
-| `/<route>/series/{user}/{pass}/{id}` | Series stream redirect |
+| `/<route>/live/{user}/{pass}/{id}` | Live stream |
+| `/<route>/movie/{user}/{pass}/{id}` | Movie stream |
+| `/<route>/series/{user}/{pass}/{id}` | Series stream |
 | `/<route>/full/live/{user}/{pass}/{id}` | Live stream (unfiltered path) |
 | `/<route>/full/movie/{user}/{pass}/{id}` | Movie stream (unfiltered path) |
 | `/<route>/full/series/{user}/{pass}/{id}` | Series stream (unfiltered path) |
+
+### M3U Playlist Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `/playlist.m3u` | Merged playlist from all sources (virtual IDs) |
+| `/<route>/playlist.m3u` | Filtered playlist for single source |
+| `/<route>/full/playlist.m3u` | Unfiltered playlist for single source |
 
 ### Root Endpoints
 
@@ -261,7 +324,6 @@ Each source with a dedicated route exposes these endpoints:
 | Endpoint | Description |
 |----------|-------------|
 | `/` | Web configuration UI |
-| `/playlist.m3u` | Filtered M3U playlist |
 | `/health` | Health check |
 
 ### Source Management API
@@ -281,7 +343,16 @@ Each source with a dedicated route exposes these endpoints:
 |----------|--------|-------------|
 | `/api/cache/status` | GET | Cache status, stats, and refresh progress |
 | `/api/cache/refresh` | POST | Trigger background cache refresh |
+| `/api/cache/cancel-refresh` | POST | Cancel/clear stuck refresh state |
 | `/api/cache/clear` | POST | Clear all cached data |
+
+### Proxy Management API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/proxy/status` | GET | Check if stream proxy is enabled |
+| `/api/proxy/enable` | POST | Enable stream proxying |
+| `/api/proxy/disable` | POST | Disable stream proxying (use redirects) |
 
 ## Configuration
 
@@ -310,11 +381,24 @@ Configuration is stored in `data/config.json`:
     "live": true,
     "vod": true,
     "series": true
+  },
+  "options": {
+    "proxy_streams": false
   }
 }
 ```
 
 Cache is stored in `data/api_cache.json` and automatically rebuilt on startup.
+
+## Performance Tuning
+
+For 4K streams and large catalogs, the application is optimized with:
+
+- **Gunicorn workers**: 4 workers with 8 threads each
+- **Chunk size**: 1MB for stream proxying
+- **Timeouts**: No timeout for long-running streams
+- **Keep-alive**: 65 seconds for connection reuse
+- **Direct passthrough**: Efficient memory usage for large streams
 
 ## Docker Compose
 

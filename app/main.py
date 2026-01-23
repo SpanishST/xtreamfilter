@@ -881,6 +881,50 @@ def should_include(value, filter_rules):
     return True
 
 
+def build_category_map(categories):
+    """Build a category ID to name map, handling both dict and string formats.
+    
+    Some APIs may return categories as strings instead of dicts, this handles both cases.
+    """
+    cat_map = {}
+    for cat in categories:
+        if isinstance(cat, dict):
+            cat_id = str(cat.get("category_id", ""))
+            cat_name = cat.get("category_name", "")
+            cat_map[cat_id] = cat_name
+        elif isinstance(cat, str):
+            # If it's a string, use it as both ID and name
+            cat_map[cat] = cat
+    return cat_map
+
+
+def safe_get_category_name(cat):
+    """Safely get category_name from a category that may be a dict or string."""
+    if isinstance(cat, dict):
+        return cat.get("category_name", "")
+    elif isinstance(cat, str):
+        return cat
+    return ""
+
+
+def safe_get_category_id(cat):
+    """Safely get category_id from a category that may be a dict or string."""
+    if isinstance(cat, dict):
+        return cat.get("category_id", "")
+    elif isinstance(cat, str):
+        return cat
+    return ""
+
+
+def safe_copy_category(cat):
+    """Safely copy a category, returning a dict whether input is dict or string."""
+    if isinstance(cat, dict):
+        return cat.copy()
+    elif isinstance(cat, str):
+        return {"category_id": cat, "category_name": cat}
+    return {"category_id": "", "category_name": ""}
+
+
 def generate_m3u(config, use_virtual_ids=True):
     """Generate filtered M3U playlist from cached data, merging all sources.
     
@@ -938,7 +982,7 @@ def generate_m3u(config, use_virtual_ids=True):
             live_channel_filters = live_filters.get("channels", [])
 
             categories = get_cached("live_categories", source_id)
-            cat_map = {str(cat.get("category_id", "")): cat.get("category_name", "") for cat in categories}
+            cat_map = build_category_map(categories)
             streams = get_cached("live_streams", source_id)
 
             for stream in streams:
@@ -974,7 +1018,7 @@ def generate_m3u(config, use_virtual_ids=True):
             vod_channel_filters = vod_filters.get("channels", [])
 
             vod_categories = get_cached("vod_categories", source_id)
-            vod_cat_map = {str(cat.get("category_id", "")): cat.get("category_name", "") for cat in vod_categories}
+            vod_cat_map = build_category_map(vod_categories)
             vod_streams = get_cached("vod_streams", source_id)
 
             for vod in vod_streams:
@@ -1007,7 +1051,7 @@ def generate_m3u(config, use_virtual_ids=True):
             series_channel_filters = series_filters.get("channels", [])
 
             series_categories = get_cached("series_categories", source_id)
-            series_cat_map = {str(cat.get("category_id", "")): cat.get("category_name", "") for cat in series_categories}
+            series_cat_map = build_category_map(series_categories)
             all_series = get_cached("series", source_id)
 
             for series in all_series:
@@ -1383,7 +1427,7 @@ def groups():
     else:
         categories = []
     
-    groups_list = sorted(set(cat.get("category_name", "") for cat in categories if cat.get("category_name")))
+    groups_list = sorted(set(safe_get_category_name(cat) for cat in categories if safe_get_category_name(cat)))
     return jsonify({"groups": groups_list})
 
 
@@ -1418,7 +1462,7 @@ def channels():
         categories = []
 
     # Build category mapping
-    cat_map = {str(c.get("category_id", "")): c.get("category_name", "") for c in categories}
+    cat_map = build_category_map(categories)
 
     # Extract channel info with group
     items = []
@@ -1480,7 +1524,7 @@ def api_browse():
         return jsonify({"error": "Invalid content type", "items": []})
 
     # Build category mapping with counts
-    cat_map = {str(c.get("category_id", "")): c.get("category_name", "") for c in categories}
+    cat_map = build_category_map(categories)
 
     # Count items per group
     group_counts = {}
@@ -1688,12 +1732,12 @@ def player_api_merged():
                 prefix = source.get("prefix", "")
                 filters = source.get("filters", {}).get("live", {}).get("groups", [])
                 for cat in get_cached("live_categories", source_id):
-                    cat_name = cat.get("category_name", "")
+                    cat_name = safe_get_category_name(cat)
                     if should_include(cat_name, filters):
                         display_name = f"{prefix}{cat_name}" if prefix else cat_name
-                        cat_copy = cat.copy()
+                        cat_copy = safe_copy_category(cat)
                         cat_copy["category_name"] = display_name
-                        cat_copy["category_id"] = encode_virtual_id(idx, cat.get("category_id", 0))
+                        cat_copy["category_id"] = encode_virtual_id(idx, safe_get_category_id(cat))
                         result.append(cat_copy)
             return jsonify(result)
 
@@ -1705,12 +1749,12 @@ def player_api_merged():
                 prefix = source.get("prefix", "")
                 filters = source.get("filters", {}).get("vod", {}).get("groups", [])
                 for cat in get_cached("vod_categories", source_id):
-                    cat_name = cat.get("category_name", "")
+                    cat_name = safe_get_category_name(cat)
                     if should_include(cat_name, filters):
                         display_name = f"{prefix}{cat_name}" if prefix else cat_name
-                        cat_copy = cat.copy()
+                        cat_copy = safe_copy_category(cat)
                         cat_copy["category_name"] = display_name
-                        cat_copy["category_id"] = encode_virtual_id(idx, cat.get("category_id", 0))
+                        cat_copy["category_id"] = encode_virtual_id(idx, safe_get_category_id(cat))
                         result.append(cat_copy)
             return jsonify(result)
 
@@ -1722,12 +1766,12 @@ def player_api_merged():
                 prefix = source.get("prefix", "")
                 filters = source.get("filters", {}).get("series", {}).get("groups", [])
                 for cat in get_cached("series_categories", source_id):
-                    cat_name = cat.get("category_name", "")
+                    cat_name = safe_get_category_name(cat)
                     if should_include(cat_name, filters):
                         display_name = f"{prefix}{cat_name}" if prefix else cat_name
-                        cat_copy = cat.copy()
+                        cat_copy = safe_copy_category(cat)
                         cat_copy["category_name"] = display_name
-                        cat_copy["category_id"] = encode_virtual_id(idx, cat.get("category_id", 0))
+                        cat_copy["category_id"] = encode_virtual_id(idx, safe_get_category_id(cat))
                         result.append(cat_copy)
             return jsonify(result)
 
@@ -1740,7 +1784,7 @@ def player_api_merged():
                 group_filters = filters.get("live", {}).get("groups", [])
                 channel_filters = filters.get("live", {}).get("channels", [])
                 categories = get_cached("live_categories", source_id)
-                cat_map = {str(c.get("category_id", "")): c.get("category_name", "") for c in categories}
+                cat_map = build_category_map(categories)
                 
                 for stream in get_cached("live_streams", source_id):
                     cat_id = str(stream.get("category_id", ""))
@@ -1762,7 +1806,7 @@ def player_api_merged():
                 group_filters = filters.get("vod", {}).get("groups", [])
                 channel_filters = filters.get("vod", {}).get("channels", [])
                 categories = get_cached("vod_categories", source_id)
-                cat_map = {str(c.get("category_id", "")): c.get("category_name", "") for c in categories}
+                cat_map = build_category_map(categories)
                 
                 for stream in get_cached("vod_streams", source_id):
                     cat_id = str(stream.get("category_id", ""))
@@ -1784,7 +1828,7 @@ def player_api_merged():
                 group_filters = filters.get("series", {}).get("groups", [])
                 channel_filters = filters.get("series", {}).get("channels", [])
                 categories = get_cached("series_categories", source_id)
-                cat_map = {str(c.get("category_id", "")): c.get("category_name", "") for c in categories}
+                cat_map = build_category_map(categories)
                 
                 for series in get_cached("series", source_id):
                     cat_id = str(series.get("category_id", ""))
@@ -1968,9 +2012,9 @@ def player_api_source(source_route):
             categories = get_cached("live_categories", source_id)
             result = []
             for cat in categories:
-                cat_name = cat.get("category_name", "")
+                cat_name = safe_get_category_name(cat)
                 if should_include(cat_name, group_filters):
-                    cat_copy = cat.copy()
+                    cat_copy = safe_copy_category(cat)
                     if prefix:
                         cat_copy["category_name"] = f"{prefix}{cat_name}"
                     result.append(cat_copy)
@@ -1982,9 +2026,9 @@ def player_api_source(source_route):
             categories = get_cached("vod_categories", source_id)
             result = []
             for cat in categories:
-                cat_name = cat.get("category_name", "")
+                cat_name = safe_get_category_name(cat)
                 if should_include(cat_name, group_filters):
-                    cat_copy = cat.copy()
+                    cat_copy = safe_copy_category(cat)
                     if prefix:
                         cat_copy["category_name"] = f"{prefix}{cat_name}"
                     result.append(cat_copy)
@@ -1996,9 +2040,9 @@ def player_api_source(source_route):
             categories = get_cached("series_categories", source_id)
             result = []
             for cat in categories:
-                cat_name = cat.get("category_name", "")
+                cat_name = safe_get_category_name(cat)
                 if should_include(cat_name, group_filters):
-                    cat_copy = cat.copy()
+                    cat_copy = safe_copy_category(cat)
                     if prefix:
                         cat_copy["category_name"] = f"{prefix}{cat_name}"
                     result.append(cat_copy)
@@ -2010,7 +2054,7 @@ def player_api_source(source_route):
             channel_filters = source_filters.get("live", {}).get("channels", [])
             streams = get_cached("live_streams", source_id)
             categories = get_cached("live_categories", source_id)
-            cat_map = {str(c.get("category_id", "")): c.get("category_name", "") for c in categories}
+            cat_map = build_category_map(categories)
             
             result = []
             for stream in streams:
@@ -2027,7 +2071,7 @@ def player_api_source(source_route):
             channel_filters = source_filters.get("vod", {}).get("channels", [])
             streams = get_cached("vod_streams", source_id)
             categories = get_cached("vod_categories", source_id)
-            cat_map = {str(c.get("category_id", "")): c.get("category_name", "") for c in categories}
+            cat_map = build_category_map(categories)
             
             result = []
             for stream in streams:
@@ -2044,7 +2088,7 @@ def player_api_source(source_route):
             channel_filters = source_filters.get("series", {}).get("channels", [])
             series_list = get_cached("series", source_id)
             categories = get_cached("series_categories", source_id)
-            cat_map = {str(c.get("category_id", "")): c.get("category_name", "") for c in categories}
+            cat_map = build_category_map(categories)
             
             result = []
             for s in series_list:
@@ -2185,8 +2229,8 @@ def player_api_source_full(source_route):
             if prefix:
                 result = []
                 for cat in categories:
-                    cat_copy = cat.copy()
-                    cat_copy["category_name"] = f"{prefix}{cat.get('category_name', '')}"
+                    cat_copy = safe_copy_category(cat)
+                    cat_copy["category_name"] = f"{prefix}{safe_get_category_name(cat)}"
                     result.append(cat_copy)
                 return jsonify(result)
             return jsonify(categories)
@@ -2197,8 +2241,8 @@ def player_api_source_full(source_route):
             if prefix:
                 result = []
                 for cat in categories:
-                    cat_copy = cat.copy()
-                    cat_copy["category_name"] = f"{prefix}{cat.get('category_name', '')}"
+                    cat_copy = safe_copy_category(cat)
+                    cat_copy["category_name"] = f"{prefix}{safe_get_category_name(cat)}"
                     result.append(cat_copy)
                 return jsonify(result)
             return jsonify(categories)
@@ -2209,8 +2253,8 @@ def player_api_source_full(source_route):
             if prefix:
                 result = []
                 for cat in categories:
-                    cat_copy = cat.copy()
-                    cat_copy["category_name"] = f"{prefix}{cat.get('category_name', '')}"
+                    cat_copy = safe_copy_category(cat)
+                    cat_copy["category_name"] = f"{prefix}{safe_get_category_name(cat)}"
                     result.append(cat_copy)
                 return jsonify(result)
             return jsonify(categories)

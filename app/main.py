@@ -608,7 +608,10 @@ def fetch_from_upstream(host, username, password, action):
     try:
         import time
         start_time = time.time()
-        response = requests.get(url, params=params, headers=HEADERS, timeout=120)
+        # Use tuple timeout: (connect_timeout, read_timeout)
+        # Large playlists may need significant time to download
+        # Connect timeout: 30s, Read timeout: 600s (10 min) for huge lists
+        response = requests.get(url, params=params, headers=HEADERS, timeout=(30, 600))
         elapsed = time.time() - start_time
         if response.status_code == 200:
             data = response.json()
@@ -617,7 +620,11 @@ def fetch_from_upstream(host, username, password, action):
         else:
             logger.warning(f"Fetch {action} failed with status {response.status_code} in {elapsed:.1f}s")
     except requests.exceptions.Timeout:
-        logger.error(f"Timeout fetching {action} (>120s)")
+        logger.error(f"Timeout fetching {action}")
+    except requests.exceptions.ChunkedEncodingError as e:
+        logger.error(f"Connection interrupted while fetching {action}: {e}")
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection error fetching {action}: {e}")
     except Exception as e:
         logger.error(f"Error fetching {action}: {e}")
     return None
@@ -760,9 +767,11 @@ def get_categories(host, username, password, content_type="live"):
     action = actions.get(content_type, "get_live_categories")
     url = f"{host}/player_api.php?username={username}&password={password}&action={action}"
     try:
-        response = requests.get(url, timeout=60, headers=HEADERS)
+        # Use tuple timeout: (connect_timeout, read_timeout)
+        response = requests.get(url, timeout=(30, 120), headers=HEADERS)
         return response.json() if response.status_code == 200 else []
-    except (requests.RequestException, json.JSONDecodeError):
+    except (requests.RequestException, json.JSONDecodeError) as e:
+        logger.error(f"Error in get_categories ({content_type}): {e}")
         return []
 
 
@@ -770,9 +779,11 @@ def get_live_streams(host, username, password):
     """Get all live streams from Xtream API"""
     url = f"{host}/player_api.php?username={username}&password={password}&action=get_live_streams"
     try:
-        response = requests.get(url, timeout=120, headers=HEADERS)
+        # Use tuple timeout: (connect_timeout, read_timeout) for large playlists
+        response = requests.get(url, timeout=(30, 600), headers=HEADERS)
         return response.json() if response.status_code == 200 else []
-    except (requests.RequestException, json.JSONDecodeError):
+    except (requests.RequestException, json.JSONDecodeError) as e:
+        logger.error(f"Error in get_live_streams: {e}")
         return []
 
 
@@ -780,9 +791,11 @@ def get_vod_streams(host, username, password):
     """Get all VOD (movies) from Xtream API"""
     url = f"{host}/player_api.php?username={username}&password={password}&action=get_vod_streams"
     try:
-        response = requests.get(url, timeout=120, headers=HEADERS)
+        # Use tuple timeout: (connect_timeout, read_timeout) for large playlists
+        response = requests.get(url, timeout=(30, 600), headers=HEADERS)
         return response.json() if response.status_code == 200 else []
-    except (requests.RequestException, json.JSONDecodeError):
+    except (requests.RequestException, json.JSONDecodeError) as e:
+        logger.error(f"Error in get_vod_streams: {e}")
         return []
 
 
@@ -790,9 +803,11 @@ def get_series(host, username, password):
     """Get all series from Xtream API"""
     url = f"{host}/player_api.php?username={username}&password={password}&action=get_series"
     try:
-        response = requests.get(url, timeout=120, headers=HEADERS)
+        # Use tuple timeout: (connect_timeout, read_timeout) for large playlists
+        response = requests.get(url, timeout=(30, 600), headers=HEADERS)
         return response.json() if response.status_code == 200 else []
-    except (requests.RequestException, json.JSONDecodeError):
+    except (requests.RequestException, json.JSONDecodeError) as e:
+        logger.error(f"Error in get_series: {e}")
         return []
 
 

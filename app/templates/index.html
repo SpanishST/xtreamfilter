@@ -718,6 +718,7 @@
                 <span style="color: #888; font-size: 0.85em;">| TTL: <span id="cache-ttl">-</span>s</span>
                 <button type="button" class="btn btn-secondary btn-sm" onclick="refreshCache()" id="refresh-cache-btn">🔄 Refresh Now</button>
                 <button type="button" class="btn btn-sm" onclick="cancelRefresh()" id="cancel-refresh-btn" style="display: none; background: #dc3545;">✕ Cancel</button>
+                <button type="button" class="btn btn-sm" onclick="clearCache()" id="clear-cache-btn" style="background: #ff6b6b;">🗑️ Clear Cache</button>
             </div>
         </div>
         
@@ -1464,6 +1465,27 @@
                     loadCacheStatus();
                 })
                 .catch(() => {});
+        }
+        
+        function clearCache() {
+            if (!confirm('Clear all cached data? This will remove all cached streams and categories. A refresh will be needed to fetch data again.')) return;
+            
+            document.getElementById('clear-cache-btn').disabled = true;
+            document.getElementById('clear-cache-btn').textContent = '⏳ Clearing...';
+            
+            fetch('/api/cache/clear', { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('clear-cache-btn').disabled = false;
+                    document.getElementById('clear-cache-btn').textContent = '🗑️ Clear Cache';
+                    loadCacheStatus();
+                    alert('Cache cleared successfully!');
+                })
+                .catch(() => {
+                    document.getElementById('clear-cache-btn').disabled = false;
+                    document.getElementById('clear-cache-btn').textContent = '🗑️ Clear Cache';
+                    alert('Failed to clear cache');
+                });
         }
         
         function switchCategory(category) {

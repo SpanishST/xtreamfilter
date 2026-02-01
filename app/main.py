@@ -1137,9 +1137,47 @@ async def send_telegram_notification(category_name: str, new_items: list):
     try:
         client = await get_http_client()
         
-        # If single item with cover, use sendPhoto
-        if len(new_items) == 1 and new_items[0].get("cover"):
-            item = new_items[0]
+        # Collect items with valid covers
+        items_with_covers = [item for item in new_items if item.get("cover")]
+        
+        # If we have multiple items with covers, use sendMediaGroup (album)
+        if len(items_with_covers) >= 2:
+            # Telegram allows max 10 media items per group
+            media_items = items_with_covers[:10]
+            
+            media = []
+            for i, item in enumerate(media_items):
+                media_obj = {
+                    "type": "photo",
+                    "media": item["cover"],
+                }
+                # Only first item gets the caption
+                if i == 0:
+                    caption = f"🆕 <b>{category_name}</b> - {len(new_items)} new item(s)\n\n"
+                    caption += "\n".join([f"• {it['name']}" for it in new_items[:20]])
+                    if len(new_items) > 20:
+                        caption += f"\n\n... and {len(new_items) - 20} more"
+                    media_obj["caption"] = caption
+                    media_obj["parse_mode"] = "HTML"
+                media.append(media_obj)
+            
+            url = f"https://api.telegram.org/bot{bot_token}/sendMediaGroup"
+            payload = {
+                "chat_id": chat_id,
+                "media": media
+            }
+            logger.info(f"Sending Telegram album with {len(media)} photos")
+            response = await client.post(url, json=payload)
+            logger.info(f"Telegram sendMediaGroup response: {response.status_code} - {response.text[:200]}")
+            
+            # If media group fails, fallback to text message
+            if response.status_code != 200:
+                logger.warning(f"Telegram sendMediaGroup failed, falling back to text: {response.text}")
+                await _send_telegram_text_message(client, bot_token, chat_id, category_name, new_items)
+        
+        # Single item with cover: use sendPhoto
+        elif len(items_with_covers) == 1:
+            item = items_with_covers[0]
             caption = f"🆕 <b>{category_name}</b>\n\n• {item['name']}"
             
             url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
@@ -1154,33 +1192,33 @@ async def send_telegram_notification(category_name: str, new_items: list):
             # If photo fails (invalid URL), fallback to text message
             if response.status_code != 200:
                 logger.warning(f"Telegram sendPhoto failed, falling back to text: {response.text}")
-                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-                payload = {
-                    "chat_id": chat_id,
-                    "text": caption,
-                    "parse_mode": "HTML"
-                }
-                await client.post(url, json=payload)
+                await _send_telegram_text_message(client, bot_token, chat_id, category_name, new_items)
+        
+        # No covers: send text message
         else:
-            # Multiple items: send text message with list
-            item_list = "\n".join([f"• {item['name']}" for item in new_items[:20]])
-            if len(new_items) > 20:
-                item_list += f"\n\n... and {len(new_items) - 20} more"
-            
-            message = f"🆕 <b>{category_name}</b> - {len(new_items)} new item(s)\n\n{item_list}"
-            
-            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-            payload = {
-                "chat_id": chat_id,
-                "text": message,
-                "parse_mode": "HTML"
-            }
-            await client.post(url, json=payload)
+            await _send_telegram_text_message(client, bot_token, chat_id, category_name, new_items)
         
         logger.info(f"Telegram notification sent for category '{category_name}': {len(new_items)} new items")
         
     except Exception as e:
         logger.error(f"Failed to send Telegram notification: {e}")
+
+
+async def _send_telegram_text_message(client, bot_token: str, chat_id: str, category_name: str, new_items: list):
+    """Send a text-only Telegram message with item list."""
+    item_list = "\n".join([f"• {item['name']}" for item in new_items[:20]])
+    if len(new_items) > 20:
+        item_list += f"\n\n... and {len(new_items) - 20} more"
+    
+    message = f"🆕 <b>{category_name}</b> - {len(new_items)} new item(s)\n\n{item_list}"
+    
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML"
+    }
+    await client.post(url, json=payload)
 
 
 def get_item_details_from_cache(item_id: str, source_id: str, content_type: str) -> dict:
@@ -3784,9 +3822,10 @@ async def test_telegram_notification():
 async def test_telegram_diff_notification(request: Request):
     """Send a test diff notification (simulates new items found in a category)
     
-    Query params:
-    - single: if "true", sends single item with cover (uses sendPhoto)
-    - otherwise sends multiple items (uses sendMessage)
+    Body params:
+    - single: sends single item with cover (uses sendPhoto)
+    - album: sends multiple items with covers (uses sendMediaGroup)
+    - (default): sends multiple items without covers (uses sendMessage)
     """
     try:
         body = await request.json()
@@ -3794,6 +3833,7 @@ async def test_telegram_diff_notification(request: Request):
         body = {}
     
     single = body.get("single", False)
+    album = body.get("album", False)
     
     if single:
         # Single item with cover - will use sendPhoto
@@ -3803,15 +3843,33 @@ async def test_telegram_diff_notification(request: Request):
                 "cover": "https://image.tmdb.org/t/p/w500/t6HIqrRAclMCA60NsSmeqe9RmNV.jpg"
             }
         ]
-        msg = "Test diff notification sent with 1 item (with cover image)"
+        msg = "Test notification sent with 1 item (photo)"
+    elif album:
+        # Multiple items with covers - will use sendMediaGroup (album)
+        # Using Wikipedia/Wikimedia images which are more reliably accessible
+        sample_items = [
+            {
+                "name": "Inception (2010)",
+                "cover": "https://upload.wikimedia.org/wikipedia/en/2/2e/Inception_%282010%29_theatrical_poster.jpg"
+            },
+            {
+                "name": "The Dark Knight (2008)",
+                "cover": "https://upload.wikimedia.org/wikipedia/en/1/1c/The_Dark_Knight_%282008_film%29.jpg"
+            },
+            {
+                "name": "Interstellar (2014)",
+                "cover": "https://upload.wikimedia.org/wikipedia/en/b/bc/Interstellar_film_poster.jpg"
+            }
+        ]
+        msg = "Test notification sent with 3 items (album with covers)"
     else:
-        # Multiple items - will use sendMessage with list
+        # Multiple items without covers - will use sendMessage
         sample_items = [
             {"name": "Test Movie 1 - 4K HDR", "cover": ""},
             {"name": "Test Movie 2 - Dolby Vision", "cover": ""},
             {"name": "Test Series S01E01", "cover": ""}
         ]
-        msg = "Test diff notification sent with 3 sample items"
+        msg = "Test notification sent with 3 items (text list)"
     
     try:
         await send_telegram_notification("🧪 Test Category", sample_items)

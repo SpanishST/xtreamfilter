@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -32,6 +33,7 @@ CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 CACHE_FILE = os.path.join(DATA_DIR, "playlist_cache.m3u")
 API_CACHE_FILE = os.path.join(DATA_DIR, "api_cache.json")
 PROGRESS_FILE = os.path.join(DATA_DIR, "refresh_progress.json")
+CATEGORIES_FILE = os.path.join(DATA_DIR, "categories.json")
 
 # Templates
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
@@ -568,6 +570,38 @@ def get_cached(key, source_id=None):
     return result
 
 
+def get_cached_with_source_info(key, category_key):
+    """Get cached data with source information attached to each item.
+    
+    Returns a list of items where each item has source_id and source_name added.
+    Also returns a merged category map from all sources.
+    """
+    sources = _api_cache.get("sources", {})
+    config = load_config()
+    
+    # Build source name lookup
+    source_names = {}
+    for src in config.get("sources", []):
+        source_names[src.get("id")] = src.get("name", "Unknown")
+    
+    result = []
+    all_categories = []
+    
+    for src_id, src_cache in sources.items():
+        src_name = source_names.get(src_id, "Unknown")
+        items = src_cache.get(key, [])
+        categories = src_cache.get(category_key, [])
+        all_categories.extend(categories)
+        
+        for item in items:
+            item_copy = dict(item)
+            item_copy["_source_id"] = src_id
+            item_copy["_source_name"] = src_name
+            result.append(item_copy)
+    
+    return result, all_categories
+
+
 def get_source_for_stream(stream_id, stream_type="live"):
     """Get the source ID for a given stream ID"""
     return _stream_source_map.get(stream_type, {}).get(str(stream_id))
@@ -800,6 +834,17 @@ async def refresh_cache():
 
             await rebuild_stream_source_map()
             save_cache_to_disk()
+            
+            # Refresh pattern-based categories
+            save_refresh_progress({
+                "in_progress": True,
+                "current_source": total_sources,
+                "total_sources": total_sources,
+                "current_source_name": "Categories",
+                "current_step": "Refreshing automatic categories...",
+                "percent": 95
+            })
+            await refresh_pattern_categories_async()
 
             logger.info(
                 f"Refresh complete. Total: {total_stats['live_streams']} live, "
@@ -875,7 +920,16 @@ def load_config():
             "vod": True,
             "series": True,
         },
-        "options": {"cache_enabled": True, "cache_ttl": 3600, "proxy_streams": True},
+        "options": {
+            "cache_enabled": True,
+            "cache_ttl": 3600,
+            "proxy_streams": True,
+            "telegram": {
+                "enabled": False,
+                "bot_token": "",
+                "chat_id": ""
+            }
+        },
     }
 
     if os.path.exists(CONFIG_FILE):
@@ -940,6 +994,414 @@ def save_config(config):
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
+
+
+# ============================================
+# FAVORITES FUNCTIONS
+# ============================================
+# CUSTOM CATEGORIES FUNCTIONS
+# ============================================
+
+
+def load_categories():
+    """Load categories from file, with migration from old favorites.json"""
+    default_categories = {
+        "categories": [{
+            "id": "favorites",
+            "name": "Favorite streams",
+            "icon": "❤️",
+            "mode": "manual",
+            "content_types": ["live", "vod", "series"],
+            "items": [],
+            "patterns": [],
+            "pattern_logic": "or",
+            "use_source_filters": False,
+            "cached_items": [],
+            "last_refresh": None
+        }]
+    }
+    
+    if os.path.exists(CATEGORIES_FILE):
+        try:
+            with open(CATEGORIES_FILE) as f:
+                data = json.load(f)
+                if "categories" in data:
+                    return data
+        except (OSError, json.JSONDecodeError) as e:
+            logger.error(f"Error loading categories: {e}")
+    
+    # Check for old favorites.json to migrate
+    old_favorites_file = os.path.join(DATA_DIR, "favorites.json")
+    if os.path.exists(old_favorites_file):
+        try:
+            with open(old_favorites_file) as f:
+                old_favorites = json.load(f)
+            
+            # Migrate old favorites to new category structure
+            migrated_items = []
+            for content_type in ["live", "vod", "series"]:
+                for fav in old_favorites.get(content_type, []):
+                    migrated_items.append({
+                        "id": fav.get("id"),
+                        "source_id": fav.get("source_id"),
+                        "content_type": content_type,
+                        "added_at": fav.get("added_at", datetime.now().isoformat())
+                    })
+            
+            if migrated_items:
+                default_categories["categories"][0]["items"] = migrated_items
+                logger.info(f"Migrated {len(migrated_items)} items from favorites.json")
+            
+            # Save migrated data
+            save_categories(default_categories)
+            
+            # Rename old file
+            os.rename(old_favorites_file, old_favorites_file + ".bak")
+            logger.info("Renamed old favorites.json to favorites.json.bak")
+            
+        except (OSError, json.JSONDecodeError) as e:
+            logger.error(f"Error migrating favorites: {e}")
+    
+    return default_categories
+
+
+def save_categories(data):
+    """Save categories to file"""
+    os.makedirs(os.path.dirname(CATEGORIES_FILE), exist_ok=True)
+    with open(CATEGORIES_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def get_category_by_id(category_id: str):
+    """Get a category by its ID"""
+    data = load_categories()
+    for cat in data.get("categories", []):
+        if cat.get("id") == category_id:
+            return cat
+    return None
+
+
+def is_in_category(category_id: str, content_type: str, item_id: str, source_id: str) -> bool:
+    """Check if an item is in a specific category (manual mode only)"""
+    cat = get_category_by_id(category_id)
+    if not cat:
+        return False
+    
+    if cat.get("mode") == "manual":
+        for item in cat.get("items", []):
+            if (item.get("id") == item_id and 
+                item.get("source_id") == source_id and
+                item.get("content_type") == content_type):
+                return True
+    return False
+
+
+def get_item_categories(content_type: str, item_id: str, source_id: str) -> list:
+    """Get all manual categories that contain this item"""
+    data = load_categories()
+    result = []
+    for cat in data.get("categories", []):
+        if cat.get("mode") == "manual":
+            for item in cat.get("items", []):
+                if (item.get("id") == item_id and 
+                    item.get("source_id") == source_id and
+                    item.get("content_type") == content_type):
+                    result.append(cat.get("id"))
+                    break
+    return result
+
+
+async def send_telegram_notification(category_name: str, new_items: list):
+    """Send a Telegram notification for new items in a category.
+    
+    Args:
+        category_name: Name of the category that was updated
+        new_items: List of dicts with 'name' and optionally 'cover' keys
+    """
+    config = load_config()
+    telegram_config = config.get("options", {}).get("telegram", {})
+    
+    if not telegram_config.get("enabled"):
+        return
+    
+    bot_token = telegram_config.get("bot_token", "")
+    chat_id = telegram_config.get("chat_id", "")
+    
+    if not bot_token or not chat_id:
+        logger.warning("Telegram notification skipped: missing bot_token or chat_id")
+        return
+    
+    if not new_items:
+        return
+    
+    try:
+        client = await get_http_client()
+        
+        # Collect items with valid covers
+        items_with_covers = [item for item in new_items if item.get("cover")]
+        
+        # If we have multiple items with covers, use sendMediaGroup (album)
+        if len(items_with_covers) >= 2:
+            # Telegram allows max 10 media items per group
+            media_items = items_with_covers[:10]
+            
+            media = []
+            for i, item in enumerate(media_items):
+                media_obj = {
+                    "type": "photo",
+                    "media": item["cover"],
+                }
+                # Only first item gets the caption
+                if i == 0:
+                    caption = f"🆕 <b>{category_name}</b> - {len(new_items)} new item(s)\n\n"
+                    caption += "\n".join([f"• {it['name']}" for it in new_items[:20]])
+                    if len(new_items) > 20:
+                        caption += f"\n\n... and {len(new_items) - 20} more"
+                    media_obj["caption"] = caption
+                    media_obj["parse_mode"] = "HTML"
+                media.append(media_obj)
+            
+            url = f"https://api.telegram.org/bot{bot_token}/sendMediaGroup"
+            payload = {
+                "chat_id": chat_id,
+                "media": media
+            }
+            logger.info(f"Sending Telegram album with {len(media)} photos")
+            response = await client.post(url, json=payload)
+            logger.info(f"Telegram sendMediaGroup response: {response.status_code} - {response.text[:200]}")
+            
+            # If media group fails, fallback to text message
+            if response.status_code != 200:
+                logger.warning(f"Telegram sendMediaGroup failed, falling back to text: {response.text}")
+                await _send_telegram_text_message(client, bot_token, chat_id, category_name, new_items)
+        
+        # Single item with cover: use sendPhoto
+        elif len(items_with_covers) == 1:
+            item = items_with_covers[0]
+            caption = f"🆕 <b>{category_name}</b>\n\n• {item['name']}"
+            
+            url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+            payload = {
+                "chat_id": chat_id,
+                "photo": item["cover"],
+                "caption": caption,
+                "parse_mode": "HTML"
+            }
+            response = await client.post(url, json=payload)
+            
+            # If photo fails (invalid URL), fallback to text message
+            if response.status_code != 200:
+                logger.warning(f"Telegram sendPhoto failed, falling back to text: {response.text}")
+                await _send_telegram_text_message(client, bot_token, chat_id, category_name, new_items)
+        
+        # No covers: send text message
+        else:
+            await _send_telegram_text_message(client, bot_token, chat_id, category_name, new_items)
+        
+        logger.info(f"Telegram notification sent for category '{category_name}': {len(new_items)} new items")
+        
+    except Exception as e:
+        logger.error(f"Failed to send Telegram notification: {e}")
+
+
+async def _send_telegram_text_message(client, bot_token: str, chat_id: str, category_name: str, new_items: list):
+    """Send a text-only Telegram message with item list."""
+    item_list = "\n".join([f"• {item['name']}" for item in new_items[:20]])
+    if len(new_items) > 20:
+        item_list += f"\n\n... and {len(new_items) - 20} more"
+    
+    message = f"🆕 <b>{category_name}</b> - {len(new_items)} new item(s)\n\n{item_list}"
+    
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML"
+    }
+    await client.post(url, json=payload)
+
+
+def get_item_details_from_cache(item_id: str, source_id: str, content_type: str) -> dict:
+    """Get full item details (name, cover) from cache by ID and source."""
+    if content_type == "live":
+        streams, _ = get_cached_with_source_info("live_streams", "live_categories")
+        id_field = "stream_id"
+    elif content_type == "vod":
+        streams, _ = get_cached_with_source_info("vod_streams", "vod_categories")
+        id_field = "stream_id"
+    elif content_type == "series":
+        streams, _ = get_cached_with_source_info("series", "series_categories")
+        id_field = "series_id"
+    else:
+        return {}
+    
+    for stream in streams:
+        stream_id = str(stream.get(id_field, ""))
+        stream_source = stream.get("_source_id", "")
+        if stream_id == item_id and stream_source == source_id:
+            return {
+                "name": stream.get("name", "Unknown"),
+                "cover": stream.get("stream_icon", "") or stream.get("cover", "")
+            }
+    return {}
+
+
+def refresh_pattern_categories_sync():
+    """Synchronous wrapper that collects notifications to send."""
+    return _refresh_pattern_categories_internal()
+
+
+def _refresh_pattern_categories_internal():
+    """Internal refresh logic that returns notifications to send.
+    
+    Returns:
+        List of tuples: (category_name, new_items_list)
+    """
+    data = load_categories()
+    config = load_config()
+    sources_config = {s.get("id"): s for s in config.get("sources", [])}
+    current_time = int(time.time())
+    
+    updated = False
+    notifications_to_send = []
+    
+    for cat in data.get("categories", []):
+        if cat.get("mode") != "automatic":
+            continue
+        
+        patterns = cat.get("patterns", [])
+        recently_added_days = cat.get("recently_added_days", 0)
+        
+        # Skip if no patterns AND no recently_added_days filter
+        if not patterns and recently_added_days <= 0:
+            continue
+        
+        content_types = cat.get("content_types", ["live", "vod", "series"])
+        use_source_filters = cat.get("use_source_filters", False)
+        pattern_logic = cat.get("pattern_logic", "or")  # 'or' or 'and'
+        
+        # Calculate cutoff timestamp for recently added filter
+        recently_added_cutoff = current_time - (recently_added_days * 86400) if recently_added_days > 0 else 0
+        
+        matched_items = []
+        
+        for content_type in content_types:
+            if content_type == "live":
+                streams, categories = get_cached_with_source_info("live_streams", "live_categories")
+            elif content_type == "vod":
+                streams, categories = get_cached_with_source_info("vod_streams", "vod_categories")
+            elif content_type == "series":
+                streams, categories = get_cached_with_source_info("series", "series_categories")
+            else:
+                continue
+            
+            cat_map = build_category_map(categories)
+            
+            for stream in streams:
+                name = stream.get("name", "")
+                item_id = str(stream.get("stream_id") or stream.get("series_id") or "")
+                src_id = stream.get("_source_id", "")
+                
+                # Apply recently added filter
+                if recently_added_days > 0:
+                    # Use 'added' field, fallback to 'last_modified' for series
+                    added = stream.get("added") or stream.get("last_modified", 0)
+                    try:
+                        added_ts = int(added) if added else 0
+                    except (ValueError, TypeError):
+                        added_ts = 0
+                    if added_ts < recently_added_cutoff:
+                        continue
+                
+                # Apply source filters if enabled
+                if use_source_filters and src_id in sources_config:
+                    source_cfg = sources_config[src_id]
+                    filters = source_cfg.get("filters", {})
+                    content_filters = filters.get(content_type, {})
+                    group_filters = content_filters.get("groups", [])
+                    channel_filters = content_filters.get("channels", [])
+                    
+                    cat_id = str(stream.get("category_id", ""))
+                    group_name = cat_map.get(cat_id, "")
+                    
+                    if group_filters and not should_include(group_name, group_filters):
+                        continue
+                    if channel_filters and not should_include(name, channel_filters):
+                        continue
+                
+                # Check name against patterns (only if patterns exist)
+                if patterns:
+                    if pattern_logic == "and":
+                        # All patterns must match
+                        all_match = True
+                        for pattern in patterns:
+                            if not matches_filter(name, pattern):
+                                all_match = False
+                                break
+                        if not all_match:
+                            continue
+                    else:
+                        # At least one pattern must match (OR logic)
+                        any_match = False
+                        for pattern in patterns:
+                            if matches_filter(name, pattern):
+                                any_match = True
+                                break
+                        if not any_match:
+                            continue
+                
+                matched_items.append({
+                    "id": item_id,
+                    "source_id": src_id,
+                    "content_type": content_type,
+                    "name": name,
+                    "cover": stream.get("stream_icon", "") or stream.get("cover", "")
+                })
+        
+        # Detect new items (diff between old and new)
+        old_items = cat.get("cached_items", [])
+        old_item_keys = {(item.get("id"), item.get("source_id"), item.get("content_type")) for item in old_items}
+        
+        new_items = []
+        for item in matched_items:
+            key = (item["id"], item["source_id"], item["content_type"])
+            if key not in old_item_keys:
+                new_items.append({"name": item["name"], "cover": item["cover"]})
+        
+        # Check if notifications are enabled for this category
+        if cat.get("notify_telegram", False) and new_items:
+            notifications_to_send.append((cat.get("name", "Unknown Category"), new_items))
+        
+        # Store cached_items without name/cover to save space
+        cat["cached_items"] = [
+            {"id": item["id"], "source_id": item["source_id"], "content_type": item["content_type"]}
+            for item in matched_items
+        ]
+        cat["last_refresh"] = datetime.now().isoformat()
+        updated = True
+        logger.info(f"Category '{cat.get('name')}' refreshed: {len(matched_items)} items matched, {len(new_items)} new")
+    
+    if updated:
+        save_categories(data)
+    
+    return notifications_to_send
+
+
+async def refresh_pattern_categories_async():
+    """Async version that refreshes categories and sends Telegram notifications."""
+    notifications = _refresh_pattern_categories_internal()
+    
+    for category_name, new_items in notifications:
+        await send_telegram_notification(category_name, new_items)
+
+
+def refresh_pattern_categories():
+    """Refresh all automatic (pattern-based) categories.
+    
+    This is the sync entry point that just refreshes without sending notifications.
+    For notification support, use refresh_pattern_categories_async().
+    """
+    _refresh_pattern_categories_internal()
 
 
 # ============================================
@@ -1039,6 +1501,124 @@ def safe_copy_category(cat):
     elif isinstance(cat, str):
         return {"category_id": cat, "category_name": cat}
     return {"category_id": "", "category_name": ""}
+
+
+# Icon name to emoji mapping for custom categories
+ICON_EMOJI_MAP = {
+    "folder": "📁",
+    "heart": "❤️",
+    "star": "⭐",
+    "fire": "🔥",
+    "clock": "🕐",
+    "film": "🎬",
+    "tv": "📺",
+    "music": "🎵",
+    "sports": "⚽",
+    "news": "📰",
+    "kids": "👶",
+    "bookmark": "🔖",
+    "tag": "🏷️",
+    "check": "✅",
+    "play": "▶️",
+    "list": "📋"
+}
+
+def get_icon_emoji(icon_name: str) -> str:
+    """Convert icon name to emoji, or return empty string if not found."""
+    return ICON_EMOJI_MAP.get(icon_name, "")
+
+# Base offset for custom category IDs - using low numbers that fit normal Xtream range
+# Starting at 99001 to avoid conflicts with source categories (typically under 10000)
+CUSTOM_CAT_ID_BASE = 99001
+
+def get_custom_cat_id_map() -> dict:
+    """Build a mapping of custom category string IDs to sequential numeric IDs.
+    
+    Returns dict: {cat_id_string: numeric_id}
+    """
+    data = load_categories()
+    cat_id_map = {}
+    for idx, cat in enumerate(data.get("categories", [])):
+        cat_id_map[cat.get("id")] = CUSTOM_CAT_ID_BASE + idx
+    return cat_id_map
+
+def custom_cat_id_to_numeric(cat_id: str) -> str:
+    """Convert a custom category string ID to a unique positive numeric ID string.
+    
+    Uses sequential IDs starting from CUSTOM_CAT_ID_BASE (50,000,001).
+    Returns as string to match Xtream API format.
+    """
+    cat_id_map = get_custom_cat_id_map()
+    return str(cat_id_map.get(cat_id, CUSTOM_CAT_ID_BASE))
+
+def get_custom_categories_for_content_type(content_type: str) -> list:
+    """Get all custom categories that have items for the specified content type.
+    
+    Args:
+        content_type: 'live', 'vod', or 'series'
+        
+    Returns:
+        List of category dicts with 'category_id', 'category_name', and 'items' 
+    """
+    data = load_categories()
+    result = []
+    
+    # Map browse content types to internal types
+    type_map = {"live": "live", "vod": "vod", "series": "series"}
+    internal_type = type_map.get(content_type, content_type)
+    
+    for cat in data.get("categories", []):
+        # Skip if this content type is not in the category's allowed types
+        if internal_type not in cat.get("content_types", []):
+            continue
+        
+        # Get items based on mode
+        if cat.get("mode") == "manual":
+            items = cat.get("items", [])
+        else:
+            items = cat.get("cached_items", [])
+        
+        # Filter items to only those of the requested content type
+        filtered_items = [
+            item for item in items 
+            if item.get("content_type") == internal_type
+        ]
+        
+        # Only include category if it has items for this content type
+        if filtered_items:
+            result.append({
+                "id": cat.get("id"),
+                "name": cat.get("name"),
+                "icon": cat.get("icon", "📁"),
+                "items": filtered_items
+            })
+    
+    return result
+
+
+def get_custom_category_streams(content_type: str, custom_cat_id: str) -> list:
+    """Get all streams that belong to a custom category for the specified content type.
+    
+    Returns list of (source_id, item_id) tuples.
+    """
+    data = load_categories()
+    
+    for cat in data.get("categories", []):
+        if cat.get("id") != custom_cat_id:
+            continue
+        
+        if cat.get("mode") == "manual":
+            items = cat.get("items", [])
+        else:
+            items = cat.get("cached_items", [])
+        
+        return [
+            (item.get("source_id"), str(item.get("id")))
+            for item in items 
+            if item.get("content_type") == content_type
+        ]
+    
+    return []
 
 
 # ============================================
@@ -1222,6 +1802,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="XtreamFilter", lifespan=lifespan)
+
+
+# Middleware to ensure UTF-8 charset in JSON responses
+@app.middleware("http")
+async def add_utf8_charset(request: Request, call_next):
+    response = await call_next(request)
+    content_type = response.headers.get("content-type", "")
+    if "application/json" in content_type and "charset" not in content_type:
+        response.headers["content-type"] = "application/json; charset=utf-8"
+    return response
 
 
 # ============================================
@@ -1654,29 +2244,88 @@ async def api_browse(
     type: str = Query("live"),
     search: str = Query(""),
     group: str = Query(""),
+    source: str = Query(""),
+    news_days: int = Query(0),
+    category_id: str = Query(""),
+    use_source_filters: bool = Query(False),
     page: int = Query(1),
     per_page: int = Query(50),
 ):
-    """Enhanced browsing API for channels/items with full metadata."""
+    """Enhanced browsing API for channels/items with full metadata.
+    
+    Args:
+        type: Content type - 'live', 'vod', or 'series'
+        search: Search filter for name/group
+        group: Filter by specific group name
+        source: Filter by source_id (empty = all sources)
+        news_days: If > 0, only show items added within the last X days
+        category_id: If set, only show items in this category
+        use_source_filters: If True, apply source filter rules
+        page: Page number (1-indexed)
+        per_page: Items per page (max 200)
+    """
     per_page = min(per_page, 200)
     search_lower = search.lower()
+    
+    # Load source config for filter rules if needed
+    sources_config = {}
+    if use_source_filters:
+        config = load_config()
+        sources_config = {s.get("id"): s for s in config.get("sources", [])}
+    
+    # Get current timestamp for news filtering
+    current_time = int(time.time())
+    news_cutoff = current_time - (news_days * 86400) if news_days > 0 else 0
 
+    # Get data with source info
     if type == "live":
-        streams = get_cached("live_streams")
-        categories = get_cached("live_categories")
+        streams, categories = get_cached_with_source_info("live_streams", "live_categories")
     elif type == "vod":
-        streams = get_cached("vod_streams")
-        categories = get_cached("vod_categories")
+        streams, categories = get_cached_with_source_info("vod_streams", "vod_categories")
     elif type == "series":
-        streams = get_cached("series")
-        categories = get_cached("series_categories")
+        streams, categories = get_cached_with_source_info("series", "series_categories")
     else:
         return {"error": "Invalid content type", "items": []}
 
     cat_map = build_category_map(categories)
+    
+    # Build reverse lookup map for category membership (item -> list of category IDs)
+    # This is done ONCE instead of calling get_item_categories for each item
+    categories_data = load_categories()
+    category_membership = {}  # (content_type, item_id, source_id) -> [cat_id, ...]
+    for cat in categories_data.get("categories", []):
+        if cat.get("mode") == "manual":
+            for item in cat.get("items", []):
+                key = (item.get("content_type"), str(item.get("id")), item.get("source_id"))
+                if key not in category_membership:
+                    category_membership[key] = []
+                category_membership[key].append(cat.get("id"))
+    
+    # Build category item set if filtering by category
+    category_item_set = set()
+    if category_id:
+        cat_data = get_category_by_id(category_id)
+        if cat_data:
+            # For manual categories, use items; for automatic, use cached_items
+            if cat_data.get("mode") == "manual":
+                cat_items = cat_data.get("items", [])
+            else:
+                cat_items = cat_data.get("cached_items", [])
+            
+            for item in cat_items:
+                if item.get("content_type") == type:
+                    category_item_set.add((str(item.get("id")), item.get("source_id")))
 
+    # Collect unique sources for filter dropdown
+    source_set = {}
     group_counts = {}
+    
     for s in streams:
+        src_id = s.get("_source_id", "")
+        src_name = s.get("_source_name", "Unknown")
+        if src_id:
+            source_set[src_id] = src_name
+        
         cat_id = str(s.get("category_id", ""))
         grp = cat_map.get(cat_id, "Unknown")
         group_counts[grp] = group_counts.get(grp, 0) + 1
@@ -1687,10 +2336,48 @@ async def api_browse(
         cat_id = str(s.get("category_id", ""))
         grp = cat_map.get(cat_id, "Unknown")
         icon = s.get("stream_icon", "") or s.get("cover", "")
+        item_id = str(s.get("stream_id") or s.get("series_id") or "")
+        src_id = s.get("_source_id", "")
+        src_name = s.get("_source_name", "Unknown")
+        # For series, use last_modified as fallback since they don't have 'added' field
+        added = s.get("added") or s.get("last_modified", 0)
+        
+        # Try to parse added timestamp
+        try:
+            added_ts = int(added) if added else 0
+        except (ValueError, TypeError):
+            added_ts = 0
 
+        # Filter by source
+        if source and src_id != source:
+            continue
+        
+        # Apply source filter rules if enabled
+        if use_source_filters and src_id in sources_config:
+            source_cfg = sources_config[src_id]
+            filters = source_cfg.get("filters", {})
+            content_filters = filters.get(type, {})
+            group_filters = content_filters.get("groups", [])
+            channel_filters = content_filters.get("channels", [])
+            
+            if group_filters and not should_include(grp, group_filters):
+                continue
+            if channel_filters and not should_include(name, channel_filters):
+                continue
+        
+        # Filter by news_days
+        if news_days > 0 and added_ts < news_cutoff:
+            continue
+        
+        # Filter by category
+        if category_id and (item_id, src_id) not in category_item_set:
+            continue
+
+        # Filter by search
         if search_lower and search_lower not in name.lower() and search_lower not in grp.lower():
             continue
 
+        # Filter by group
         if group and grp != group:
             continue
 
@@ -1698,27 +2385,322 @@ async def api_browse(
             "name": name,
             "group": grp,
             "icon": icon,
-            "id": s.get("stream_id") or s.get("series_id"),
+            "id": item_id,
+            "source_id": src_id,
+            "source_name": src_name,
+            "added": added_ts,
         })
 
     total = len(items)
-    items.sort(key=lambda x: (x["group"].lower(), x["name"].lower()))
+    
+    # Sort: if news mode, sort by added desc; otherwise by group/name
+    if news_days > 0:
+        items.sort(key=lambda x: x["added"], reverse=True)
+    else:
+        items.sort(key=lambda x: (x["group"].lower(), x["name"].lower()))
 
     start = (page - 1) * per_page
     end = start + per_page
     paginated = items[start:end]
+    
+    # Add category membership only to paginated items (fast lookup)
+    for item in paginated:
+        key = (type, item["id"], item["source_id"])
+        item["categories"] = category_membership.get(key, [])
 
     groups_list = [{"name": g, "count": c} for g, c in sorted(group_counts.items())]
+    sources_list = [{"id": sid, "name": sname} for sid, sname in sorted(source_set.items(), key=lambda x: x[1])]
 
     return {
         "items": paginated,
         "groups": groups_list,
+        "sources": sources_list,
         "total": total,
         "page": page,
         "per_page": per_page,
         "total_pages": (total + per_page - 1) // per_page,
         "content_type": type,
     }
+
+
+# ============================================
+# CATEGORIES API ROUTES
+# ============================================
+
+
+@app.get("/api/categories")
+async def get_categories():
+    """Get all categories."""
+    data = load_categories()
+    return {"categories": data.get("categories", [])}
+
+
+@app.post("/api/categories")
+async def create_category(request: Request):
+    """Create a new category.
+    
+    Request body: {
+        "name": "Category Name",
+        "icon": "🎬",
+        "mode": "manual" | "automatic",
+        "content_types": ["live", "vod", "series"],
+        "patterns": [{"match": "contains", "value": "4K", "case_sensitive": false}],
+        "pattern_logic": "or" | "and",
+        "use_source_filters": false
+    }
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    
+    name = body.get("name", "").strip()
+    if not name:
+        return JSONResponse({"error": "Category name is required"}, status_code=400)
+    
+    mode = body.get("mode", "manual")
+    if mode not in ["manual", "automatic"]:
+        return JSONResponse({"error": "Invalid mode"}, status_code=400)
+    
+    content_types = body.get("content_types", ["live", "vod", "series"])
+    valid_types = {"live", "vod", "series"}
+    content_types = [t for t in content_types if t in valid_types]
+    if not content_types:
+        content_types = ["live", "vod", "series"]
+    
+    new_category = {
+        "id": str(uuid.uuid4()),
+        "name": name,
+        "icon": body.get("icon", "📁"),
+        "mode": mode,
+        "content_types": content_types,
+        "items": [],
+        "patterns": body.get("patterns", []),
+        "pattern_logic": body.get("pattern_logic", "or"),
+        "use_source_filters": body.get("use_source_filters", False),
+        "notify_telegram": body.get("notify_telegram", False),
+        "recently_added_days": body.get("recently_added_days", 0),
+        "cached_items": [],
+        "last_refresh": None
+    }
+    
+    data = load_categories()
+    data["categories"].append(new_category)
+    save_categories(data)
+    
+    # If automatic mode, refresh immediately
+    if mode == "automatic":
+        refresh_pattern_categories()
+        # Reload to get updated cached_items
+        data = load_categories()
+        for cat in data["categories"]:
+            if cat["id"] == new_category["id"]:
+                new_category = cat
+                break
+    
+    return {"status": "created", "category": new_category}
+
+
+@app.put("/api/categories/{category_id}")
+async def update_category(category_id: str, request: Request):
+    """Update an existing category."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    
+    data = load_categories()
+    category = None
+    cat_index = -1
+    
+    for i, cat in enumerate(data.get("categories", [])):
+        if cat.get("id") == category_id:
+            category = cat
+            cat_index = i
+            break
+    
+    if category is None:
+        return JSONResponse({"error": "Category not found"}, status_code=404)
+    
+    # Update fields
+    if "name" in body:
+        category["name"] = body["name"].strip()
+    if "icon" in body:
+        category["icon"] = body["icon"]
+    if "mode" in body and body["mode"] in ["manual", "automatic"]:
+        old_mode = category.get("mode")
+        category["mode"] = body["mode"]
+        # Clear items/cached_items when switching modes
+        if old_mode != body["mode"]:
+            if body["mode"] == "manual":
+                category["cached_items"] = []
+            else:
+                category["items"] = []
+    if "content_types" in body:
+        valid_types = {"live", "vod", "series"}
+        category["content_types"] = [t for t in body["content_types"] if t in valid_types]
+    if "patterns" in body:
+        category["patterns"] = body["patterns"]
+    if "pattern_logic" in body:
+        category["pattern_logic"] = body["pattern_logic"]
+    if "use_source_filters" in body:
+        category["use_source_filters"] = body["use_source_filters"]
+    if "notify_telegram" in body:
+        category["notify_telegram"] = body["notify_telegram"]
+    if "recently_added_days" in body:
+        category["recently_added_days"] = body["recently_added_days"]
+    
+    data["categories"][cat_index] = category
+    save_categories(data)
+    
+    # If automatic mode, refresh
+    if category.get("mode") == "automatic":
+        refresh_pattern_categories()
+        data = load_categories()
+        category = data["categories"][cat_index]
+    
+    return {"status": "updated", "category": category}
+
+
+@app.delete("/api/categories/{category_id}")
+async def delete_category(category_id: str):
+    """Delete a category."""
+    data = load_categories()
+    
+    original_count = len(data.get("categories", []))
+    data["categories"] = [
+        cat for cat in data.get("categories", [])
+        if cat.get("id") != category_id
+    ]
+    
+    if len(data["categories"]) < original_count:
+        save_categories(data)
+        return {"status": "deleted"}
+    
+    return JSONResponse({"error": "Category not found"}, status_code=404)
+
+
+@app.post("/api/categories/{category_id}/items")
+async def add_item_to_category(category_id: str, request: Request):
+    """Add an item to a manual category.
+    
+    Request body: {"content_type": "live|vod|series", "id": "123", "source_id": "abc"}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    
+    content_type = body.get("content_type")
+    item_id = str(body.get("id", ""))
+    source_id = body.get("source_id", "")
+    
+    if content_type not in ["vod", "series", "live"]:
+        return JSONResponse({"error": "Invalid content type"}, status_code=400)
+    
+    if not item_id:
+        return JSONResponse({"error": "Missing item id"}, status_code=400)
+    
+    data = load_categories()
+    category = None
+    cat_index = -1
+    
+    for i, cat in enumerate(data.get("categories", [])):
+        if cat.get("id") == category_id:
+            category = cat
+            cat_index = i
+            break
+    
+    if category is None:
+        return JSONResponse({"error": "Category not found"}, status_code=404)
+    
+    if category.get("mode") != "manual":
+        return JSONResponse({"error": "Cannot add items to automatic categories"}, status_code=400)
+    
+    # Check content type is allowed
+    if content_type not in category.get("content_types", []):
+        return JSONResponse({"error": f"Category does not accept {content_type} content"}, status_code=400)
+    
+    # Check if already exists
+    for item in category.get("items", []):
+        if (item.get("id") == item_id and 
+            item.get("source_id") == source_id and
+            item.get("content_type") == content_type):
+            return {"status": "already_exists", "message": "Item already in category"}
+    
+    # Add item
+    category["items"].append({
+        "id": item_id,
+        "source_id": source_id,
+        "content_type": content_type,
+        "added_at": datetime.now().isoformat()
+    })
+    
+    data["categories"][cat_index] = category
+    save_categories(data)
+    
+    return {"status": "added", "message": f"Added to {category['name']}"}
+
+
+@app.delete("/api/categories/{category_id}/items/{content_type}/{source_id}/{item_id}")
+async def remove_item_from_category(category_id: str, content_type: str, source_id: str, item_id: str):
+    """Remove an item from a manual category."""
+    if content_type not in ["vod", "series", "live"]:
+        return JSONResponse({"error": "Invalid content type"}, status_code=400)
+    
+    data = load_categories()
+    category = None
+    cat_index = -1
+    
+    for i, cat in enumerate(data.get("categories", [])):
+        if cat.get("id") == category_id:
+            category = cat
+            cat_index = i
+            break
+    
+    if category is None:
+        return JSONResponse({"error": "Category not found"}, status_code=404)
+    
+    if category.get("mode") != "manual":
+        return JSONResponse({"error": "Cannot remove items from automatic categories"}, status_code=400)
+    
+    original_count = len(category.get("items", []))
+    category["items"] = [
+        item for item in category.get("items", [])
+        if not (item.get("id") == item_id and 
+                item.get("source_id") == source_id and
+                item.get("content_type") == content_type)
+    ]
+    
+    if len(category["items"]) < original_count:
+        data["categories"][cat_index] = category
+        save_categories(data)
+        return {"status": "removed", "message": f"Removed from {category['name']}"}
+    
+    return {"status": "not_found", "message": "Item not found in category"}
+
+
+@app.post("/api/categories/refresh")
+async def refresh_categories():
+    """Manually trigger refresh of all automatic categories."""
+    refresh_pattern_categories()
+    return {"status": "refreshed"}
+
+
+# ============================================
+# BROWSE PAGE ROUTE
+# ============================================
+
+
+@app.get("/browse", response_class=HTMLResponse)
+async def browse_page(request: Request):
+    """Browse page for searching and filtering cached content."""
+    config = load_config()
+    sources = [{"id": s.get("id"), "name": s.get("name")} for s in config.get("sources", []) if s.get("enabled", True)]
+    return templates.TemplateResponse("browse.html", {
+        "request": request,
+        "sources": sources
+    })
 
 
 @app.get("/stats")
@@ -1867,6 +2849,15 @@ async def player_api_merged(request: Request):
 
         elif action == "get_live_categories":
             result = []
+            # First, add custom categories at the beginning
+            custom_cats = get_custom_categories_for_content_type("live")
+            for custom_cat in custom_cats:
+                result.append({
+                    "category_id": custom_cat_id_to_numeric(custom_cat['id']),
+                    "category_name": custom_cat['name'],
+                    "parent_id": 0
+                })
+            # Then add source categories
             for idx, source in enumerate(enabled_sources):
                 source_id = source.get("id")
                 prefix = source.get("prefix", "")
@@ -1877,12 +2868,21 @@ async def player_api_merged(request: Request):
                         display_name = f"{prefix}{cat_name}" if prefix else cat_name
                         cat_copy = safe_copy_category(cat)
                         cat_copy["category_name"] = display_name
-                        cat_copy["category_id"] = encode_virtual_id(idx, safe_get_category_id(cat))
+                        cat_copy["category_id"] = str(encode_virtual_id(idx, safe_get_category_id(cat)))
                         result.append(cat_copy)
             return result
 
         elif action == "get_vod_categories":
             result = []
+            # First, add custom categories at the beginning
+            custom_cats = get_custom_categories_for_content_type("vod")
+            for custom_cat in custom_cats:
+                result.append({
+                    "category_id": custom_cat_id_to_numeric(custom_cat['id']),
+                    "category_name": custom_cat['name'],
+                    "parent_id": 0
+                })
+            # Then add source categories
             for idx, source in enumerate(enabled_sources):
                 source_id = source.get("id")
                 prefix = source.get("prefix", "")
@@ -1893,12 +2893,21 @@ async def player_api_merged(request: Request):
                         display_name = f"{prefix}{cat_name}" if prefix else cat_name
                         cat_copy = safe_copy_category(cat)
                         cat_copy["category_name"] = display_name
-                        cat_copy["category_id"] = encode_virtual_id(idx, safe_get_category_id(cat))
+                        cat_copy["category_id"] = str(encode_virtual_id(idx, safe_get_category_id(cat)))
                         result.append(cat_copy)
             return result
 
         elif action == "get_series_categories":
             result = []
+            # First, add custom categories at the beginning
+            custom_cats = get_custom_categories_for_content_type("series")
+            for custom_cat in custom_cats:
+                result.append({
+                    "category_id": custom_cat_id_to_numeric(custom_cat['id']),
+                    "category_name": custom_cat['name'],
+                    "parent_id": 0
+                })
+            # Then add source categories
             for idx, source in enumerate(enabled_sources):
                 source_id = source.get("id")
                 prefix = source.get("prefix", "")
@@ -1909,12 +2918,28 @@ async def player_api_merged(request: Request):
                         display_name = f"{prefix}{cat_name}" if prefix else cat_name
                         cat_copy = safe_copy_category(cat)
                         cat_copy["category_name"] = display_name
-                        cat_copy["category_id"] = encode_virtual_id(idx, safe_get_category_id(cat))
+                        cat_copy["category_id"] = str(encode_virtual_id(idx, safe_get_category_id(cat)))
                         result.append(cat_copy)
             return result
 
         elif action == "get_live_streams":
             result = []
+            requested_cat_id = request.query_params.get("category_id")
+            
+            # Build lookup of source index by source_id
+            source_idx_map = {source.get("id"): idx for idx, source in enumerate(enabled_sources)}
+            
+            # Get custom categories and build a lookup: (source_id, item_id) -> list of custom_cat_ids (strings)
+            custom_cats = get_custom_categories_for_content_type("live")
+            custom_item_cats = {}  # (source_id, item_id) -> [cat_id_str, ...]
+            for custom_cat in custom_cats:
+                cat_id_str = custom_cat_id_to_numeric(custom_cat['id'])
+                for item in custom_cat["items"]:
+                    key = (item.get("source_id"), str(item.get("id")))
+                    if key not in custom_item_cats:
+                        custom_item_cats[key] = []
+                    custom_item_cats[key].append(cat_id_str)
+            
             for idx, source in enumerate(enabled_sources):
                 source_id = source.get("id")
                 filters = source.get("filters", {})
@@ -1927,15 +2952,48 @@ async def player_api_merged(request: Request):
                     cat_id = str(stream.get("category_id", ""))
                     group_name = cat_map.get(cat_id, "")
                     channel_name = stream.get("name", "")
+                    stream_id = str(stream.get("stream_id", ""))
+                    
                     if should_include(group_name, group_filters) and should_include(channel_name, channel_filters):
-                        stream_copy = stream.copy()
-                        stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
-                        stream_copy["category_id"] = encode_virtual_id(idx, stream.get("category_id", 0))
-                        result.append(stream_copy)
+                        virtual_cat_id = str(encode_virtual_id(idx, stream.get("category_id", 0)))
+                        # Only include if no category filter or matches
+                        if requested_cat_id is None or requested_cat_id == virtual_cat_id:
+                            stream_copy = stream.copy()
+                            stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
+                            stream_copy["category_id"] = virtual_cat_id
+                            stream_copy["category_ids"] = [int(virtual_cat_id)]
+                            result.append(stream_copy)
+                    
+                    # Also add to custom categories if applicable
+                    custom_cat_ids = custom_item_cats.get((source_id, stream_id), [])
+                    for custom_cat_id in custom_cat_ids:
+                        # Only include if no category filter or matches this custom category
+                        if requested_cat_id is None or requested_cat_id == custom_cat_id:
+                            stream_copy = stream.copy()
+                            stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
+                            stream_copy["category_id"] = custom_cat_id
+                            stream_copy["category_ids"] = [int(custom_cat_id)]
+                            result.append(stream_copy)
             return result
 
         elif action == "get_vod_streams":
             result = []
+            requested_cat_id = request.query_params.get("category_id")
+            
+            # Build lookup of source index by source_id
+            source_idx_map = {source.get("id"): idx for idx, source in enumerate(enabled_sources)}
+            
+            # Get custom categories and build a lookup: (source_id, item_id) -> list of custom_cat_ids (strings)
+            custom_cats = get_custom_categories_for_content_type("vod")
+            custom_item_cats = {}
+            for custom_cat in custom_cats:
+                cat_id_str = custom_cat_id_to_numeric(custom_cat['id'])
+                for item in custom_cat["items"]:
+                    key = (item.get("source_id"), str(item.get("id")))
+                    if key not in custom_item_cats:
+                        custom_item_cats[key] = []
+                    custom_item_cats[key].append(cat_id_str)
+            
             for idx, source in enumerate(enabled_sources):
                 source_id = source.get("id")
                 filters = source.get("filters", {})
@@ -1948,15 +3006,48 @@ async def player_api_merged(request: Request):
                     cat_id = str(stream.get("category_id", ""))
                     group_name = cat_map.get(cat_id, "")
                     channel_name = stream.get("name", "")
+                    stream_id = str(stream.get("stream_id", ""))
+                    
                     if should_include(group_name, group_filters) and should_include(channel_name, channel_filters):
-                        stream_copy = stream.copy()
-                        stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
-                        stream_copy["category_id"] = encode_virtual_id(idx, stream.get("category_id", 0))
-                        result.append(stream_copy)
+                        virtual_cat_id = str(encode_virtual_id(idx, stream.get("category_id", 0)))
+                        # Only include if no category filter or matches
+                        if requested_cat_id is None or requested_cat_id == virtual_cat_id:
+                            stream_copy = stream.copy()
+                            stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
+                            stream_copy["category_id"] = virtual_cat_id
+                            stream_copy["category_ids"] = [int(virtual_cat_id)]
+                            result.append(stream_copy)
+                    
+                    # Also add to custom categories if applicable
+                    custom_cat_ids = custom_item_cats.get((source_id, stream_id), [])
+                    for custom_cat_id in custom_cat_ids:
+                        # Only include if no category filter or matches this custom category
+                        if requested_cat_id is None or requested_cat_id == custom_cat_id:
+                            stream_copy = stream.copy()
+                            stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
+                            stream_copy["category_id"] = custom_cat_id
+                            stream_copy["category_ids"] = [int(custom_cat_id)]
+                            result.append(stream_copy)
             return result
 
         elif action == "get_series":
             result = []
+            requested_cat_id = request.query_params.get("category_id")
+            
+            # Build lookup of source index by source_id
+            source_idx_map = {source.get("id"): idx for idx, source in enumerate(enabled_sources)}
+            
+            # Get custom categories and build a lookup: (source_id, item_id) -> list of custom_cat_ids (strings)
+            custom_cats = get_custom_categories_for_content_type("series")
+            custom_item_cats = {}
+            for custom_cat in custom_cats:
+                cat_id_str = custom_cat_id_to_numeric(custom_cat['id'])
+                for item in custom_cat["items"]:
+                    key = (item.get("source_id"), str(item.get("id")))
+                    if key not in custom_item_cats:
+                        custom_item_cats[key] = []
+                    custom_item_cats[key].append(cat_id_str)
+            
             for idx, source in enumerate(enabled_sources):
                 source_id = source.get("id")
                 filters = source.get("filters", {})
@@ -1969,11 +3060,28 @@ async def player_api_merged(request: Request):
                     cat_id = str(series.get("category_id", ""))
                     group_name = cat_map.get(cat_id, "")
                     series_name = series.get("name", "")
+                    series_id = str(series.get("series_id", ""))
+                    
                     if should_include(group_name, group_filters) and should_include(series_name, channel_filters):
-                        series_copy = series.copy()
-                        series_copy["series_id"] = encode_virtual_id(idx, series.get("series_id", 0))
-                        series_copy["category_id"] = encode_virtual_id(idx, series.get("category_id", 0))
-                        result.append(series_copy)
+                        virtual_cat_id = str(encode_virtual_id(idx, series.get("category_id", 0)))
+                        # Only include if no category filter or matches
+                        if requested_cat_id is None or requested_cat_id == virtual_cat_id:
+                            series_copy = series.copy()
+                            series_copy["series_id"] = encode_virtual_id(idx, series.get("series_id", 0))
+                            series_copy["category_id"] = virtual_cat_id
+                            series_copy["category_ids"] = [int(virtual_cat_id)]
+                            result.append(series_copy)
+                    
+                    # Also add to custom categories if applicable
+                    custom_cat_ids = custom_item_cats.get((source_id, series_id), [])
+                    for custom_cat_id in custom_cat_ids:
+                        # Only include if no category filter or matches this custom category
+                        if requested_cat_id is None or requested_cat_id == custom_cat_id:
+                            series_copy = series.copy()
+                            series_copy["series_id"] = encode_virtual_id(idx, series.get("series_id", 0))
+                            series_copy["category_id"] = custom_cat_id
+                            series_copy["category_ids"] = [int(custom_cat_id)]
+                            result.append(series_copy)
             return result
 
         elif action == "get_series_info":
@@ -2621,6 +3729,156 @@ async def set_proxy_status(request: Request):
     save_config(config)
     
     return {"status": "ok", "proxy_enabled": config["options"]["proxy_streams"]}
+
+
+@app.get("/api/config/telegram")
+async def get_telegram_config():
+    """Get Telegram notification settings"""
+    config = load_config()
+    telegram_config = config.get("options", {}).get("telegram", {
+        "enabled": False,
+        "bot_token": "",
+        "chat_id": ""
+    })
+    # Mask the bot token for security (show only last 4 chars)
+    masked_config = telegram_config.copy()
+    if masked_config.get("bot_token"):
+        token = masked_config["bot_token"]
+        masked_config["bot_token_masked"] = f"***{token[-4:]}" if len(token) > 4 else "***"
+    return masked_config
+
+
+@app.post("/api/config/telegram")
+async def update_telegram_config(request: Request):
+    """Update Telegram notification settings"""
+    config = load_config()
+    data = await request.json()
+    
+    if "options" not in config:
+        config["options"] = {}
+    
+    if "telegram" not in config["options"]:
+        config["options"]["telegram"] = {
+            "enabled": False,
+            "bot_token": "",
+            "chat_id": ""
+        }
+    
+    # Update only provided fields
+    if "enabled" in data:
+        config["options"]["telegram"]["enabled"] = data["enabled"]
+    if "bot_token" in data:
+        config["options"]["telegram"]["bot_token"] = data["bot_token"]
+    if "chat_id" in data:
+        config["options"]["telegram"]["chat_id"] = data["chat_id"]
+    
+    save_config(config)
+    
+    return {"status": "ok", "message": "Telegram settings updated"}
+
+
+@app.post("/api/config/telegram/test")
+async def test_telegram_notification():
+    """Send a test Telegram notification"""
+    config = load_config()
+    telegram_config = config.get("options", {}).get("telegram", {})
+    
+    bot_token = telegram_config.get("bot_token", "")
+    chat_id = telegram_config.get("chat_id", "")
+    
+    if not bot_token or not chat_id:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": "Bot token and chat ID are required"}
+        )
+    
+    try:
+        client = await get_http_client()
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": "🔔 <b>Test Notification</b>\n\nYour Telegram integration is working correctly!",
+            "parse_mode": "HTML"
+        }
+        response = await client.post(url, json=payload)
+        result = response.json()
+        
+        if response.status_code == 200 and result.get("ok"):
+            return {"status": "ok", "message": "Test notification sent successfully"}
+        else:
+            error_msg = result.get("description", "Unknown error")
+            return JSONResponse(
+                status_code=400,
+                content={"status": "error", "message": f"Telegram API error: {error_msg}"}
+            )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": f"Failed to send test: {str(e)}"}
+        )
+
+
+@app.post("/api/config/telegram/test-diff")
+async def test_telegram_diff_notification(request: Request):
+    """Send a test diff notification (simulates new items found in a category)
+    
+    Body params:
+    - single: sends single item with cover (uses sendPhoto)
+    - album: sends multiple items with covers (uses sendMediaGroup)
+    - (default): sends multiple items without covers (uses sendMessage)
+    """
+    try:
+        body = await request.json()
+    except:
+        body = {}
+    
+    single = body.get("single", False)
+    album = body.get("album", False)
+    
+    if single:
+        # Single item with cover - will use sendPhoto
+        sample_items = [
+            {
+                "name": "Avatar: The Way of Water (2022) 4K HDR",
+                "cover": "https://image.tmdb.org/t/p/w500/t6HIqrRAclMCA60NsSmeqe9RmNV.jpg"
+            }
+        ]
+        msg = "Test notification sent with 1 item (photo)"
+    elif album:
+        # Multiple items with covers - will use sendMediaGroup (album)
+        # Using Wikipedia/Wikimedia images which are more reliably accessible
+        sample_items = [
+            {
+                "name": "Inception (2010)",
+                "cover": "https://upload.wikimedia.org/wikipedia/en/2/2e/Inception_%282010%29_theatrical_poster.jpg"
+            },
+            {
+                "name": "The Dark Knight (2008)",
+                "cover": "https://upload.wikimedia.org/wikipedia/en/1/1c/The_Dark_Knight_%282008_film%29.jpg"
+            },
+            {
+                "name": "Interstellar (2014)",
+                "cover": "https://upload.wikimedia.org/wikipedia/en/b/bc/Interstellar_film_poster.jpg"
+            }
+        ]
+        msg = "Test notification sent with 3 items (album with covers)"
+    else:
+        # Multiple items without covers - will use sendMessage
+        sample_items = [
+            {"name": "Test Movie 1 - 4K HDR", "cover": ""},
+            {"name": "Test Movie 2 - Dolby Vision", "cover": ""},
+            {"name": "Test Series S01E01", "cover": ""}
+        ]
+        msg = "Test notification sent with 3 items (text list)"
+    
+    try:
+        await send_telegram_notification("🧪 Test Category", sample_items)
+        return {"status": "ok", "message": msg}
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": f"Failed to send: {str(e)}"}
+        )
 
 
 @app.get("/api/cache/status")

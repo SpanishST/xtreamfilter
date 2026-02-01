@@ -675,7 +675,10 @@
 </head>
 <body>
     <div class="container">
-        <h1>📺 XtreamFilter</h1>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; flex-wrap: wrap; gap: 15px;">
+            <h1 style="margin-bottom: 0;">📺 XtreamFilter</h1>
+            <a href="/browse" style="display: inline-block; padding: 12px 25px; background: linear-gradient(135deg, #00d4ff, #0099cc); color: #000; font-weight: 600; border-radius: 8px; text-decoration: none; transition: all 0.3s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 5px 20px rgba(0, 212, 255, 0.4)';" onmouseout="this.style.transform='none'; this.style.boxShadow='none';">🔍 Browse Content</a>
+        </div>
         
         <!-- Cache Status Card -->
         <div class="card">
@@ -772,6 +775,13 @@
                         <span id="proxy-status-label" style="color: #2ed573;">Enabled</span>
                     </label>
                     <span style="color: #666; font-size: 0.8em;">(When enabled, all streams pass through this server)</span>
+                </div>
+                
+                <!-- Telegram Notifications -->
+                <div style="display: flex; align-items: center; gap: 15px; padding: 10px; background: rgba(255,255,255,0.03); border-radius: 8px;">
+                    <span style="color: #888;">📱 Telegram Notifications:</span>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="openTelegramModal()">⚙️ Configure</button>
+                    <span style="color: #666; font-size: 0.8em;">(Get notified when automatic categories find new items)</span>
                 </div>
             </div>
         </div>
@@ -972,6 +982,47 @@
             <div class="actions">
                 <a href="/playlist.m3u" class="btn btn-primary" target="_blank">📥 Download Playlist</a>
                 <a href="/playlist.m3u" class="btn btn-secondary" target="_blank">👁️ View Raw M3U</a>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Telegram Settings Modal -->
+    <div class="modal" id="telegram-modal">
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <h3>📱 Telegram Notifications</h3>
+                <button class="modal-close" onclick="closeTelegramModal()">✕</button>
+            </div>
+            <div class="modal-body" style="padding: 20px;">
+                <p style="color: #aaa; margin-bottom: 20px;">
+                    Get notified when automatic categories find new items during cache refresh.
+                </p>
+                
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                        <input type="checkbox" id="telegram-enabled" style="width: auto;">
+                        <span>Enable Telegram Notifications</span>
+                    </label>
+                </div>
+                
+                <div class="form-group">
+                    <label>Bot Token</label>
+                    <input type="password" id="telegram-bot-token" placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz">
+                    <small style="color: #888;">Create a bot via <a href="https://t.me/BotFather" target="_blank" style="color: #4a9eff;">@BotFather</a> to get a token</small>
+                </div>
+                
+                <div class="form-group">
+                    <label>Chat ID</label>
+                    <input type="text" id="telegram-chat-id" placeholder="-1001234567890 or your user ID">
+                    <small style="color: #888;">Use <a href="https://t.me/userinfobot" target="_blank" style="color: #4a9eff;">@userinfobot</a> to get your ID, or a group/channel ID</small>
+                </div>
+                
+                <div style="display: flex; gap: 10px; margin-top: 20px;">
+                    <button class="btn btn-secondary" onclick="testTelegramNotification()">🔔 Test</button>
+                    <button class="btn btn-primary" onclick="saveTelegramSettings()">💾 Save</button>
+                </div>
+                
+                <div id="telegram-status" style="margin-top: 15px; display: none;"></div>
             </div>
         </div>
     </div>
@@ -2026,6 +2077,7 @@
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Escape') {
                 closeBrowser();
+                closeTelegramModal();
             }
         });
         
@@ -2033,6 +2085,12 @@
         document.getElementById('browser-modal').addEventListener('click', function(e) {
             if (e.target === this) {
                 closeBrowser();
+            }
+        });
+        
+        document.getElementById('telegram-modal').addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeTelegramModal();
             }
         });
         
@@ -2046,6 +2104,107 @@
                 }
             });
         });
+        
+        // ============================================
+        // TELEGRAM NOTIFICATIONS
+        // ============================================
+        
+        function openTelegramModal() {
+            document.getElementById('telegram-modal').classList.add('active');
+            loadTelegramSettings();
+        }
+        
+        function closeTelegramModal() {
+            document.getElementById('telegram-modal').classList.remove('active');
+            document.getElementById('telegram-status').style.display = 'none';
+        }
+        
+        function loadTelegramSettings() {
+            fetch('/api/config/telegram')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('telegram-enabled').checked = data.enabled || false;
+                    document.getElementById('telegram-chat-id').value = data.chat_id || '';
+                    // Don't populate token field for security, show placeholder if set
+                    const tokenField = document.getElementById('telegram-bot-token');
+                    if (data.bot_token_masked) {
+                        tokenField.placeholder = `Current: ${data.bot_token_masked}`;
+                    }
+                })
+                .catch(() => {});
+        }
+        
+        function saveTelegramSettings() {
+            const enabled = document.getElementById('telegram-enabled').checked;
+            const botToken = document.getElementById('telegram-bot-token').value;
+            const chatId = document.getElementById('telegram-chat-id').value;
+            
+            const payload = {
+                enabled: enabled,
+                chat_id: chatId
+            };
+            
+            // Only include bot_token if user entered a new one
+            if (botToken) {
+                payload.bot_token = botToken;
+            }
+            
+            fetch('/api/config/telegram', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            })
+            .then(r => r.json())
+            .then(data => {
+                showTelegramStatus('success', 'Settings saved successfully!');
+                // Clear the token field and reload to show masked version
+                document.getElementById('telegram-bot-token').value = '';
+                loadTelegramSettings();
+            })
+            .catch(() => {
+                showTelegramStatus('error', 'Failed to save settings');
+            });
+        }
+        
+        function testTelegramNotification() {
+            showTelegramStatus('info', 'Sending test notification...');
+            
+            fetch('/api/config/telegram/test', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'}
+            })
+            .then(r => r.json().then(data => ({status: r.status, data})))
+            .then(({status, data}) => {
+                if (status === 200) {
+                    showTelegramStatus('success', data.message);
+                } else {
+                    showTelegramStatus('error', data.message);
+                }
+            })
+            .catch(() => {
+                showTelegramStatus('error', 'Failed to send test notification');
+            });
+        }
+        
+        function showTelegramStatus(type, message) {
+            const statusEl = document.getElementById('telegram-status');
+            statusEl.style.display = 'block';
+            statusEl.style.padding = '10px';
+            statusEl.style.borderRadius = '4px';
+            
+            if (type === 'success') {
+                statusEl.style.background = 'rgba(34, 197, 94, 0.2)';
+                statusEl.style.color = '#22c55e';
+            } else if (type === 'error') {
+                statusEl.style.background = 'rgba(239, 68, 68, 0.2)';
+                statusEl.style.color = '#ef4444';
+            } else {
+                statusEl.style.background = 'rgba(59, 130, 246, 0.2)';
+                statusEl.style.color = '#3b82f6';
+            }
+            
+            statusEl.textContent = message;
+        }
     </script>
 </body>
 </html>

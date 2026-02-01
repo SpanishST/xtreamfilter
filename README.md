@@ -25,7 +25,10 @@ A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Se
 - 🏷️ **Source Prefixing** - Optionally prefix group names to identify content origin
 - 🔄 **Smart Caching** - Background refresh with configurable TTL and real-time progress bar
 - 💾 **Persistent Cache** - Survives container restarts
-- 🐳 **Docker Ready** - Easy deployment with docker-compose
+- � **Content Browser** - Browse and search all your content with cover art and details
+- 📂 **Custom Categories** - Create manual or automatic categories with pattern matching
+- 📱 **Telegram Notifications** - Get notified when new content matches your categories
+- �🐳 **Docker Ready** - Easy deployment with docker-compose
 
 ## Quick Start
 
@@ -305,6 +308,102 @@ The web UI shows:
 - Last refresh time
 - Progress bar during refresh with current step and source
 
+## Browse Content
+
+The **Browse** feature provides a rich interface to explore all your IPTV content:
+
+- **Visual Grid View** - Browse movies and series with cover art thumbnails
+- **Search & Filter** - Search by name, filter by group/category
+- **Content Details** - View descriptions, ratings, cast, and episode lists
+- **Quick Actions** - Add items to custom categories directly from the browser
+- **Pagination** - Efficiently browse large catalogs
+
+Access the browser at `/browse` or click the **🔍 Browse Content** button on the main page.
+
+## Custom Categories
+
+Create your own categories to organize content across all sources:
+
+### Manual Categories
+
+Manually curate collections by adding items one by one:
+
+1. Create a category with mode **Manual**
+2. Browse content and click the ➕ button to add items
+3. Items remain in the category until you remove them
+
+### Automatic Categories
+
+Automatically collect content based on search patterns:
+
+1. Create a category with mode **Automatic**
+2. Define search patterns (contains, starts with, regex, etc.)
+3. Choose pattern logic: **Match ANY** (OR) or **Match ALL** (AND)
+4. Optionally filter by **Recently Added** (last 7, 14, 30 days, etc.)
+5. Enable **Apply source filter rules** to respect your source filters
+
+**Pattern Match Types:**
+| Type | Description | Example |
+|------|-------------|---------|
+| `contains` | Name contains value | `Marvel` matches "Marvel Avengers" |
+| `starts_with` | Name starts with value | `Star Wars` matches "Star Wars: Episode IV" |
+| `ends_with` | Name ends with value | `4K` matches "Avatar 4K" |
+| `exact` | Exact match | `Inception` matches only "Inception" |
+| `regex` | Regular expression | `^The.*\(2024\)$` for regex patterns |
+| `not_contains` | Name does NOT contain | `XXX` excludes adult content |
+
+**Example:** Create a "New 4K Movies" category:
+- Mode: Automatic
+- Content Types: VOD only
+- Pattern: `contains` → `4K`
+- Recently Added: Last 7 days
+- Notify Telegram: ✅
+
+Automatic categories refresh when the cache refreshes, detecting new content automatically.
+
+## Telegram Notifications
+
+Get notified on Telegram when automatic categories find new content:
+
+### Setup
+
+1. **Create a Telegram Bot:**
+   - Message [@BotFather](https://t.me/BotFather) on Telegram
+   - Send `/newbot` and follow the prompts
+   - Copy the **Bot Token** (e.g., `123456789:ABCdefGHI...`)
+
+2. **Get your Chat ID:**
+   - Message [@userinfobot](https://t.me/userinfobot) on Telegram
+   - It will reply with your **Chat ID** (e.g., `1234567890`)
+   - For groups/channels, add the bot and get the group ID
+
+3. **Configure in XtreamFilter:**
+   - Go to the main page and click **⚙️ Configure** next to "Telegram Notifications"
+   - Enter your Bot Token and Chat ID
+   - Enable notifications and click **💾 Save**
+   - Click **🔔 Test** to verify it works
+
+4. **Enable per category:**
+   - Edit an automatic category
+   - Check **📱 Send Telegram notification when new items are found**
+
+### Notification Formats
+
+| Scenario | Format |
+|----------|--------|
+| Single item with cover | Photo message with movie poster |
+| Multiple items with covers | Album (up to 10 photos) with caption |
+| Items without covers | Text message with bullet list |
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/config/telegram` | GET | Get Telegram settings (token masked) |
+| `/api/config/telegram` | POST | Update Telegram settings |
+| `/api/config/telegram/test` | POST | Send a test notification |
+| `/api/config/telegram/test-diff` | POST | Send a test category update notification |
+
 ## API Endpoints
 
 ### Merged Endpoints
@@ -375,6 +474,25 @@ Each source with a dedicated route exposes these endpoints:
 | `/api/cache/refresh` | POST | Trigger background cache refresh |
 | `/api/cache/cancel-refresh` | POST | Cancel/clear stuck refresh state |
 | `/api/cache/clear` | POST | Clear all cached data |
+
+### Categories API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/categories` | GET | List all categories |
+| `/api/categories` | POST | Create a new category |
+| `/api/categories/<id>` | PUT | Update a category |
+| `/api/categories/<id>` | DELETE | Delete a category |
+| `/api/categories/<id>/items` | POST | Add item to manual category |
+| `/api/categories/<id>/items` | DELETE | Remove item from manual category |
+| `/api/categories/refresh` | POST | Refresh all automatic categories |
+
+### Browse API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/browse` | GET | Browse content UI |
+| `/api/browse` | GET | Browse content (paginated, with filters) |
 
 ### Proxy Management API
 

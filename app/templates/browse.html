@@ -158,7 +158,7 @@
             <div class="categories-list" id="categories-list"></div>
             <div style="margin-top: 15px;"><button class="btn btn-secondary btn-small" onclick="openManageCategoriesModal()">Manage Categories</button></div>
         </div>
-        <div class="controls-bar">
+        <div class="controls-bar" id="controls-bar">
             <div class="controls-row">
                 <div class="control-group search-input">
                     <label>Search</label>
@@ -413,8 +413,6 @@
                 if (cat && cat.content_types && cat.content_types.length > 0) {
                     if (!cat.content_types.includes(contentType)) {
                         setContentType(cat.content_types[0]);
-                        renderCategoriesList();
-                        return; // setContentType already calls applyFilters
                     }
                 }
             }
@@ -429,10 +427,13 @@
                 tab.classList.toggle('active', tab.dataset.view === view);
             });
             const categoriesSection = document.getElementById('categories-section');
+            const controlsBar = document.getElementById('controls-bar');
             if (view === 'categories') {
                 categoriesSection.style.display = 'block';
+                controlsBar.style.display = 'none';
             } else {
                 categoriesSection.style.display = 'none';
+                controlsBar.style.display = 'block';
                 selectedCategoryId = null;
             }
             renderCategoriesList();
@@ -481,6 +482,16 @@
             emptyState.style.display = 'none';
             contentGrid.innerHTML = '';
             pagination.style.display = 'none';
+
+            // If in categories view but no category selected, show prompt instead of loading
+            if (currentView === 'categories' && !selectedCategoryId) {
+                loadingState.style.display = 'none';
+                emptyState.innerHTML = '<div class="empty-state-icon">📁</div><h3>Select a category</h3><p>Click on a category above to see its content</p>';
+                emptyState.style.display = 'block';
+                document.getElementById('showing-count').textContent = '0';
+                document.getElementById('total-count').textContent = '0';
+                return;
+            }
 
             try {
                 let url = '/api/browse?type=' + contentType + '&page=' + currentPage + '&per_page=50';

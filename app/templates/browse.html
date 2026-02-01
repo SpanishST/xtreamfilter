@@ -309,6 +309,12 @@
                             <span>Apply source filter rules</span>
                         </label>
                     </div>
+                    <div class="form-group" style="margin-top: 10px;">
+                        <label class="checkbox-option">
+                            <input type="checkbox" id="notify-telegram">
+                            <span>📱 Send Telegram notification when new items are found</span>
+                        </label>
+                    </div>
                 </div>
             </div>
             <div class="modal-footer">
@@ -700,6 +706,7 @@
                     });
                     document.getElementById('pattern-logic').value = cat.pattern_logic || 'or';
                     document.getElementById('use-source-filters').checked = cat.use_source_filters || false;
+                    document.getElementById('notify-telegram').checked = cat.notify_telegram || false;
                     // Handle recently added filter
                     const recentlyAddedDays = cat.recently_added_days || 0;
                     document.getElementById('use-recently-added').checked = recentlyAddedDays > 0;
@@ -716,6 +723,7 @@
                 });
                 document.getElementById('pattern-logic').value = 'or';
                 document.getElementById('use-source-filters').checked = false;
+                document.getElementById('notify-telegram').checked = false;
                 document.getElementById('use-recently-added').checked = false;
                 document.getElementById('recently-added-days').value = '7';
                 document.getElementById('recently-added-days').disabled = true;
@@ -771,6 +779,7 @@
             const contentTypes = Array.from(document.querySelectorAll('.content-type-checkbox.selected')).map(cb => cb.dataset.type);
             const patternLogic = document.getElementById('pattern-logic').value;
             const useSourceFilters = document.getElementById('use-source-filters').checked;
+            const notifyTelegram = document.getElementById('notify-telegram').checked;
             const useRecentlyAdded = document.getElementById('use-recently-added').checked;
             const recentlyAddedDays = useRecentlyAdded ? parseInt(document.getElementById('recently-added-days').value) : 0;
             const patterns = Array.from(document.querySelectorAll('#patterns-container .pattern-row')).map(row => ({
@@ -779,7 +788,7 @@
                 case_sensitive: false
             })).filter(p => p.value.trim());
 
-            const data = { name, icon, mode, content_types: contentTypes, patterns, pattern_logic: patternLogic, use_source_filters: useSourceFilters, recently_added_days: recentlyAddedDays };
+            const data = { name, icon, mode, content_types: contentTypes, patterns, pattern_logic: patternLogic, use_source_filters: useSourceFilters, notify_telegram: notifyTelegram, recently_added_days: recentlyAddedDays };
 
             try {
                 const url = editId ? '/api/categories/' + editId : '/api/categories';

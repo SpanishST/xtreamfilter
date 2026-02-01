@@ -844,7 +844,7 @@ async def refresh_cache():
                 "current_step": "Refreshing automatic categories...",
                 "percent": 95
             })
-            refresh_pattern_categories()
+            await refresh_pattern_categories_async()
 
             logger.info(
                 f"Refresh complete. Total: {total_stats['live_streams']} live, "
@@ -920,7 +920,16 @@ def load_config():
             "vod": True,
             "series": True,
         },
-        "options": {"cache_enabled": True, "cache_ttl": 3600, "proxy_streams": True},
+        "options": {
+            "cache_enabled": True,
+            "cache_ttl": 3600,
+            "proxy_streams": True,
+            "telegram": {
+                "enabled": False,
+                "bot_token": "",
+                "chat_id": ""
+            }
+        },
     }
 
     if os.path.exists(CONFIG_FILE):
@@ -1102,11 +1111,113 @@ def get_item_categories(content_type: str, item_id: str, source_id: str) -> list
     return result
 
 
-def refresh_pattern_categories():
-    """Refresh all automatic (pattern-based) categories.
+async def send_telegram_notification(category_name: str, new_items: list):
+    """Send a Telegram notification for new items in a category.
     
-    This should be called after cache refresh to update cached_items for
-    categories with mode='automatic'.
+    Args:
+        category_name: Name of the category that was updated
+        new_items: List of dicts with 'name' and optionally 'cover' keys
+    """
+    config = load_config()
+    telegram_config = config.get("options", {}).get("telegram", {})
+    
+    if not telegram_config.get("enabled"):
+        return
+    
+    bot_token = telegram_config.get("bot_token", "")
+    chat_id = telegram_config.get("chat_id", "")
+    
+    if not bot_token or not chat_id:
+        logger.warning("Telegram notification skipped: missing bot_token or chat_id")
+        return
+    
+    if not new_items:
+        return
+    
+    try:
+        client = await get_http_client()
+        
+        # If single item with cover, use sendPhoto
+        if len(new_items) == 1 and new_items[0].get("cover"):
+            item = new_items[0]
+            caption = f"🆕 <b>{category_name}</b>\n\n• {item['name']}"
+            
+            url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+            payload = {
+                "chat_id": chat_id,
+                "photo": item["cover"],
+                "caption": caption,
+                "parse_mode": "HTML"
+            }
+            response = await client.post(url, json=payload)
+            
+            # If photo fails (invalid URL), fallback to text message
+            if response.status_code != 200:
+                logger.warning(f"Telegram sendPhoto failed, falling back to text: {response.text}")
+                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                payload = {
+                    "chat_id": chat_id,
+                    "text": caption,
+                    "parse_mode": "HTML"
+                }
+                await client.post(url, json=payload)
+        else:
+            # Multiple items: send text message with list
+            item_list = "\n".join([f"• {item['name']}" for item in new_items[:20]])
+            if len(new_items) > 20:
+                item_list += f"\n\n... and {len(new_items) - 20} more"
+            
+            message = f"🆕 <b>{category_name}</b> - {len(new_items)} new item(s)\n\n{item_list}"
+            
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            payload = {
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": "HTML"
+            }
+            await client.post(url, json=payload)
+        
+        logger.info(f"Telegram notification sent for category '{category_name}': {len(new_items)} new items")
+        
+    except Exception as e:
+        logger.error(f"Failed to send Telegram notification: {e}")
+
+
+def get_item_details_from_cache(item_id: str, source_id: str, content_type: str) -> dict:
+    """Get full item details (name, cover) from cache by ID and source."""
+    if content_type == "live":
+        streams, _ = get_cached_with_source_info("live_streams", "live_categories")
+        id_field = "stream_id"
+    elif content_type == "vod":
+        streams, _ = get_cached_with_source_info("vod_streams", "vod_categories")
+        id_field = "stream_id"
+    elif content_type == "series":
+        streams, _ = get_cached_with_source_info("series", "series_categories")
+        id_field = "series_id"
+    else:
+        return {}
+    
+    for stream in streams:
+        stream_id = str(stream.get(id_field, ""))
+        stream_source = stream.get("_source_id", "")
+        if stream_id == item_id and stream_source == source_id:
+            return {
+                "name": stream.get("name", "Unknown"),
+                "cover": stream.get("stream_icon", "") or stream.get("cover", "")
+            }
+    return {}
+
+
+def refresh_pattern_categories_sync():
+    """Synchronous wrapper that collects notifications to send."""
+    return _refresh_pattern_categories_internal()
+
+
+def _refresh_pattern_categories_internal():
+    """Internal refresh logic that returns notifications to send.
+    
+    Returns:
+        List of tuples: (category_name, new_items_list)
     """
     data = load_categories()
     config = load_config()
@@ -1114,6 +1225,7 @@ def refresh_pattern_categories():
     current_time = int(time.time())
     
     updated = False
+    notifications_to_send = []
     
     for cat in data.get("categories", []):
         if cat.get("mode") != "automatic":
@@ -1203,16 +1315,55 @@ def refresh_pattern_categories():
                 matched_items.append({
                     "id": item_id,
                     "source_id": src_id,
-                    "content_type": content_type
+                    "content_type": content_type,
+                    "name": name,
+                    "cover": stream.get("stream_icon", "") or stream.get("cover", "")
                 })
         
-        cat["cached_items"] = matched_items
+        # Detect new items (diff between old and new)
+        old_items = cat.get("cached_items", [])
+        old_item_keys = {(item.get("id"), item.get("source_id"), item.get("content_type")) for item in old_items}
+        
+        new_items = []
+        for item in matched_items:
+            key = (item["id"], item["source_id"], item["content_type"])
+            if key not in old_item_keys:
+                new_items.append({"name": item["name"], "cover": item["cover"]})
+        
+        # Check if notifications are enabled for this category
+        if cat.get("notify_telegram", False) and new_items:
+            notifications_to_send.append((cat.get("name", "Unknown Category"), new_items))
+        
+        # Store cached_items without name/cover to save space
+        cat["cached_items"] = [
+            {"id": item["id"], "source_id": item["source_id"], "content_type": item["content_type"]}
+            for item in matched_items
+        ]
         cat["last_refresh"] = datetime.now().isoformat()
         updated = True
-        logger.info(f"Category '{cat.get('name')}' refreshed: {len(matched_items)} items matched")
+        logger.info(f"Category '{cat.get('name')}' refreshed: {len(matched_items)} items matched, {len(new_items)} new")
     
     if updated:
         save_categories(data)
+    
+    return notifications_to_send
+
+
+async def refresh_pattern_categories_async():
+    """Async version that refreshes categories and sends Telegram notifications."""
+    notifications = _refresh_pattern_categories_internal()
+    
+    for category_name, new_items in notifications:
+        await send_telegram_notification(category_name, new_items)
+
+
+def refresh_pattern_categories():
+    """Refresh all automatic (pattern-based) categories.
+    
+    This is the sync entry point that just refreshes without sending notifications.
+    For notification support, use refresh_pattern_categories_async().
+    """
+    _refresh_pattern_categories_internal()
 
 
 # ============================================
@@ -2289,6 +2440,7 @@ async def create_category(request: Request):
         "patterns": body.get("patterns", []),
         "pattern_logic": body.get("pattern_logic", "or"),
         "use_source_filters": body.get("use_source_filters", False),
+        "notify_telegram": body.get("notify_telegram", False),
         "recently_added_days": body.get("recently_added_days", 0),
         "cached_items": [],
         "last_refresh": None
@@ -2355,6 +2507,8 @@ async def update_category(category_id: str, request: Request):
         category["pattern_logic"] = body["pattern_logic"]
     if "use_source_filters" in body:
         category["use_source_filters"] = body["use_source_filters"]
+    if "notify_telegram" in body:
+        category["notify_telegram"] = body["notify_telegram"]
     if "recently_added_days" in body:
         category["recently_added_days"] = body["recently_added_days"]
     
@@ -3537,6 +3691,93 @@ async def set_proxy_status(request: Request):
     save_config(config)
     
     return {"status": "ok", "proxy_enabled": config["options"]["proxy_streams"]}
+
+
+@app.get("/api/config/telegram")
+async def get_telegram_config():
+    """Get Telegram notification settings"""
+    config = load_config()
+    telegram_config = config.get("options", {}).get("telegram", {
+        "enabled": False,
+        "bot_token": "",
+        "chat_id": ""
+    })
+    # Mask the bot token for security (show only last 4 chars)
+    masked_config = telegram_config.copy()
+    if masked_config.get("bot_token"):
+        token = masked_config["bot_token"]
+        masked_config["bot_token_masked"] = f"***{token[-4:]}" if len(token) > 4 else "***"
+    return masked_config
+
+
+@app.post("/api/config/telegram")
+async def update_telegram_config(request: Request):
+    """Update Telegram notification settings"""
+    config = load_config()
+    data = await request.json()
+    
+    if "options" not in config:
+        config["options"] = {}
+    
+    if "telegram" not in config["options"]:
+        config["options"]["telegram"] = {
+            "enabled": False,
+            "bot_token": "",
+            "chat_id": ""
+        }
+    
+    # Update only provided fields
+    if "enabled" in data:
+        config["options"]["telegram"]["enabled"] = data["enabled"]
+    if "bot_token" in data:
+        config["options"]["telegram"]["bot_token"] = data["bot_token"]
+    if "chat_id" in data:
+        config["options"]["telegram"]["chat_id"] = data["chat_id"]
+    
+    save_config(config)
+    
+    return {"status": "ok", "message": "Telegram settings updated"}
+
+
+@app.post("/api/config/telegram/test")
+async def test_telegram_notification():
+    """Send a test Telegram notification"""
+    config = load_config()
+    telegram_config = config.get("options", {}).get("telegram", {})
+    
+    bot_token = telegram_config.get("bot_token", "")
+    chat_id = telegram_config.get("chat_id", "")
+    
+    if not bot_token or not chat_id:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": "Bot token and chat ID are required"}
+        )
+    
+    try:
+        client = await get_http_client()
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": "🔔 <b>Test Notification</b>\n\nYour Telegram integration is working correctly!",
+            "parse_mode": "HTML"
+        }
+        response = await client.post(url, json=payload)
+        result = response.json()
+        
+        if response.status_code == 200 and result.get("ok"):
+            return {"status": "ok", "message": "Test notification sent successfully"}
+        else:
+            error_msg = result.get("description", "Unknown error")
+            return JSONResponse(
+                status_code=400,
+                content={"status": "error", "message": f"Telegram API error: {error_msg}"}
+            )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": f"Failed to send test: {str(e)}"}
+        )
 
 
 @app.get("/api/cache/status")

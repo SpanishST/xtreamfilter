@@ -1,20 +1,30 @@
+import asyncio
 import json
 import logging
 import os
 import re
-import threading
 import time
 import uuid
+from collections import deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from typing import Optional
 
-import requests
-from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
+import httpx
+from fastapi import FastAPI, Form, Query, Request
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
+from fastapi.templating import Jinja2Templates
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger(__name__)
-
-app = Flask(__name__)
 
 # Data directory - use environment variable or default to /data (Docker) or ./data (local)
 DATA_DIR = os.environ.get("DATA_DIR", "/data" if os.path.exists("/data") else "./data")
@@ -22,6 +32,9 @@ CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 CACHE_FILE = os.path.join(DATA_DIR, "playlist_cache.m3u")
 API_CACHE_FILE = os.path.join(DATA_DIR, "api_cache.json")
 PROGRESS_FILE = os.path.join(DATA_DIR, "refresh_progress.json")
+
+# Templates
+templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
 
 # Headers to mimic a browser request
 HEADERS = {
@@ -35,22 +48,55 @@ HEADERS = {
 # 1MB chunks work better for high-bitrate 4K streams
 STREAM_CHUNK_SIZE = 1024 * 1024  # 1MB
 
+# Adaptive buffer configuration for dynamic buffering
+# These values are tuned for 4K streams at ~25 Mbps
+PRE_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB pre-buffer before starting (~1.3s at 25Mbps)
+MIN_BUFFER_SIZE = 1 * 1024 * 1024  # 1MB minimum buffer to maintain
+MAX_BUFFER_SIZE = 16 * 1024 * 1024  # 16MB max buffer (~5s at 25Mbps for bad connections)
+BUFFER_CHUNK_SIZE = 512 * 1024  # 512KB chunks for reading (larger = fewer syscalls)
+
 # Virtual ID offset for merged playlists (10 million per source)
 # This allows up to 10 million streams per source before collision
 VIRTUAL_ID_OFFSET = 10_000_000
+
+# ============================================
+# HTTP CLIENT SETUP
+# ============================================
+
+# Global httpx client with connection pooling
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+async def get_http_client() -> httpx.AsyncClient:
+    """Get or create the global httpx async client"""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            headers=HEADERS,
+            timeout=httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0),
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            follow_redirects=True,
+        )
+    return _http_client
+
+
+async def close_http_client():
+    """Close the global httpx client"""
+    global _http_client
+    if _http_client is not None and not _http_client.is_closed:
+        await _http_client.aclose()
+        _http_client = None
+
+
+# ============================================
+# VIRTUAL ID ENCODING/DECODING
+# ============================================
 
 
 def encode_virtual_id(source_index, original_id):
     """
     Encode a source index and original stream ID into a virtual ID.
     This creates unique IDs across all sources for merged playlists.
-    
-    Args:
-        source_index: Index of the source (0, 1, 2, ...)
-        original_id: Original stream/series ID from the source
-    
-    Returns:
-        Virtual ID that uniquely identifies this stream across all sources
     """
     try:
         return source_index * VIRTUAL_ID_OFFSET + int(original_id)
@@ -61,12 +107,6 @@ def encode_virtual_id(source_index, original_id):
 def decode_virtual_id(virtual_id):
     """
     Decode a virtual ID back to source index and original ID.
-    
-    Args:
-        virtual_id: The virtual ID to decode
-    
-    Returns:
-        Tuple of (source_index, original_id)
     """
     try:
         vid = int(virtual_id)
@@ -102,62 +142,66 @@ def get_proxy_enabled():
     return config.get("options", {}).get("proxy_streams", True)
 
 
-def proxy_stream(upstream_url, stream_type="live"):
+# ============================================
+# ASYNC STREAM PROXY WITH DYNAMIC PRE-BUFFERING
+# ============================================
+
+
+async def proxy_stream(upstream_url: str, request: Request, stream_type: str = "live") -> Response:
     """
-    Proxy a stream from upstream server to the client.
+    Proxy a stream from upstream server to the client with dynamic pre-buffering.
     
-    Handles:
-    - Range headers for seeking in VOD content
+    Features:
+    - Pre-buffers data before starting to stream to handle upstream hiccups
+    - Adaptive buffering based on upstream throughput
+    - Handles Range headers for seeking in VOD content
     - Streaming response to avoid loading entire file in memory
-    - Proper content-type forwarding
     
     Args:
         upstream_url: The full upstream URL to fetch from
+        request: The FastAPI request object
         stream_type: Type of stream ("live", "vod", "series") - affects timeout behavior
     
     Returns:
-        Flask Response object with streaming content
+        StreamingResponse with pre-buffered content
     """
     # Build headers for upstream request
-    upstream_headers = HEADERS.copy()
+    upstream_headers = dict(HEADERS)
     
     # Forward Range header if present (for seeking in VOD)
-    if "Range" in request.headers:
-        upstream_headers["Range"] = request.headers["Range"]
+    if "range" in request.headers:
+        upstream_headers["Range"] = request.headers["range"]
     
     # Forward other relevant headers
-    if "Accept" in request.headers:
-        upstream_headers["Accept"] = request.headers["Accept"]
+    if "accept" in request.headers:
+        upstream_headers["Accept"] = request.headers["accept"]
     
     try:
         # Set timeout based on stream type
-        # Live streams need longer/no timeout, VOD can have shorter connect timeout
         if stream_type == "live":
-            # Live streams: short connect timeout, no read timeout (stream indefinitely)
-            timeout = (10, None)
+            # Live streams: short connect timeout, long read timeout for continuous streaming
+            timeout = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
         else:
             # VOD/Series: reasonable timeouts
-            timeout = (10, 300)
+            timeout = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0)
         
-        # Make streaming request to upstream
-        upstream_response = requests.get(
-            upstream_url,
-            headers=upstream_headers,
-            stream=True,
-            timeout=timeout,
-            allow_redirects=True,
-        )
+        # Create a streaming client
+        client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+        
+        # Make the initial request
+        req = client.build_request("GET", upstream_url, headers=upstream_headers)
+        upstream_response = await client.send(req, stream=True)
         
         # Build response headers
         response_headers = {}
         
         # Forward content-related headers
         headers_to_forward = [
-            "Content-Type",
-            "Content-Length", 
-            "Content-Range",
-            "Accept-Ranges",
-            "Content-Disposition",
+            "content-type",
+            "content-length",
+            "content-range",
+            "accept-ranges",
+            "content-disposition",
         ]
         
         for header in headers_to_forward:
@@ -165,56 +209,173 @@ def proxy_stream(upstream_url, stream_type="live"):
                 response_headers[header] = upstream_response.headers[header]
         
         # Default content type if not provided
-        if "Content-Type" not in response_headers:
+        if "content-type" not in response_headers:
             if stream_type == "live":
-                response_headers["Content-Type"] = "video/mp2t"
+                response_headers["content-type"] = "video/mp2t"
             else:
-                response_headers["Content-Type"] = "video/mp4"
+                response_headers["content-type"] = "video/mp4"
         
         # Add headers to prevent buffering issues
-        response_headers["X-Accel-Buffering"] = "no"  # Disable nginx buffering
+        response_headers["X-Accel-Buffering"] = "no"
         response_headers["Cache-Control"] = "no-cache, no-store"
         
-        # Create streaming response with optimized generator
-        def generate():
+        async def generate_with_prebuffer():
+            """Generator with dynamic adaptive buffering to handle upstream issues"""
+            buffer = deque()
+            buffer_size = 0
+            prebuffer_filled = False
+            bytes_sent = 0
+            start_time = time.time()
+            
+            # Adaptive buffer settings
+            current_min_buffer = MIN_BUFFER_SIZE  # Start with 1MB minimum
+            last_throughput_check = time.time()
+            bytes_since_check = 0
+            throughput_samples = deque(maxlen=10)  # Keep last 10 throughput measurements for stability
+            last_buffer_adjustment = time.time()
+            consecutive_slowdowns = 0  # Track consecutive slowdowns for faster response
+            stable_periods = 0  # Track stable periods before reducing buffer
+            
             try:
-                # Use larger chunks for better throughput
-                for chunk in upstream_response.iter_content(chunk_size=STREAM_CHUNK_SIZE):
-                    if chunk:
-                        yield chunk
-            except GeneratorExit:
-                # Client disconnected - this is normal
-                pass
+                async for chunk in upstream_response.aiter_bytes(chunk_size=BUFFER_CHUNK_SIZE):
+                    if not chunk:
+                        continue
+                    
+                    # Add to buffer
+                    buffer.append(chunk)
+                    buffer_size += len(chunk)
+                    bytes_since_check += len(chunk)
+                    
+                    # Pre-buffering phase: wait until we have enough data
+                    if not prebuffer_filled:
+                        if buffer_size >= PRE_BUFFER_SIZE:
+                            prebuffer_filled = True
+                            elapsed = time.time() - start_time
+                            initial_throughput = buffer_size / elapsed if elapsed > 0 else 0
+                            throughput_samples.append(initial_throughput)
+                            logger.info(
+                                f"Pre-buffer filled: {buffer_size / 1024:.1f}KB in {elapsed:.2f}s "
+                                f"({initial_throughput / 1024:.1f} KB/s)"
+                            )
+                            last_throughput_check = time.time()
+                            bytes_since_check = 0
+                        continue
+                    
+                    # Measure throughput every 2 seconds and adapt buffer size
+                    now = time.time()
+                    check_interval = now - last_throughput_check
+                    if check_interval >= 2.0 and bytes_since_check > 0:
+                        current_throughput = bytes_since_check / check_interval
+                        throughput_samples.append(current_throughput)
+                        
+                        # Calculate average throughput from samples
+                        avg_throughput = sum(throughput_samples) / len(throughput_samples)
+                        
+                        # Adapt buffer based on throughput changes (check every 3 seconds)
+                        if now - last_buffer_adjustment >= 3.0:
+                            if len(throughput_samples) >= 3:
+                                # Compare current to average - if dropping significantly, increase buffer
+                                if current_throughput < avg_throughput * 0.6:
+                                    # Throughput dropped by more than 40% - increase buffer
+                                    consecutive_slowdowns += 1
+                                    stable_periods = 0
+                                    
+                                    # Increase more aggressively with consecutive slowdowns
+                                    if consecutive_slowdowns >= 2:
+                                        multiplier = 4  # Quadruple on persistent slowdown
+                                    else:
+                                        multiplier = 2  # Double on first slowdown
+                                    
+                                    old_buffer = current_min_buffer
+                                    current_min_buffer = min(current_min_buffer * multiplier, MAX_BUFFER_SIZE)
+                                    if current_min_buffer > old_buffer:
+                                        logger.info(
+                                            f"Upstream slowdown detected ({current_throughput/1024:.0f} KB/s < "
+                                            f"{avg_throughput/1024:.0f} KB/s avg), "
+                                            f"increasing buffer: {old_buffer/1024:.0f}KB -> {current_min_buffer/1024:.0f}KB"
+                                        )
+                                elif current_throughput > avg_throughput * 0.9:
+                                    # Throughput is stable/good
+                                    consecutive_slowdowns = 0
+                                    stable_periods += 1
+                                    
+                                    # Only reduce buffer after 4 consecutive stable periods (~12+ seconds)
+                                    if stable_periods >= 4 and current_min_buffer > MIN_BUFFER_SIZE:
+                                        old_buffer = current_min_buffer
+                                        # Reduce gradually (by 25% instead of 50%)
+                                        current_min_buffer = max(int(current_min_buffer * 0.75), MIN_BUFFER_SIZE)
+                                        if current_min_buffer < old_buffer:
+                                            stable_periods = 0  # Reset after reduction
+                                            logger.info(
+                                                f"Upstream stable ({current_throughput/1024:.0f} KB/s), "
+                                                f"reducing buffer: {old_buffer/1024:.0f}KB -> {current_min_buffer/1024:.0f}KB"
+                                            )
+                                else:
+                                    # Moderate throughput - reset slowdown counter but don't reduce
+                                    consecutive_slowdowns = 0
+                                    
+                            last_buffer_adjustment = now
+                        
+                        last_throughput_check = now
+                        bytes_since_check = 0
+                    
+                    # Streaming phase: yield chunks while maintaining adaptive minimum buffer
+                    while buffer and buffer_size > current_min_buffer:
+                        out_chunk = buffer.popleft()
+                        buffer_size -= len(out_chunk)
+                        bytes_sent += len(out_chunk)
+                        yield out_chunk
+                
+                # Drain remaining buffer at end of stream
+                while buffer:
+                    out_chunk = buffer.popleft()
+                    bytes_sent += len(out_chunk)
+                    yield out_chunk
+                
+                elapsed = time.time() - start_time
+                if bytes_sent > 1024 * 1024:  # Only log if > 1MB
+                    avg_throughput = bytes_sent / elapsed if elapsed > 0 else 0
+                    logger.info(
+                        f"Stream complete: {bytes_sent / 1024 / 1024:.2f}MB in {elapsed:.1f}s "
+                        f"(avg {avg_throughput / 1024:.0f} KB/s, final buffer: {current_min_buffer/1024:.0f}KB)"
+                    )
+                
+            except httpx.ReadError as e:
+                logger.warning(f"Upstream read error: {e}")
+                # Yield remaining buffer if any
+                while buffer:
+                    yield buffer.popleft()
             except Exception as e:
                 logger.warning(f"Stream proxy error: {e}")
             finally:
-                upstream_response.close()
+                await upstream_response.aclose()
+                await client.aclose()
         
-        return Response(
-            generate(),
-            status=upstream_response.status_code,
+        return StreamingResponse(
+            generate_with_prebuffer(),
+            status_code=upstream_response.status_code,
             headers=response_headers,
-            direct_passthrough=True,  # Bypass Flask's response processing for better performance
+            media_type=response_headers.get("content-type", "application/octet-stream"),
         )
         
-    except requests.exceptions.Timeout:
+    except httpx.TimeoutException:
         logger.error(f"Timeout connecting to upstream: {upstream_url}")
-        return Response("Upstream timeout", status=504)
-    except requests.exceptions.ConnectionError as e:
+        return Response(content="Upstream timeout", status_code=504)
+    except httpx.ConnectError as e:
         logger.error(f"Connection error to upstream: {e}")
-        return Response("Upstream connection error", status=502)
+        return Response(content="Upstream connection error", status_code=502)
     except Exception as e:
         logger.error(f"Proxy error: {e}")
-        return Response(f"Proxy error: {e}", status=500)
+        return Response(content=f"Proxy error: {e}", status_code=500)
+
 
 # ============================================
 # CACHING SYSTEM
 # ============================================
 
 # In-memory cache - now supports multiple sources
-# Structure: { "sources": { source_id: { categories, streams, last_refresh }, ... }, "refresh_in_progress": False }
 _api_cache = {
-    "sources": {},  # Per-source cached data
+    "sources": {},
     "last_refresh": None,
     "refresh_in_progress": False,
     "refresh_progress": {
@@ -225,15 +386,18 @@ _api_cache = {
         "percent": 0
     },
 }
-_cache_lock = threading.Lock()
+_cache_lock = asyncio.Lock()
 
 # Stream ID to source mapping for routing
 _stream_source_map = {
-    "live": {},    # stream_id -> source_id
-    "vod": {},     # stream_id -> source_id
-    "series": {},  # series_id -> source_id
+    "live": {},
+    "vod": {},
+    "series": {},
 }
-_stream_map_lock = threading.Lock()
+_stream_map_lock = asyncio.Lock()
+
+# Background task reference
+_background_task: Optional[asyncio.Task] = None
 
 
 def save_refresh_progress(progress_data):
@@ -287,31 +451,85 @@ def load_cache_from_disk():
         try:
             with open(API_CACHE_FILE) as f:
                 data = json.load(f)
-                with _cache_lock:
-                    # Handle migration from old single-source cache format
-                    if "sources" not in data and "live_streams" in data:
-                        # Old format - migrate to new multi-source format
-                        logger.info("Migrating old cache format to multi-source format")
-                        _api_cache = {
-                            "sources": {},
-                            "last_refresh": data.get("last_refresh"),
-                            "refresh_in_progress": False,
-                        }
-                    else:
-                        _api_cache.update(data)
-                        _api_cache["refresh_in_progress"] = False
-                # Rebuild stream-to-source mapping
-                rebuild_stream_source_map()
+                # Handle migration from old single-source cache format
+                if "sources" not in data and "live_streams" in data:
+                    logger.info("Migrating old cache format to multi-source format")
+                    _api_cache = {
+                        "sources": {},
+                        "last_refresh": data.get("last_refresh"),
+                        "refresh_in_progress": False,
+                    }
+                else:
+                    _api_cache.update(data)
+                    _api_cache["refresh_in_progress"] = False
+                # Rebuild stream-to-source mapping synchronously on startup
+                _rebuild_stream_source_map_sync()
                 logger.info(f"Loaded cache from disk. Last refresh: {_api_cache.get('last_refresh', 'Never')}")
         except Exception as e:
             logger.error(f"Failed to load cache from disk: {e}")
 
 
+def _rebuild_stream_source_map_sync():
+    """Rebuild the stream ID to source mapping (synchronous version for startup)"""
+    global _stream_source_map
+    sources = _api_cache.get("sources", {})
+    
+    new_map = {"live": {}, "vod": {}, "series": {}}
+    
+    for source_id, source_cache in sources.items():
+        for stream in source_cache.get("live_streams", []):
+            stream_id = str(stream.get("stream_id", ""))
+            if stream_id:
+                new_map["live"][stream_id] = source_id
+        
+        for stream in source_cache.get("vod_streams", []):
+            stream_id = str(stream.get("stream_id", ""))
+            if stream_id:
+                new_map["vod"][stream_id] = source_id
+        
+        for series in source_cache.get("series", []):
+            series_id = str(series.get("series_id", ""))
+            if series_id:
+                new_map["series"][series_id] = source_id
+    
+    _stream_source_map = new_map
+    logger.info(f"Rebuilt stream-source map: {len(new_map['live'])} live, {len(new_map['vod'])} vod, {len(new_map['series'])} series")
+
+
+async def rebuild_stream_source_map():
+    """Rebuild the stream ID to source mapping (async version)"""
+    global _stream_source_map
+    async with _cache_lock:
+        sources = _api_cache.get("sources", {})
+    
+    new_map = {"live": {}, "vod": {}, "series": {}}
+    
+    for source_id, source_cache in sources.items():
+        for stream in source_cache.get("live_streams", []):
+            stream_id = str(stream.get("stream_id", ""))
+            if stream_id:
+                new_map["live"][stream_id] = source_id
+        
+        for stream in source_cache.get("vod_streams", []):
+            stream_id = str(stream.get("stream_id", ""))
+            if stream_id:
+                new_map["vod"][stream_id] = source_id
+        
+        for series in source_cache.get("series", []):
+            series_id = str(series.get("series_id", ""))
+            if series_id:
+                new_map["series"][series_id] = source_id
+    
+    async with _stream_map_lock:
+        _stream_source_map = new_map
+    
+    logger.info(f"Rebuilt stream-source map: {len(new_map['live'])} live, {len(new_map['vod'])} vod, {len(new_map['series'])} series")
+
+
 def save_cache_to_disk():
     """Save cache to disk"""
     try:
-        with _cache_lock:
-            data = {k: v for k, v in _api_cache.items() if k != "refresh_in_progress"}
+        data = {k: v for k, v in _api_cache.items() if k != "refresh_in_progress"}
         os.makedirs(os.path.dirname(API_CACHE_FILE), exist_ok=True)
         with open(API_CACHE_FILE, "w") as f:
             json.dump(data, f)
@@ -322,8 +540,7 @@ def save_cache_to_disk():
 
 def is_cache_valid():
     """Check if cache is still valid based on TTL"""
-    with _cache_lock:
-        last_refresh = _api_cache.get("last_refresh")
+    last_refresh = _api_cache.get("last_refresh")
 
     if not last_refresh:
         return False
@@ -338,58 +555,22 @@ def is_cache_valid():
 
 def get_cached(key, source_id=None):
     """Get cached data for a key, optionally for a specific source or merged from all sources"""
-    with _cache_lock:
-        sources = _api_cache.get("sources", {})
-        
-        if source_id is not None:
-            # Get from specific source
-            source_cache = sources.get(source_id, {})
-            return source_cache.get(key, [])
-        
-        # Merge from all sources
-        result = []
-        for src_id, src_cache in sources.items():
-            result.extend(src_cache.get(key, []))
-        return result
-
-
-def rebuild_stream_source_map():
-    """Rebuild the stream ID to source mapping for routing"""
-    global _stream_source_map
-    with _cache_lock:
-        sources = _api_cache.get("sources", {})
+    sources = _api_cache.get("sources", {})
     
-    new_map = {"live": {}, "vod": {}, "series": {}}
+    if source_id is not None:
+        source_cache = sources.get(source_id, {})
+        return source_cache.get(key, [])
     
-    for source_id, source_cache in sources.items():
-        # Map live streams
-        for stream in source_cache.get("live_streams", []):
-            stream_id = str(stream.get("stream_id", ""))
-            if stream_id:
-                new_map["live"][stream_id] = source_id
-        
-        # Map VOD streams
-        for stream in source_cache.get("vod_streams", []):
-            stream_id = str(stream.get("stream_id", ""))
-            if stream_id:
-                new_map["vod"][stream_id] = source_id
-        
-        # Map series
-        for series in source_cache.get("series", []):
-            series_id = str(series.get("series_id", ""))
-            if series_id:
-                new_map["series"][series_id] = source_id
-    
-    with _stream_map_lock:
-        _stream_source_map = new_map
-    
-    logger.info(f"Rebuilt stream-source map: {len(new_map['live'])} live, {len(new_map['vod'])} vod, {len(new_map['series'])} series")
+    # Merge from all sources
+    result = []
+    for src_id, src_cache in sources.items():
+        result.extend(src_cache.get(key, []))
+    return result
 
 
 def get_source_for_stream(stream_id, stream_type="live"):
     """Get the source ID for a given stream ID"""
-    with _stream_map_lock:
-        return _stream_source_map.get(stream_type, {}).get(str(stream_id))
+    return _stream_source_map.get(stream_type, {}).get(str(stream_id))
 
 
 def get_source_by_id(source_id):
@@ -429,14 +610,57 @@ def get_source_credentials_for_stream(stream_id, stream_type="live"):
     return xtream.get("host", "").rstrip("/"), xtream.get("username", ""), xtream.get("password", "")
 
 
-def refresh_cache():
+async def fetch_from_upstream(host: str, username: str, password: str, action: str, retries: int = 2):
+    """Fetch data from upstream Xtream server with retry support"""
+    url = f"{host}/player_api.php"
+    params = {"username": username, "password": password, "action": action}
+
+    for attempt in range(retries + 1):
+        try:
+            # Create a fresh client for each large request to avoid connection issues
+            async with httpx.AsyncClient(
+                headers=HEADERS,
+                timeout=httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0),
+                follow_redirects=True,
+            ) as client:
+                start_time = time.time()
+                response = await client.get(url, params=params)
+                elapsed = time.time() - start_time
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    logger.debug(f"Fetched {action}: {len(data) if isinstance(data, list) else 'ok'} items in {elapsed:.1f}s")
+                    return data
+                else:
+                    logger.warning(f"Fetch {action} failed with status {response.status_code} in {elapsed:.1f}s")
+                    
+        except httpx.TimeoutException:
+            logger.error(f"Timeout fetching {action} (attempt {attempt + 1}/{retries + 1})")
+        except httpx.RemoteProtocolError as e:
+            logger.error(f"Protocol error fetching {action}: {e} (attempt {attempt + 1}/{retries + 1})")
+        except httpx.ReadError as e:
+            logger.error(f"Read error fetching {action}: {e} (attempt {attempt + 1}/{retries + 1})")
+        except httpx.ConnectError as e:
+            logger.error(f"Connection error fetching {action}: {e}")
+            break  # Don't retry connection errors
+        except Exception as e:
+            logger.error(f"Error fetching {action}: {e}")
+            break
+        
+        # Wait before retry
+        if attempt < retries:
+            await asyncio.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s
+    
+    return None
+
+
+async def refresh_cache():
     """Refresh all cached data from all configured sources"""
     global _api_cache
 
     # Check if already in progress (using file-based check for cross-worker visibility)
     existing_progress = load_refresh_progress()
     if existing_progress.get("in_progress"):
-        # Check if it's stale (more than 10 minutes old)
         started_at = existing_progress.get("started_at")
         if started_at:
             try:
@@ -447,7 +671,7 @@ def refresh_cache():
             except (ValueError, TypeError):
                 pass
 
-    # Mark as in progress (file-based for cross-worker visibility)
+    # Mark as in progress
     progress = {
         "in_progress": True,
         "current_source": 0,
@@ -459,13 +683,13 @@ def refresh_cache():
     }
     save_refresh_progress(progress)
 
-    with _cache_lock:
+    async with _cache_lock:
         _api_cache["refresh_in_progress"] = True
 
     config = load_config()
     sources = config.get("sources", [])
 
-    # Backward compatibility: if no sources but xtream config exists, treat as single source
+    # Backward compatibility
     if not sources and config.get("xtream", {}).get("host"):
         sources = [{
             "id": "default",
@@ -478,12 +702,11 @@ def refresh_cache():
             "filters": config.get("filters", {}),
         }]
 
-    # Filter enabled sources
     enabled_sources = [s for s in sources if s.get("enabled", True) and s.get("host") and s.get("username") and s.get("password")]
     
     if not enabled_sources:
         logger.info("Cannot refresh - no valid sources configured")
-        with _cache_lock:
+        async with _cache_lock:
             _api_cache["refresh_in_progress"] = False
         clear_refresh_progress()
         return False
@@ -497,145 +720,116 @@ def refresh_cache():
     new_sources_cache = {}
     total_stats = {"live_cats": 0, "live_streams": 0, "vod_cats": 0, "vod_streams": 0, "series_cats": 0, "series": 0}
 
-    for source_idx, source in enumerate(enabled_sources):
-        source_id = source.get("id", "default")
-        source_name = source.get("name", source_id)
-        host = source.get("host", "").rstrip("/")
-        username = source.get("username", "")
-        password = source.get("password", "")
+    try:
+        for source_idx, source in enumerate(enabled_sources):
+            source_id = source.get("id", "default")
+            source_name = source.get("name", source_id)
+            host = source.get("host", "").rstrip("/")
+            username = source.get("username", "")
+            password = source.get("password", "")
 
-        # Update progress to file
-        progress = load_refresh_progress()
-        progress["current_source"] = source_idx + 1
-        progress["current_source_name"] = source_name
-        save_refresh_progress(progress)
+            progress = load_refresh_progress()
+            progress["current_source"] = source_idx + 1
+            progress["current_source_name"] = source_name
+            save_refresh_progress(progress)
 
-        logger.info(f"Refreshing source: {source_name}")
+            logger.info(f"Refreshing source: {source_name}")
 
-        try:
-            # Fetch all data for this source with progress updates
-            def update_step(step_name, step_num, src_idx=source_idx, src_name=source_name, total=total_sources):
-                progress = load_refresh_progress()
-                progress["current_step"] = f"{src_name}: {step_name}"
-                # Each source has 6 steps, calculate overall percent
-                base_percent = (src_idx / total) * 100
-                step_percent = (step_num / 6) * (100 / total)
-                progress["percent"] = int(base_percent + step_percent)
-                save_refresh_progress(progress)
-                logger.info(f"[{src_name}] Step {step_num}/6: {step_name} (progress: {progress['percent']}%)")
+            try:
+                def update_step(step_name, step_num):
+                    p = load_refresh_progress()
+                    p["current_step"] = f"{source_name}: {step_name}"
+                    base_percent = (source_idx / total_sources) * 100
+                    step_percent = (step_num / 6) * (100 / total_sources)
+                    p["percent"] = int(base_percent + step_percent)
+                    save_refresh_progress(p)
+                    logger.info(f"[{source_name}] Step {step_num}/6: {step_name} (progress: {p['percent']}%)")
 
-            update_step("Live categories", 0)
-            live_cats = fetch_from_upstream(host, username, password, "get_live_categories") or []
-            logger.info(f"[{source_name}] Fetched {len(live_cats)} live categories")
-            
-            update_step("VOD categories", 1)
-            vod_cats = fetch_from_upstream(host, username, password, "get_vod_categories") or []
-            logger.info(f"[{source_name}] Fetched {len(vod_cats)} VOD categories")
-            
-            update_step("Series categories", 2)
-            series_cats = fetch_from_upstream(host, username, password, "get_series_categories") or []
-            logger.info(f"[{source_name}] Fetched {len(series_cats)} series categories")
-            
-            update_step("Live streams", 3)
-            live_streams = fetch_from_upstream(host, username, password, "get_live_streams") or []
-            logger.info(f"[{source_name}] Fetched {len(live_streams)} live streams")
-            
-            update_step("VOD streams", 4)
-            vod_streams = fetch_from_upstream(host, username, password, "get_vod_streams") or []
-            logger.info(f"[{source_name}] Fetched {len(vod_streams)} VOD streams")
-            
-            update_step("Series", 5)
-            series = fetch_from_upstream(host, username, password, "get_series") or []
-            logger.info(f"[{source_name}] Fetched {len(series)} series")
+                update_step("Live categories", 0)
+                live_cats = await fetch_from_upstream(host, username, password, "get_live_categories") or []
+                logger.info(f"[{source_name}] Fetched {len(live_cats)} live categories")
+                
+                update_step("VOD categories", 1)
+                vod_cats = await fetch_from_upstream(host, username, password, "get_vod_categories") or []
+                logger.info(f"[{source_name}] Fetched {len(vod_cats)} VOD categories")
+                
+                update_step("Series categories", 2)
+                series_cats = await fetch_from_upstream(host, username, password, "get_series_categories") or []
+                logger.info(f"[{source_name}] Fetched {len(series_cats)} series categories")
+                
+                update_step("Live streams", 3)
+                live_streams = await fetch_from_upstream(host, username, password, "get_live_streams") or []
+                logger.info(f"[{source_name}] Fetched {len(live_streams)} live streams")
+                
+                update_step("VOD streams", 4)
+                vod_streams = await fetch_from_upstream(host, username, password, "get_vod_streams") or []
+                logger.info(f"[{source_name}] Fetched {len(vod_streams)} VOD streams")
+                
+                update_step("Series", 5)
+                series = await fetch_from_upstream(host, username, password, "get_series") or []
+                logger.info(f"[{source_name}] Fetched {len(series)} series")
 
-            new_sources_cache[source_id] = {
-                "live_categories": live_cats,
-                "vod_categories": vod_cats,
-                "series_categories": series_cats,
-                "live_streams": live_streams,
-                "vod_streams": vod_streams,
-                "series": series,
-                "last_refresh": datetime.now().isoformat(),
-            }
+                new_sources_cache[source_id] = {
+                    "live_categories": live_cats,
+                    "vod_categories": vod_cats,
+                    "series_categories": series_cats,
+                    "live_streams": live_streams,
+                    "vod_streams": vod_streams,
+                    "series": series,
+                    "last_refresh": datetime.now().isoformat(),
+                }
 
-            total_stats["live_cats"] += len(live_cats)
-            total_stats["live_streams"] += len(live_streams)
-            total_stats["vod_cats"] += len(vod_cats)
-            total_stats["vod_streams"] += len(vod_streams)
-            total_stats["series_cats"] += len(series_cats)
-            total_stats["series"] += len(series)
+                total_stats["live_cats"] += len(live_cats)
+                total_stats["live_streams"] += len(live_streams)
+                total_stats["vod_cats"] += len(vod_cats)
+                total_stats["vod_streams"] += len(vod_streams)
+                total_stats["series_cats"] += len(series_cats)
+                total_stats["series"] += len(series)
 
-            logger.info(f"Source {source_id}: {len(live_streams)} live, {len(vod_streams)} vod, {len(series)} series")
+                logger.info(f"Source {source_id}: {len(live_streams)} live, {len(vod_streams)} vod, {len(series)} series")
 
-        except Exception as e:
-            logger.error(f"Failed to refresh source {source_id}: {e}")
+            except Exception as e:
+                logger.error(f"Failed to refresh source {source_id}: {e}")
 
-    # Update cache
-    with _cache_lock:
-        _api_cache["sources"] = new_sources_cache
-        _api_cache["last_refresh"] = datetime.now().isoformat()
-        _api_cache["refresh_in_progress"] = False
+        # Update cache only if we got some data
+        if new_sources_cache:
+            async with _cache_lock:
+                _api_cache["sources"] = new_sources_cache
+                _api_cache["last_refresh"] = datetime.now().isoformat()
+                _api_cache["refresh_in_progress"] = False
 
-    # Update file-based progress to complete
-    save_refresh_progress({
-        "in_progress": False,
-        "current_source": total_sources,
-        "total_sources": total_sources,
-        "current_source_name": "",
-        "current_step": "Complete",
-        "percent": 100
-    })
+            await rebuild_stream_source_map()
+            save_cache_to_disk()
 
-    # Rebuild stream-to-source mapping
-    rebuild_stream_source_map()
+            logger.info(
+                f"Refresh complete. Total: {total_stats['live_streams']} live, "
+                f"{total_stats['vod_streams']} vod, {total_stats['series']} series"
+            )
+        else:
+            logger.warning("Refresh completed but no data was fetched from any source")
+            async with _cache_lock:
+                _api_cache["refresh_in_progress"] = False
 
-    save_cache_to_disk()
-
-    logger.info(
-        f"Refresh complete. Total: {total_stats['live_streams']} live, "
-        f"{total_stats['vod_streams']} vod, {total_stats['series']} series"
-    )
+    finally:
+        # Always clear progress on completion or error
+        save_refresh_progress({
+            "in_progress": False,
+            "current_source": total_sources,
+            "total_sources": total_sources,
+            "current_source_name": "",
+            "current_step": "Complete",
+            "percent": 100
+        })
 
     return True
 
 
-def fetch_from_upstream(host, username, password, action):
-    """Fetch data from upstream Xtream server"""
-    url = f"{host}/player_api.php"
-    params = {"username": username, "password": password, "action": action}
+async def background_refresh_loop():
+    """Background task that periodically refreshes the cache"""
+    logger.info("Background refresh task started")
 
-    logger.debug(f"Fetching {action} from upstream...")
-    try:
-        import time
-        start_time = time.time()
-        # Use tuple timeout: (connect_timeout, read_timeout)
-        # Large playlists may need significant time to download
-        # Connect timeout: 30s, Read timeout: 600s (10 min) for huge lists
-        response = requests.get(url, params=params, headers=HEADERS, timeout=(30, 600))
-        elapsed = time.time() - start_time
-        if response.status_code == 200:
-            data = response.json()
-            logger.debug(f"Fetched {action}: {len(data) if isinstance(data, list) else 'ok'} items in {elapsed:.1f}s")
-            return data
-        else:
-            logger.warning(f"Fetch {action} failed with status {response.status_code} in {elapsed:.1f}s")
-    except requests.exceptions.Timeout:
-        logger.error(f"Timeout fetching {action}")
-    except requests.exceptions.ChunkedEncodingError as e:
-        logger.error(f"Connection interrupted while fetching {action}: {e}")
-    except requests.exceptions.ConnectionError as e:
-        logger.error(f"Connection error fetching {action}: {e}")
-    except Exception as e:
-        logger.error(f"Error fetching {action}: {e}")
-    return None
-
-
-def background_refresh_loop():
-    """Background thread that periodically refreshes the cache"""
-    logger.info("Background refresh thread started")
-
-    # Initial delay to let the app start
-    time.sleep(10)
+    # Initial delay
+    await asyncio.sleep(10)
 
     while True:
         try:
@@ -643,32 +837,25 @@ def background_refresh_loop():
 
             if not is_cache_valid():
                 logger.info("Cache expired, triggering refresh...")
-                refresh_cache()
+                await refresh_cache()
             else:
-                with _cache_lock:
-                    last_refresh = _api_cache.get("last_refresh", "Never")
+                last_refresh = _api_cache.get("last_refresh", "Never")
                 logger.info(f"Cache still valid. Last refresh: {last_refresh}")
 
-            # Sleep for 1/4 of TTL or minimum 5 minutes
             sleep_time = max(ttl // 4, 300)
-            time.sleep(sleep_time)
+            await asyncio.sleep(sleep_time)
 
+        except asyncio.CancelledError:
+            logger.info("Background refresh task cancelled")
+            break
         except Exception as e:
             logger.info(f"Background refresh error: {e}")
-            time.sleep(60)
+            await asyncio.sleep(60)
 
 
-# Start background refresh thread
-_refresh_thread = None
-
-
-def start_background_refresh():
-    """Start the background refresh thread"""
-    global _refresh_thread
-    if _refresh_thread is None or not _refresh_thread.is_alive():
-        _refresh_thread = threading.Thread(target=background_refresh_loop, daemon=True)
-        _refresh_thread.start()
-        logger.info("Background refresh thread initialized")
+# ============================================
+# CONFIGURATION
+# ============================================
 
 
 def load_config():
@@ -680,9 +867,9 @@ def load_config():
     }
     
     default_config = {
-        "sources": [],  # List of source configurations
-        "xtream": {"host": "", "username": "", "password": ""},  # Legacy single source (for backward compat)
-        "filters": default_filters.copy(),  # Legacy global filters (for backward compat)
+        "sources": [],
+        "xtream": {"host": "", "username": "", "password": ""},
+        "filters": default_filters.copy(),
         "content_types": {
             "live": True,
             "vod": True,
@@ -696,14 +883,12 @@ def load_config():
             with open(CONFIG_FILE) as f:
                 config = json.load(f)
                 
-                # Merge with defaults to ensure all keys exist
                 for key in default_config:
                     if key not in config:
                         config[key] = default_config[key]
                 
                 # Migrate old single-source config to multi-source if needed
                 if not config.get("sources") and config.get("xtream", {}).get("host"):
-                    # Migrate old filters structure first
                     filters = config.get("filters", {})
                     if "groups" in filters and isinstance(filters["groups"], list):
                         old_groups = filters.get("groups", [])
@@ -714,7 +899,6 @@ def load_config():
                             "series": {"groups": old_groups.copy(), "channels": old_channels.copy()},
                         }
                     
-                    # Create source from legacy config
                     config["sources"] = [{
                         "id": str(uuid.uuid4())[:8],
                         "name": "Default",
@@ -722,12 +906,11 @@ def load_config():
                         "username": config["xtream"]["username"],
                         "password": config["xtream"]["password"],
                         "enabled": True,
-                        "prefix": "",  # No prefix for seamless merge
+                        "prefix": "",
                         "filters": filters,
                     }]
                     logger.info("Migrated legacy single-source config to multi-source format")
                 
-                # Ensure each source has all required fields
                 for source in config.get("sources", []):
                     if "filters" not in source:
                         source["filters"] = default_filters.copy()
@@ -735,7 +918,6 @@ def load_config():
                         source["enabled"] = True
                     if "prefix" not in source:
                         source["prefix"] = ""
-                    # Ensure filter structure is complete
                     for cat in ["live", "vod", "series"]:
                         if cat not in source["filters"]:
                             source["filters"][cat] = {"groups": [], "channels": []}
@@ -744,7 +926,6 @@ def load_config():
                         if "channels" not in source["filters"][cat]:
                             source["filters"][cat]["channels"] = []
                 
-                # Ensure content_types exists
                 if "content_types" not in config:
                     config["content_types"] = {"live": True, "vod": True, "series": True}
                 
@@ -761,81 +942,15 @@ def save_config(config):
         json.dump(config, f, indent=2)
 
 
-def get_categories(host, username, password, content_type="live"):
-    """Get categories from Xtream API for a specific content type"""
-    actions = {"live": "get_live_categories", "vod": "get_vod_categories", "series": "get_series_categories"}
-    action = actions.get(content_type, "get_live_categories")
-    url = f"{host}/player_api.php?username={username}&password={password}&action={action}"
-    try:
-        # Use tuple timeout: (connect_timeout, read_timeout)
-        response = requests.get(url, timeout=(30, 120), headers=HEADERS)
-        return response.json() if response.status_code == 200 else []
-    except (requests.RequestException, json.JSONDecodeError) as e:
-        logger.error(f"Error in get_categories ({content_type}): {e}")
-        return []
-
-
-def get_live_streams(host, username, password):
-    """Get all live streams from Xtream API"""
-    url = f"{host}/player_api.php?username={username}&password={password}&action=get_live_streams"
-    try:
-        # Use tuple timeout: (connect_timeout, read_timeout) for large playlists
-        response = requests.get(url, timeout=(30, 600), headers=HEADERS)
-        return response.json() if response.status_code == 200 else []
-    except (requests.RequestException, json.JSONDecodeError) as e:
-        logger.error(f"Error in get_live_streams: {e}")
-        return []
-
-
-def get_vod_streams(host, username, password):
-    """Get all VOD (movies) from Xtream API"""
-    url = f"{host}/player_api.php?username={username}&password={password}&action=get_vod_streams"
-    try:
-        # Use tuple timeout: (connect_timeout, read_timeout) for large playlists
-        response = requests.get(url, timeout=(30, 600), headers=HEADERS)
-        return response.json() if response.status_code == 200 else []
-    except (requests.RequestException, json.JSONDecodeError) as e:
-        logger.error(f"Error in get_vod_streams: {e}")
-        return []
-
-
-def get_series(host, username, password):
-    """Get all series from Xtream API"""
-    url = f"{host}/player_api.php?username={username}&password={password}&action=get_series"
-    try:
-        # Use tuple timeout: (connect_timeout, read_timeout) for large playlists
-        response = requests.get(url, timeout=(30, 600), headers=HEADERS)
-        return response.json() if response.status_code == 200 else []
-    except (requests.RequestException, json.JSONDecodeError) as e:
-        logger.error(f"Error in get_series: {e}")
-        return []
-
-
-def get_series_info(host, username, password, series_id):
-    """Get series info including episodes from Xtream API"""
-    url = f"{host}/player_api.php?username={username}&password={password}&action=get_series_info&series_id={series_id}"
-    try:
-        response = requests.get(url, timeout=60, headers=HEADERS)
-        return response.json() if response.status_code == 200 else {}
-    except (requests.RequestException, json.JSONDecodeError):
-        return {}
+# ============================================
+# FILTER FUNCTIONS
+# ============================================
 
 
 def matches_filter(value, filter_rule):
-    """
-    Check if a value matches a filter rule.
-
-    Filter rule structure:
-    {
-        "type": "include" or "exclude",
-        "match": "exact" | "starts_with" | "ends_with" | "contains" | "not_contains" | "regex" | "all",
-        "value": "the pattern",
-        "case_sensitive": true/false
-    }
-    """
+    """Check if a value matches a filter rule."""
     match_type = filter_rule.get("match", "contains")
     
-    # "all" match type matches everything
     if match_type == "all":
         return True
     
@@ -869,38 +984,25 @@ def matches_filter(value, filter_rule):
 
 
 def should_include(value, filter_rules):
-    """
-    Determine if a value should be included based on filter rules.
-
-    Logic:
-    1. If there are include rules, item must match at least one include rule
-    2. If item matches any exclude rule, it's excluded
-    3. If no include rules exist, items are included by default (unless excluded)
-    """
+    """Determine if a value should be included based on filter rules."""
     include_rules = [r for r in filter_rules if r.get("type") == "include"]
     exclude_rules = [r for r in filter_rules if r.get("type") == "exclude"]
 
-    # Check exclude rules first - if any match, exclude the item
     for rule in exclude_rules:
         if matches_filter(value, rule):
             return False
 
-    # If there are include rules, item must match at least one
     if include_rules:
         for rule in include_rules:
             if matches_filter(value, rule):
                 return True
-        return False  # No include rule matched
+        return False
 
-    # No include rules and no exclude rules matched - include by default
     return True
 
 
 def build_category_map(categories):
-    """Build a category ID to name map, handling both dict and string formats.
-    
-    Some APIs may return categories as strings instead of dicts, this handles both cases.
-    """
+    """Build a category ID to name map."""
     cat_map = {}
     for cat in categories:
         if isinstance(cat, dict):
@@ -908,13 +1010,12 @@ def build_category_map(categories):
             cat_name = cat.get("category_name", "")
             cat_map[cat_id] = cat_name
         elif isinstance(cat, str):
-            # If it's a string, use it as both ID and name
             cat_map[cat] = cat
     return cat_map
 
 
 def safe_get_category_name(cat):
-    """Safely get category_name from a category that may be a dict or string."""
+    """Safely get category_name from a category."""
     if isinstance(cat, dict):
         return cat.get("category_name", "")
     elif isinstance(cat, str):
@@ -923,7 +1024,7 @@ def safe_get_category_name(cat):
 
 
 def safe_get_category_id(cat):
-    """Safely get category_id from a category that may be a dict or string."""
+    """Safely get category_id from a category."""
     if isinstance(cat, dict):
         return cat.get("category_id", "")
     elif isinstance(cat, str):
@@ -932,7 +1033,7 @@ def safe_get_category_id(cat):
 
 
 def safe_copy_category(cat):
-    """Safely copy a category, returning a dict whether input is dict or string."""
+    """Safely copy a category."""
     if isinstance(cat, dict):
         return cat.copy()
     elif isinstance(cat, str):
@@ -940,18 +1041,16 @@ def safe_copy_category(cat):
     return {"category_id": "", "category_name": ""}
 
 
-def generate_m3u(config, use_virtual_ids=True):
-    """Generate filtered M3U playlist from cached data, merging all sources.
-    
-    Args:
-        config: Configuration dictionary
-        use_virtual_ids: If True, use virtual IDs for merged playlist (default).
-                        If False, use original IDs (for per-source playlists).
-    """
+# ============================================
+# M3U GENERATION
+# ============================================
+
+
+def generate_m3u(config, request: Request, use_virtual_ids=True):
+    """Generate filtered M3U playlist from cached data, merging all sources."""
     sources = config.get("sources", [])
     content_types = config.get("content_types", {"live": True, "vod": True, "series": True})
     
-    # Backward compatibility: if no sources but xtream config exists
     if not sources and config.get("xtream", {}).get("host"):
         sources = [{
             "id": "default",
@@ -967,16 +1066,12 @@ def generate_m3u(config, use_virtual_ids=True):
     if not sources:
         return "#EXTM3U\n# Error: No sources configured\n"
 
-    # Use this server's URL for stream proxying
-    server_url = request.host_url.rstrip("/")
-    
-    # Determine base path for stream URLs
+    server_url = str(request.base_url).rstrip("/")
     stream_base = "/merged" if use_virtual_ids else ""
 
     lines = ["#EXTM3U"]
     stats = {"live": 0, "vod": 0, "series": 0, "excluded": 0, "sources": 0}
 
-    # Get list of enabled sources for indexing
     enabled_sources = [s for s in sources if s.get("enabled", True)]
 
     for source_index, source in enumerate(enabled_sources):
@@ -984,13 +1079,12 @@ def generate_m3u(config, use_virtual_ids=True):
         prefix = source.get("prefix", "")
         filters = source.get("filters", {})
         
-        # Check if source has credentials
         if not source.get("host") or not source.get("username") or not source.get("password"):
             continue
         
         stats["sources"] += 1
 
-        # ===== LIVE TV =====
+        # Live TV
         if content_types.get("live", True):
             live_filters = filters.get("live", {"groups": [], "channels": []})
             live_group_filters = live_filters.get("groups", [])
@@ -1016,17 +1110,14 @@ def generate_m3u(config, use_virtual_ids=True):
                     stats["excluded"] += 1
                     continue
 
-                # Apply prefix to group if set
                 display_group = f"{prefix}{group}" if prefix else group
-                
-                # Use virtual ID for merged playlist, original ID for per-source
                 url_id = encode_virtual_id(source_index, stream_id) if use_virtual_ids else stream_id
                 stream_url = f"{server_url}{stream_base}/user/pass/{url_id}.ts"
                 lines.append(f'#EXTINF:-1 tvg-id="{epg_id}" tvg-logo="{icon}" group-title="{display_group}",{name}')
                 lines.append(stream_url)
                 stats["live"] += 1
 
-        # ===== VOD (MOVIES) =====
+        # VOD
         if content_types.get("vod", True):
             vod_filters = filters.get("vod", {"groups": [], "channels": []})
             vod_group_filters = vod_filters.get("groups", [])
@@ -1059,7 +1150,7 @@ def generate_m3u(config, use_virtual_ids=True):
                 lines.append(stream_url)
                 stats["vod"] += 1
 
-        # ===== SERIES =====
+        # Series
         if content_types.get("series", True):
             series_filters = filters.get("series", {"groups": [], "channels": []})
             series_group_filters = series_filters.get("groups", [])
@@ -1088,88 +1179,135 @@ def generate_m3u(config, use_virtual_ids=True):
                 lines.append("# Series - use Xtream API for episodes")
                 stats["series"] += 1
 
-    # Add stats as comment
     stats_line = f"# Content: {stats['live']} live, {stats['vod']} movies, {stats['series']} series | {stats['excluded']} excluded | {stats['sources']} source(s)"
     lines.insert(1, stats_line)
 
     return "\n".join(lines)
 
 
-@app.route("/")
-def index():
+# ============================================
+# FASTAPI APPLICATION
+# ============================================
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan manager - handles startup and shutdown"""
+    global _background_task
+    
+    # Startup
+    os.makedirs(DATA_DIR, exist_ok=True)
+    load_cache_from_disk()
+    
+    # Start background refresh task
+    _background_task = asyncio.create_task(background_refresh_loop())
+    
+    # If cache is empty or invalid, trigger immediate refresh
+    if not is_cache_valid():
+        logger.info("Cache is empty or invalid, triggering initial refresh...")
+        asyncio.create_task(refresh_cache())
+    
+    yield
+    
+    # Shutdown
+    if _background_task:
+        _background_task.cancel()
+        try:
+            await _background_task
+        except asyncio.CancelledError:
+            pass
+    
+    await close_http_client()
+    logger.info("Application shutdown complete")
+
+
+app = FastAPI(title="XtreamFilter", lifespan=lifespan)
+
+
+# ============================================
+# WEB UI ROUTES
+# ============================================
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
     """Main configuration page"""
     config = load_config()
-    return render_template("index.html", config=config)
+    return templates.TemplateResponse("index.html", {"request": request, "config": config})
 
 
-@app.route("/save", methods=["POST"])
-def save():
+@app.post("/save")
+async def save(
+    request: Request,
+    host: str = Form(""),
+    username: str = Form(""),
+    password: str = Form(""),
+):
     """Save configuration"""
     config = load_config()
 
-    # Update Xtream settings
-    config["xtream"]["host"] = request.form.get("host", "").strip()
-    config["xtream"]["username"] = request.form.get("username", "").strip()
-    config["xtream"]["password"] = request.form.get("password", "").strip()
+    config["xtream"]["host"] = host.strip()
+    config["xtream"]["username"] = username.strip()
+    config["xtream"]["password"] = password.strip()
 
-    # Update content type settings (checkbox: present = True, absent = False)
+    form = await request.form()
     config["content_types"] = {
-        "live": "content_live" in request.form,
-        "vod": "content_vod" in request.form,
-        "series": "content_series" in request.form,
+        "live": "content_live" in form,
+        "vod": "content_vod" in form,
+        "series": "content_series" in form,
     }
 
     save_config(config)
 
-    # Clear cache
     if os.path.exists(CACHE_FILE):
         os.remove(CACHE_FILE)
 
-    return redirect(url_for("index"))
+    return RedirectResponse(url="/", status_code=303)
 
 
-@app.route("/api/filters", methods=["GET"])
-def get_filters():
+# ============================================
+# FILTER API ROUTES
+# ============================================
+
+
+@app.get("/api/filters")
+async def get_filters():
     """Get all filter rules"""
     config = load_config()
-    return jsonify(config["filters"])
+    return config["filters"]
 
 
-@app.route("/api/filters", methods=["POST"])
-def save_filters():
+@app.post("/api/filters")
+async def save_filters(request: Request):
     """Save filter rules"""
     config = load_config()
-    data = request.get_json()
+    data = await request.json()
 
-    # Support both old structure and new per-category structure
     if "live" in data or "vod" in data or "series" in data:
-        # New structure
         for cat in ["live", "vod", "series"]:
             if cat in data:
                 config["filters"][cat] = data[cat]
     else:
-        # Old structure - apply to all categories for backwards compat
         for cat in ["live", "vod", "series"]:
             config["filters"][cat]["groups"] = data.get("groups", [])
             config["filters"][cat]["channels"] = data.get("channels", [])
 
     save_config(config)
 
-    # Clear cache
     if os.path.exists(CACHE_FILE):
         os.remove(CACHE_FILE)
 
-    return jsonify({"status": "ok"})
+    return {"status": "ok"}
 
 
-@app.route("/api/filters/add", methods=["POST"])
-def add_filter():
+@app.post("/api/filters/add")
+async def add_filter(request: Request):
     """Add a single filter rule"""
     config = load_config()
-    data = request.get_json()
+    data = await request.json()
 
-    category = data.get("category", "live")  # "live", "vod", or "series"
-    target = data.get("target", "groups")  # "groups" or "channels"
+    category = data.get("category", "live")
+    target = data.get("target", "groups")
     rule = {
         "type": data.get("type", "exclude"),
         "match": data.get("match", "contains"),
@@ -1181,16 +1319,16 @@ def add_filter():
         config["filters"][category][target].append(rule)
         save_config(config)
 
-    return jsonify({"status": "ok", "filters": config["filters"]})
+    return {"status": "ok", "filters": config["filters"]}
 
 
-@app.route("/api/filters/delete", methods=["POST"])
-def delete_filter():
+@app.post("/api/filters/delete")
+async def delete_filter(request: Request):
     """Delete a filter rule by index"""
     config = load_config()
-    data = request.get_json()
+    data = await request.json()
 
-    category = data.get("category", "live")  # "live", "vod", or "series"
+    category = data.get("category", "live")
     target = data.get("target", "groups")
     index = data.get("index", -1)
 
@@ -1200,25 +1338,26 @@ def delete_filter():
             filter_list.pop(index)
             save_config(config)
 
-    return jsonify({"status": "ok", "filters": config["filters"]})
+    return {"status": "ok", "filters": config["filters"]}
 
 
 # ============================================
 # SOURCE MANAGEMENT API
 # ============================================
 
-@app.route("/api/sources", methods=["GET"])
-def get_sources():
+
+@app.get("/api/sources")
+async def get_sources():
     """Get all configured sources"""
     config = load_config()
-    return jsonify({"sources": config.get("sources", [])})
+    return {"sources": config.get("sources", [])}
 
 
-@app.route("/api/sources", methods=["POST"])
-def add_source():
+@app.post("/api/sources")
+async def add_source(request: Request):
     """Add a new source"""
     config = load_config()
-    data = request.get_json()
+    data = await request.json()
     
     new_source = {
         "id": str(uuid.uuid4())[:8],
@@ -1240,28 +1379,27 @@ def add_source():
     config["sources"].append(new_source)
     save_config(config)
     
-    return jsonify({"status": "ok", "source": new_source, "sources": config["sources"]})
+    return {"status": "ok", "source": new_source, "sources": config["sources"]}
 
 
-@app.route("/api/sources/<source_id>", methods=["GET"])
-def get_source(source_id):
+@app.get("/api/sources/{source_id}")
+async def get_source(source_id: str):
     """Get a specific source by ID"""
     config = load_config()
     for source in config.get("sources", []):
         if source.get("id") == source_id:
-            return jsonify({"source": source})
-    return jsonify({"error": "Source not found"}), 404
+            return {"source": source}
+    return JSONResponse({"error": "Source not found"}, status_code=404)
 
 
-@app.route("/api/sources/<source_id>", methods=["PUT"])
-def update_source(source_id):
+@app.put("/api/sources/{source_id}")
+async def update_source(source_id: str, request: Request):
     """Update a source"""
     config = load_config()
-    data = request.get_json()
+    data = await request.json()
     
     for i, source in enumerate(config.get("sources", [])):
         if source.get("id") == source_id:
-            # Update fields
             if "name" in data:
                 source["name"] = data["name"]
             if "host" in data:
@@ -1281,13 +1419,13 @@ def update_source(source_id):
             
             config["sources"][i] = source
             save_config(config)
-            return jsonify({"status": "ok", "source": source, "sources": config["sources"]})
+            return {"status": "ok", "source": source, "sources": config["sources"]}
     
-    return jsonify({"error": "Source not found"}), 404
+    return JSONResponse({"error": "Source not found"}, status_code=404)
 
 
-@app.route("/api/sources/<source_id>", methods=["DELETE"])
-def delete_source(source_id):
+@app.delete("/api/sources/{source_id}")
+async def delete_source(source_id: str):
     """Delete a source"""
     config = load_config()
     
@@ -1296,42 +1434,42 @@ def delete_source(source_id):
     
     if len(config["sources"]) < len(sources):
         save_config(config)
-        return jsonify({"status": "ok", "sources": config["sources"]})
+        return {"status": "ok", "sources": config["sources"]}
     
-    return jsonify({"error": "Source not found"}), 404
+    return JSONResponse({"error": "Source not found"}, status_code=404)
 
 
-@app.route("/api/sources/<source_id>/filters", methods=["GET"])
-def get_source_filters(source_id):
+@app.get("/api/sources/{source_id}/filters")
+async def get_source_filters(source_id: str):
     """Get filters for a specific source"""
     config = load_config()
     for source in config.get("sources", []):
         if source.get("id") == source_id:
-            return jsonify({"filters": source.get("filters", {})})
-    return jsonify({"error": "Source not found"}), 404
+            return {"filters": source.get("filters", {})}
+    return JSONResponse({"error": "Source not found"}, status_code=404)
 
 
-@app.route("/api/sources/<source_id>/filters", methods=["POST"])
-def save_source_filters(source_id):
+@app.post("/api/sources/{source_id}/filters")
+async def save_source_filters(source_id: str, request: Request):
     """Save filters for a specific source"""
     config = load_config()
-    data = request.get_json()
+    data = await request.json()
     
     for i, source in enumerate(config.get("sources", [])):
         if source.get("id") == source_id:
             source["filters"] = data
             config["sources"][i] = source
             save_config(config)
-            return jsonify({"status": "ok", "filters": source["filters"]})
+            return {"status": "ok", "filters": source["filters"]}
     
-    return jsonify({"error": "Source not found"}), 404
+    return JSONResponse({"error": "Source not found"}, status_code=404)
 
 
-@app.route("/api/sources/<source_id>/filters/add", methods=["POST"])
-def add_source_filter(source_id):
+@app.post("/api/sources/{source_id}/filters/add")
+async def add_source_filter(source_id: str, request: Request):
     """Add a filter rule to a specific source"""
     config = load_config()
-    data = request.get_json()
+    data = await request.json()
     
     category = data.get("category", "live")
     target = data.get("target", "groups")
@@ -1354,16 +1492,16 @@ def add_source_filter(source_id):
             source["filters"][category][target].append(rule)
             config["sources"][i] = source
             save_config(config)
-            return jsonify({"status": "ok", "filters": source["filters"]})
+            return {"status": "ok", "filters": source["filters"]}
     
-    return jsonify({"error": "Source not found"}), 404
+    return JSONResponse({"error": "Source not found"}, status_code=404)
 
 
-@app.route("/api/sources/<source_id>/filters/delete", methods=["POST"])
-def delete_source_filter(source_id):
+@app.post("/api/sources/{source_id}/filters/delete")
+async def delete_source_filter(source_id: str, request: Request):
     """Delete a filter rule from a specific source"""
     config = load_config()
-    data = request.get_json()
+    data = await request.json()
     
     category = data.get("category", "live")
     target = data.get("target", "groups")
@@ -1377,31 +1515,35 @@ def delete_source_filter(source_id):
                     filter_list.pop(index)
                     config["sources"][i] = source
                     save_config(config)
-            return jsonify({"status": "ok", "filters": source.get("filters", {})})
+            return {"status": "ok", "filters": source.get("filters", {})}
     
-    return jsonify({"error": "Source not found"}), 404
+    return JSONResponse({"error": "Source not found"}, status_code=404)
 
 
-@app.route("/playlist.m3u")
-@app.route("/get.php")
-def playlist():
+# ============================================
+# PLAYLIST ROUTES
+# ============================================
+
+
+@app.get("/playlist.m3u")
+@app.get("/get.php")
+async def playlist(request: Request):
     """Serve the filtered M3U playlist"""
     config = load_config()
-    m3u_content = generate_m3u(config)
+    m3u_content = generate_m3u(config, request)
 
     return Response(
-        m3u_content,
-        mimetype="audio/x-mpegurl",
+        content=m3u_content,
+        media_type="audio/x-mpegurl",
         headers={"Content-Disposition": 'attachment; filename="playlist.m3u"', "Cache-Control": "no-cache"},
     )
 
 
-@app.route("/playlist_full.m3u")
-@app.route("/full.m3u")
-def playlist_full():
-    """Serve the unfiltered M3U playlist (full catalog)"""
+@app.get("/playlist_full.m3u")
+@app.get("/full.m3u")
+async def playlist_full(request: Request):
+    """Serve the unfiltered M3U playlist"""
     config = load_config()
-    # Create a config copy with empty filters
     unfiltered_config = {
         "xtream": config["xtream"],
         "filters": {
@@ -1411,213 +1553,213 @@ def playlist_full():
         },
         "content_types": config.get("content_types", {"live": True, "vod": True, "series": True}),
     }
-    m3u_content = generate_m3u(unfiltered_config)
+    m3u_content = generate_m3u(unfiltered_config, request)
 
     return Response(
-        m3u_content,
-        mimetype="audio/x-mpegurl",
+        content=m3u_content,
+        media_type="audio/x-mpegurl",
         headers={"Content-Disposition": 'attachment; filename="playlist_full.m3u"', "Cache-Control": "no-cache"},
     )
 
 
-@app.route("/groups")
-def groups():
+@app.get("/groups")
+async def groups(
+    type: str = Query("live"),
+    source_id: Optional[str] = Query(None),
+):
     """API endpoint to get all available groups for a content type"""
     config = load_config()
     sources = config.get("sources", [])
-    content_type = request.args.get("type", "live")
-    source_id = request.args.get("source_id")  # Optional: filter by source
     
-    # Check if any sources configured
     if not sources and not config.get("xtream", {}).get("host"):
-        return jsonify({"error": "Not configured", "groups": []})
+        return {"error": "Not configured", "groups": []}
     
-    # Get categories from cache (merged from all sources or specific source)
-    if content_type == "live":
+    if type == "live":
         categories = get_cached("live_categories", source_id)
-    elif content_type == "vod":
+    elif type == "vod":
         categories = get_cached("vod_categories", source_id)
-    elif content_type == "series":
+    elif type == "series":
         categories = get_cached("series_categories", source_id)
     else:
         categories = []
     
     groups_list = sorted(set(safe_get_category_name(cat) for cat in categories if safe_get_category_name(cat)))
-    return jsonify({"groups": groups_list})
+    return {"groups": groups_list}
 
 
-@app.route("/channels")
-def channels():
+@app.get("/channels")
+async def channels(
+    type: str = Query("live"),
+    source_id: Optional[str] = Query(None),
+    search: str = Query(""),
+    group: str = Query(""),
+    page: int = Query(1),
+    per_page: int = Query(100),
+):
     """API endpoint to get channel/item names with search and filtering"""
     config = load_config()
     sources = config.get("sources", [])
-    content_type = request.args.get("type", "live")
-    source_id = request.args.get("source_id")  # Optional: filter by source
 
     if not sources and not config.get("xtream", {}).get("host"):
-        return jsonify({"error": "Not configured", "channels": []})
+        return {"error": "Not configured", "channels": []}
 
-    search = request.args.get("search", "").lower()
-    group_filter = request.args.get("group", "")
-    page = int(request.args.get("page", 1))
-    per_page = int(request.args.get("per_page", 100))
+    search_lower = search.lower()
 
-    # Get data from cache based on content type (merged from all sources or specific)
-    if content_type == "live":
+    if type == "live":
         streams = get_cached("live_streams", source_id)
         categories = get_cached("live_categories", source_id)
-    elif content_type == "vod":
+    elif type == "vod":
         streams = get_cached("vod_streams", source_id)
         categories = get_cached("vod_categories", source_id)
-    elif content_type == "series":
+    elif type == "series":
         streams = get_cached("series", source_id)
         categories = get_cached("series_categories", source_id)
     else:
         streams = []
         categories = []
 
-    # Build category mapping
     cat_map = build_category_map(categories)
 
-    # Extract channel info with group
     items = []
     for s in streams:
         name = s.get("name", "")
         cat_id = str(s.get("category_id", ""))
-        group = cat_map.get(cat_id, "Unknown")
+        grp = cat_map.get(cat_id, "Unknown")
 
-        # Apply filters
-        if search and search not in name.lower():
+        if search_lower and search_lower not in name.lower():
             continue
-        if group_filter and group != group_filter:
+        if group and grp != group:
             continue
 
-        items.append({"name": name, "group": group})
+        items.append({"name": name, "group": grp})
 
     total = len(items)
 
-    # Paginate
     start = (page - 1) * per_page
     end = start + per_page
     paginated = items[start:end]
 
-    return jsonify(
-        {
-            "channels": [item["name"] for item in paginated],
-            "items": paginated,
-            "total": total,
-            "page": page,
-            "per_page": per_page,
-            "total_pages": (total + per_page - 1) // per_page,
-        }
-    )
+    return {
+        "channels": [item["name"] for item in paginated],
+        "items": paginated,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": (total + per_page - 1) // per_page,
+    }
 
 
-@app.route("/api/browse")
-def api_browse():
-    """
-    Enhanced browsing API for channels/items with full metadata.
-    Supports filtering by content type, group, search, and pagination.
-    """
-    content_type = request.args.get("type", "live")
-    search = request.args.get("search", "").lower()
-    group_filter = request.args.get("group", "")
-    page = int(request.args.get("page", 1))
-    per_page = min(int(request.args.get("per_page", 50)), 200)
+@app.get("/api/browse")
+async def api_browse(
+    type: str = Query("live"),
+    search: str = Query(""),
+    group: str = Query(""),
+    page: int = Query(1),
+    per_page: int = Query(50),
+):
+    """Enhanced browsing API for channels/items with full metadata."""
+    per_page = min(per_page, 200)
+    search_lower = search.lower()
 
-    # Get cached data
-    if content_type == "live":
+    if type == "live":
         streams = get_cached("live_streams")
         categories = get_cached("live_categories")
-    elif content_type == "vod":
+    elif type == "vod":
         streams = get_cached("vod_streams")
         categories = get_cached("vod_categories")
-    elif content_type == "series":
+    elif type == "series":
         streams = get_cached("series")
         categories = get_cached("series_categories")
     else:
-        return jsonify({"error": "Invalid content type", "items": []})
+        return {"error": "Invalid content type", "items": []}
 
-    # Build category mapping with counts
     cat_map = build_category_map(categories)
 
-    # Count items per group
     group_counts = {}
     for s in streams:
         cat_id = str(s.get("category_id", ""))
-        group = cat_map.get(cat_id, "Unknown")
-        group_counts[group] = group_counts.get(group, 0) + 1
+        grp = cat_map.get(cat_id, "Unknown")
+        group_counts[grp] = group_counts.get(grp, 0) + 1
 
-    # Filter and build items list
     items = []
     for s in streams:
         name = s.get("name", "")
         cat_id = str(s.get("category_id", ""))
-        group = cat_map.get(cat_id, "Unknown")
+        grp = cat_map.get(cat_id, "Unknown")
         icon = s.get("stream_icon", "") or s.get("cover", "")
 
-        # Apply search filter
-        if search and search not in name.lower() and search not in group.lower():
+        if search_lower and search_lower not in name.lower() and search_lower not in grp.lower():
             continue
 
-        # Apply group filter
-        if group_filter and group != group_filter:
+        if group and grp != group:
             continue
 
-        items.append(
-            {
-                "name": name,
-                "group": group,
-                "icon": icon,
-                "id": s.get("stream_id") or s.get("series_id"),
-            }
-        )
+        items.append({
+            "name": name,
+            "group": grp,
+            "icon": icon,
+            "id": s.get("stream_id") or s.get("series_id"),
+        })
 
     total = len(items)
-
-    # Sort by group then name
     items.sort(key=lambda x: (x["group"].lower(), x["name"].lower()))
 
-    # Paginate
     start = (page - 1) * per_page
     end = start + per_page
     paginated = items[start:end]
 
-    # Build groups list with counts for the dropdown
     groups_list = [{"name": g, "count": c} for g, c in sorted(group_counts.items())]
 
-    return jsonify(
-        {
-            "items": paginated,
-            "groups": groups_list,
-            "total": total,
-            "page": page,
-            "per_page": per_page,
-            "total_pages": (total + per_page - 1) // per_page,
-            "content_type": content_type,
-        }
-    )
+    return {
+        "items": paginated,
+        "groups": groups_list,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": (total + per_page - 1) // per_page,
+        "content_type": type,
+    }
 
 
-@app.route("/stats")
-def stats():
+@app.get("/stats")
+async def stats():
     """API endpoint to get playlist statistics"""
     config = load_config()
     xtream = config["xtream"]
 
     if not xtream["host"]:
-        return jsonify({"error": "Not configured"})
+        return {"error": "Not configured"}
 
     host = xtream["host"].rstrip("/")
+    client = await get_http_client()
 
-    # Get counts for all content types
-    live_categories = get_categories(host, xtream["username"], xtream["password"], "live")
-    vod_categories = get_categories(host, xtream["username"], xtream["password"], "vod")
-    series_categories = get_categories(host, xtream["username"], xtream["password"], "series")
+    try:
+        live_cats_resp = await client.get(
+            f"{host}/player_api.php",
+            params={"username": xtream["username"], "password": xtream["password"], "action": "get_live_categories"}
+        )
+        live_categories = live_cats_resp.json() if live_cats_resp.status_code == 200 else []
+        
+        vod_cats_resp = await client.get(
+            f"{host}/player_api.php",
+            params={"username": xtream["username"], "password": xtream["password"], "action": "get_vod_categories"}
+        )
+        vod_categories = vod_cats_resp.json() if vod_cats_resp.status_code == 200 else []
+        
+        series_cats_resp = await client.get(
+            f"{host}/player_api.php",
+            params={"username": xtream["username"], "password": xtream["password"], "action": "get_series_categories"}
+        )
+        series_categories = series_cats_resp.json() if series_cats_resp.status_code == 200 else []
+        
+        streams_resp = await client.get(
+            f"{host}/player_api.php",
+            params={"username": xtream["username"], "password": xtream["password"], "action": "get_live_streams"}
+        )
+        streams = streams_resp.json() if streams_resp.status_code == 200 else []
+    except Exception:
+        return {"error": "Failed to fetch stats"}
 
-    streams = get_live_streams(host, xtream["username"], xtream["password"])
-
-    # Count all filters across categories
     filters = config["filters"]
     total_group_filters = 0
     total_channel_filters = 0
@@ -1626,120 +1768,103 @@ def stats():
             total_group_filters += len(filters[cat].get("groups", []))
             total_channel_filters += len(filters[cat].get("channels", []))
 
-    return jsonify(
-        {
-            "total_categories": len(live_categories) + len(vod_categories) + len(series_categories),
-            "total_channels": len(streams),
-            "live_categories": len(live_categories),
-            "vod_categories": len(vod_categories),
-            "series_categories": len(series_categories),
-            "group_filters": total_group_filters,
-            "channel_filters": total_channel_filters,
-        }
-    )
+    return {
+        "total_categories": len(live_categories) + len(vod_categories) + len(series_categories),
+        "total_channels": len(streams),
+        "live_categories": len(live_categories),
+        "vod_categories": len(vod_categories),
+        "series_categories": len(series_categories),
+        "group_filters": total_group_filters,
+        "channel_filters": total_channel_filters,
+    }
 
 
-@app.route("/preview")
-def preview():
+@app.get("/preview")
+async def preview(request: Request):
     """Preview filtered playlist stats"""
     config = load_config()
-    m3u_content = generate_m3u(config)
+    m3u_content = generate_m3u(config, request)
 
-    # Parse stats from first comment
     lines = m3u_content.split("\n")
     stats_line = lines[1] if len(lines) > 1 else ""
 
-    # Get sample channels
     sample = []
     for i in range(2, min(len(lines), 22), 2):
         if lines[i].startswith("#EXTINF"):
             name = lines[i].split(",", 1)[-1] if "," in lines[i] else lines[i]
             sample.append(name)
 
-    return jsonify({"stats": stats_line, "sample_channels": sample})
+    return {"stats": stats_line, "sample_channels": sample}
 
 
 # ============================================
 # XTREAM CODES API PROXY
 # ============================================
-# These endpoints mimic a real Xtream Codes server so IPTV apps can connect
 
 
-@app.route("/player_api.php")
-def player_api():
-    """
-    Root Xtream Codes API endpoint - redirects to merged API.
-    This provides a unified view of all sources with virtual IDs.
-    """
-    # Redirect to merged API which combines all sources
-    return player_api_merged()
+@app.get("/player_api.php")
+async def player_api(request: Request):
+    """Root Xtream Codes API endpoint - redirects to merged API."""
+    return await player_api_merged(request)
 
 
-@app.route("/full/player_api.php")
-def player_api_full():
-    """
-    Root full/unfiltered endpoint - redirects to first source with a route.
-    """
+@app.get("/full/player_api.php")
+async def player_api_full(request: Request):
+    """Root full/unfiltered endpoint."""
     config = load_config()
     sources = config.get("sources", [])
     
-    # Find first enabled source with a route
     for source in sources:
         if source.get("enabled", True) and source.get("route"):
-            return player_api_source_full(source.get("route"))
+            return await player_api_source_full(source.get("route"), request)
     
-    # No source with route found
     available_routes = [s.get("route") for s in sources if s.get("enabled", True) and s.get("route")]
     if available_routes:
-        return jsonify({
+        return JSONResponse({
             "error": "Please use a dedicated source route",
             "available_routes": [f"/{r}/full/player_api.php" for r in available_routes]
-        }), 400
+        }, status_code=400)
     
-    return jsonify({
-        "error": "No sources configured with dedicated routes. Please configure a route for each source in the web UI."
-    }), 400
+    return JSONResponse({
+        "error": "No sources configured with dedicated routes."
+    }, status_code=400)
 
 
 # ============================================
-# MERGED XTREAM API (All sources combined with virtual IDs)
+# MERGED XTREAM API
 # ============================================
 
-@app.route("/merged/player_api.php")
-def player_api_merged():
-    """
-    Merged Xtream API - combines all sources with virtual IDs.
-    Stream IDs are remapped to be unique across all sources.
-    """
+
+@app.get("/merged/player_api.php")
+async def player_api_merged(request: Request):
+    """Merged Xtream API - combines all sources with virtual IDs."""
     config = load_config()
     enabled_sources = [s for s in config.get("sources", []) if s.get("enabled", True)]
-    action = request.args.get("action", "")
+    action = request.query_params.get("action", "")
 
     if not enabled_sources:
-        return jsonify({"error": "No sources configured"}), 400
+        return JSONResponse({"error": "No sources configured"}, status_code=400)
+
+    client = await get_http_client()
 
     try:
-        # No action = authentication
         if not action:
-            # Use first source for auth info
             source = enabled_sources[0]
             host = source["host"].rstrip("/")
-            response = requests.get(
+            response = await client.get(
                 f"{host}/player_api.php",
                 params={"username": source["username"], "password": source["password"]},
-                headers=HEADERS,
-                timeout=30,
+                timeout=30.0,
             )
             if response.status_code == 200:
                 data = response.json()
                 if "server_info" in data:
-                    data["server_info"]["url"] = request.host_url.rstrip("/") + "/merged"
+                    data["server_info"]["url"] = str(request.base_url).rstrip("/") + "/merged"
                     data["server_info"]["port"] = "80"
                     data["server_info"]["https_port"] = "443"
-                return jsonify(data)
-            return Response(response.content, status=response.status_code)
+                return data
+            return Response(content=response.content, status_code=response.status_code)
 
-        # Get Live Categories - merge from all sources
         elif action == "get_live_categories":
             result = []
             for idx, source in enumerate(enabled_sources):
@@ -1754,9 +1879,8 @@ def player_api_merged():
                         cat_copy["category_name"] = display_name
                         cat_copy["category_id"] = encode_virtual_id(idx, safe_get_category_id(cat))
                         result.append(cat_copy)
-            return jsonify(result)
+            return result
 
-        # Get VOD Categories
         elif action == "get_vod_categories":
             result = []
             for idx, source in enumerate(enabled_sources):
@@ -1771,9 +1895,8 @@ def player_api_merged():
                         cat_copy["category_name"] = display_name
                         cat_copy["category_id"] = encode_virtual_id(idx, safe_get_category_id(cat))
                         result.append(cat_copy)
-            return jsonify(result)
+            return result
 
-        # Get Series Categories
         elif action == "get_series_categories":
             result = []
             for idx, source in enumerate(enabled_sources):
@@ -1788,9 +1911,8 @@ def player_api_merged():
                         cat_copy["category_name"] = display_name
                         cat_copy["category_id"] = encode_virtual_id(idx, safe_get_category_id(cat))
                         result.append(cat_copy)
-            return jsonify(result)
+            return result
 
-        # Get Live Streams - merge with virtual IDs
         elif action == "get_live_streams":
             result = []
             for idx, source in enumerate(enabled_sources):
@@ -1810,9 +1932,8 @@ def player_api_merged():
                         stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
                         stream_copy["category_id"] = encode_virtual_id(idx, stream.get("category_id", 0))
                         result.append(stream_copy)
-            return jsonify(result)
+            return result
 
-        # Get VOD Streams
         elif action == "get_vod_streams":
             result = []
             for idx, source in enumerate(enabled_sources):
@@ -1832,9 +1953,8 @@ def player_api_merged():
                         stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
                         stream_copy["category_id"] = encode_virtual_id(idx, stream.get("category_id", 0))
                         result.append(stream_copy)
-            return jsonify(result)
+            return result
 
-        # Get Series
         elif action == "get_series":
             result = []
             for idx, source in enumerate(enabled_sources):
@@ -1854,15 +1974,14 @@ def player_api_merged():
                         series_copy["series_id"] = encode_virtual_id(idx, series.get("series_id", 0))
                         series_copy["category_id"] = encode_virtual_id(idx, series.get("category_id", 0))
                         result.append(series_copy)
-            return jsonify(result)
+            return result
 
-        # Get Series Info - decode virtual ID and fetch from correct source
         elif action == "get_series_info":
-            virtual_series_id = request.args.get("series_id", "")
+            virtual_series_id = request.query_params.get("series_id", "")
             source_idx, original_id = decode_virtual_id(virtual_series_id)
             source = get_source_by_index(source_idx)
             if not source:
-                return jsonify({"error": "Source not found"}), 404
+                return JSONResponse({"error": "Source not found"}, status_code=404)
             
             host = source["host"].rstrip("/")
             params = {
@@ -1871,26 +1990,24 @@ def player_api_merged():
                 "action": "get_series_info",
                 "series_id": original_id
             }
-            response = requests.get(f"{host}/player_api.php", params=params, headers=HEADERS, timeout=60)
+            response = await client.get(f"{host}/player_api.php", params=params, timeout=60.0)
             
             if response.status_code == 200:
                 data = response.json()
-                # Remap episode IDs to virtual IDs
                 if "episodes" in data:
                     for season, episodes in data["episodes"].items():
                         for ep in episodes:
                             if "id" in ep:
                                 ep["id"] = encode_virtual_id(source_idx, ep["id"])
-                return jsonify(data)
-            return Response(response.content, status=response.status_code, content_type="application/json")
+                return data
+            return Response(content=response.content, status_code=response.status_code, media_type="application/json")
 
-        # Get VOD Info
         elif action == "get_vod_info":
-            virtual_vod_id = request.args.get("vod_id", "")
+            virtual_vod_id = request.query_params.get("vod_id", "")
             source_idx, original_id = decode_virtual_id(virtual_vod_id)
             source = get_source_by_index(source_idx)
             if not source:
-                return jsonify({"error": "Source not found"}), 404
+                return JSONResponse({"error": "Source not found"}, status_code=404)
             
             host = source["host"].rstrip("/")
             params = {
@@ -1899,77 +2016,81 @@ def player_api_merged():
                 "action": "get_vod_info",
                 "vod_id": original_id
             }
-            response = requests.get(f"{host}/player_api.php", params=params, headers=HEADERS, timeout=60)
-            return Response(response.content, status=response.status_code, content_type="application/json")
+            response = await client.get(f"{host}/player_api.php", params=params, timeout=60.0)
+            return Response(content=response.content, status_code=response.status_code, media_type="application/json")
 
-        # Unknown action
         else:
-            return jsonify({"error": f"Unknown action: {action}"}), 400
+            return JSONResponse({"error": f"Unknown action: {action}"}, status_code=400)
 
-    except requests.exceptions.Timeout:
-        return jsonify({"error": "Upstream server timeout"}), 504
+    except httpx.TimeoutException:
+        return JSONResponse({"error": "Upstream server timeout"}, status_code=504)
     except Exception as e:
         logger.error(f"Merged API error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
-# Merged stream routes - decode virtual ID and proxy to correct source
-@app.route("/merged/live/<username>/<password>/<stream_id>")
-@app.route("/merged/live/<username>/<password>/<stream_id>.<ext>")
-@app.route("/merged/<username>/<password>/<stream_id>")
-@app.route("/merged/<username>/<password>/<stream_id>.<ext>")
-def proxy_live_stream_merged(username, password, stream_id, ext="ts"):
+# ============================================
+# MERGED STREAM PROXY ROUTES
+# ============================================
+
+
+@app.get("/merged/live/{username}/{password}/{stream_id}")
+@app.get("/merged/live/{username}/{password}/{stream_id}.{ext}")
+@app.get("/merged/{username}/{password}/{stream_id}")
+@app.get("/merged/{username}/{password}/{stream_id}.{ext}")
+async def proxy_live_stream_merged(request: Request, username: str, password: str, stream_id: str, ext: str = "ts"):
     """Proxy live stream using virtual ID to find correct source."""
     source_idx, original_id = decode_virtual_id(stream_id)
     source = get_source_by_index(source_idx)
     if not source:
-        return Response("Source not found", status=404)
+        return Response(content="Source not found", status_code=404)
     
     host = source["host"].rstrip("/")
     upstream_url = f"{host}/{source['username']}/{source['password']}/{original_id}.{ext}"
     
     if get_proxy_enabled():
-        return proxy_stream(upstream_url, stream_type="live")
-    return redirect(upstream_url, code=302)
+        return await proxy_stream(upstream_url, request, stream_type="live")
+    return RedirectResponse(url=upstream_url, status_code=302)
 
 
-@app.route("/merged/movie/<username>/<password>/<stream_id>")
-@app.route("/merged/movie/<username>/<password>/<stream_id>.<ext>")
-def proxy_movie_stream_merged(username, password, stream_id, ext="mp4"):
+@app.get("/merged/movie/{username}/{password}/{stream_id}")
+@app.get("/merged/movie/{username}/{password}/{stream_id}.{ext}")
+async def proxy_movie_stream_merged(request: Request, username: str, password: str, stream_id: str, ext: str = "mp4"):
     """Proxy VOD/movie stream using virtual ID."""
     source_idx, original_id = decode_virtual_id(stream_id)
     source = get_source_by_index(source_idx)
     if not source:
-        return Response("Source not found", status=404)
+        return Response(content="Source not found", status_code=404)
     
     host = source["host"].rstrip("/")
     upstream_url = f"{host}/movie/{source['username']}/{source['password']}/{original_id}.{ext}"
     
     if get_proxy_enabled():
-        return proxy_stream(upstream_url, stream_type="vod")
-    return redirect(upstream_url, code=302)
+        return await proxy_stream(upstream_url, request, stream_type="vod")
+    return RedirectResponse(url=upstream_url, status_code=302)
 
 
-@app.route("/merged/series/<username>/<password>/<stream_id>")
-@app.route("/merged/series/<username>/<password>/<stream_id>.<ext>")
-def proxy_series_stream_merged(username, password, stream_id, ext="mp4"):
+@app.get("/merged/series/{username}/{password}/{stream_id}")
+@app.get("/merged/series/{username}/{password}/{stream_id}.{ext}")
+async def proxy_series_stream_merged(request: Request, username: str, password: str, stream_id: str, ext: str = "mp4"):
     """Proxy series stream using virtual ID."""
     source_idx, original_id = decode_virtual_id(stream_id)
     source = get_source_by_index(source_idx)
     if not source:
-        return Response("Source not found", status=404)
+        return Response(content="Source not found", status_code=404)
     
     host = source["host"].rstrip("/")
     upstream_url = f"{host}/series/{source['username']}/{source['password']}/{original_id}.{ext}"
     
     if get_proxy_enabled():
-        return proxy_stream(upstream_url, stream_type="series")
-    return redirect(upstream_url, code=302)
+        return await proxy_stream(upstream_url, request, stream_type="series")
+    return RedirectResponse(url=upstream_url, status_code=302)
 
 
 # ============================================
 # PER-SOURCE DEDICATED ROUTES
 # ============================================
+
 
 def get_source_by_route(route_name):
     """Get source configuration by its route name"""
@@ -1980,48 +2101,41 @@ def get_source_by_route(route_name):
     return None
 
 
-@app.route("/<source_route>/player_api.php")
-def player_api_source(source_route):
-    """
-    Per-source Xtream Codes API endpoint - serves data from a single source only.
-    This avoids ID conflicts between sources.
-    """
-    # Skip reserved routes
-    if source_route in ("full", "live", "movie", "series", "api", "static"):
-        return Response("Not found", status=404)
+@app.get("/{source_route}/player_api.php")
+async def player_api_source(source_route: str, request: Request):
+    """Per-source Xtream Codes API endpoint."""
+    if source_route in ("full", "live", "movie", "series", "api", "static", "merged"):
+        return Response(content="Not found", status_code=404)
     
     source = get_source_by_route(source_route)
     if not source:
-        return jsonify({"error": f"Source route '{source_route}' not found"}), 404
+        return JSONResponse({"error": f"Source route '{source_route}' not found"}, status_code=404)
     
     source_id = source.get("id")
     source_filters = source.get("filters", {})
     prefix = source.get("prefix", "")
-    action = request.args.get("action", "")
+    action = request.query_params.get("action", "")
+    client = await get_http_client()
 
     try:
         host = source["host"].rstrip("/")
         
-        # No action = authentication request
         if not action:
-            response = requests.get(
+            response = await client.get(
                 f"{host}/player_api.php",
                 params={"username": source["username"], "password": source["password"]},
-                headers=HEADERS,
-                timeout=30,
+                timeout=30.0,
             )
             if response.status_code == 200:
                 data = response.json()
-                # Modify server_info to point to our proxy (source-specific endpoint)
                 if "server_info" in data:
-                    data["server_info"]["url"] = request.host_url.rstrip("/") + f"/{source_route}"
+                    data["server_info"]["url"] = str(request.base_url).rstrip("/") + f"/{source_route}"
                     data["server_info"]["port"] = "80"
                     data["server_info"]["https_port"] = "443"
                     data["server_info"]["rtmp_port"] = "80"
-                return jsonify(data)
-            return Response(response.content, status=response.status_code)
+                return data
+            return Response(content=response.content, status_code=response.status_code)
 
-        # Get Live Categories - filtered for this source only
         elif action == "get_live_categories":
             group_filters = source_filters.get("live", {}).get("groups", [])
             categories = get_cached("live_categories", source_id)
@@ -2033,9 +2147,8 @@ def player_api_source(source_route):
                     if prefix:
                         cat_copy["category_name"] = f"{prefix}{cat_name}"
                     result.append(cat_copy)
-            return jsonify(result)
+            return result
 
-        # Get VOD Categories
         elif action == "get_vod_categories":
             group_filters = source_filters.get("vod", {}).get("groups", [])
             categories = get_cached("vod_categories", source_id)
@@ -2047,9 +2160,8 @@ def player_api_source(source_route):
                     if prefix:
                         cat_copy["category_name"] = f"{prefix}{cat_name}"
                     result.append(cat_copy)
-            return jsonify(result)
+            return result
 
-        # Get Series Categories
         elif action == "get_series_categories":
             group_filters = source_filters.get("series", {}).get("groups", [])
             categories = get_cached("series_categories", source_id)
@@ -2061,9 +2173,8 @@ def player_api_source(source_route):
                     if prefix:
                         cat_copy["category_name"] = f"{prefix}{cat_name}"
                     result.append(cat_copy)
-            return jsonify(result)
+            return result
 
-        # Get Live Streams
         elif action == "get_live_streams":
             group_filters = source_filters.get("live", {}).get("groups", [])
             channel_filters = source_filters.get("live", {}).get("channels", [])
@@ -2078,9 +2189,8 @@ def player_api_source(source_route):
                 channel_name = stream.get("name", "")
                 if should_include(group_name, group_filters) and should_include(channel_name, channel_filters):
                     result.append(stream)
-            return jsonify(result)
+            return result
 
-        # Get VOD Streams
         elif action == "get_vod_streams":
             group_filters = source_filters.get("vod", {}).get("groups", [])
             channel_filters = source_filters.get("vod", {}).get("channels", [])
@@ -2095,9 +2205,8 @@ def player_api_source(source_route):
                 channel_name = stream.get("name", "")
                 if should_include(group_name, group_filters) and should_include(channel_name, channel_filters):
                     result.append(stream)
-            return jsonify(result)
+            return result
 
-        # Get Series
         elif action == "get_series":
             group_filters = source_filters.get("series", {}).get("groups", [])
             channel_filters = source_filters.get("series", {}).get("channels", [])
@@ -2112,133 +2221,126 @@ def player_api_source(source_route):
                 series_name = s.get("name", "")
                 if should_include(group_name, group_filters) and should_include(series_name, channel_filters):
                     result.append(s)
-            return jsonify(result)
+            return result
 
-        # Get Series Info - direct pass-through to this source
         elif action == "get_series_info":
-            series_id = request.args.get("series_id", "")
+            series_id = request.query_params.get("series_id", "")
             params = {"username": source["username"], "password": source["password"], "action": action, "series_id": series_id}
-            response = requests.get(f"{host}/player_api.php", params=params, headers=HEADERS, timeout=60)
-            return Response(response.content, status=response.status_code, content_type="application/json")
+            response = await client.get(f"{host}/player_api.php", params=params, timeout=60.0)
+            return Response(content=response.content, status_code=response.status_code, media_type="application/json")
 
-        # Get VOD Info - direct pass-through to this source
         elif action == "get_vod_info":
-            vod_id = request.args.get("vod_id", "")
+            vod_id = request.query_params.get("vod_id", "")
             params = {"username": source["username"], "password": source["password"], "action": action, "vod_id": vod_id}
-            response = requests.get(f"{host}/player_api.php", params=params, headers=HEADERS, timeout=60)
-            return Response(response.content, status=response.status_code, content_type="application/json")
+            response = await client.get(f"{host}/player_api.php", params=params, timeout=60.0)
+            return Response(content=response.content, status_code=response.status_code, media_type="application/json")
 
-        # Any other action - pass through to this source
         else:
-            params = dict(request.args)
+            params = dict(request.query_params)
             params["username"] = source["username"]
             params["password"] = source["password"]
-            response = requests.get(f"{host}/player_api.php", params=params, headers=HEADERS, timeout=60)
-            return Response(response.content, status=response.status_code, content_type="application/json")
+            response = await client.get(f"{host}/player_api.php", params=params, timeout=60.0)
+            return Response(content=response.content, status_code=response.status_code, media_type="application/json")
 
-    except requests.exceptions.Timeout:
-        return jsonify({"error": "Upstream server timeout"}), 504
+    except httpx.TimeoutException:
+        return JSONResponse({"error": "Upstream server timeout"}, status_code=504)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 # Per-source stream proxy routes
-@app.route("/<source_route>/live/<username>/<password>/<stream_id>")
-@app.route("/<source_route>/live/<username>/<password>/<stream_id>.<ext>")
-@app.route("/<source_route>/<username>/<password>/<stream_id>")
-@app.route("/<source_route>/<username>/<password>/<stream_id>.<ext>")
-def proxy_live_stream_source(source_route, username, password, stream_id, ext="ts"):
+@app.get("/{source_route}/live/{username}/{password}/{stream_id}")
+@app.get("/{source_route}/live/{username}/{password}/{stream_id}.{ext}")
+@app.get("/{source_route}/{username}/{password}/{stream_id}")
+@app.get("/{source_route}/{username}/{password}/{stream_id}.{ext}")
+async def proxy_live_stream_source(request: Request, source_route: str, username: str, password: str, stream_id: str, ext: str = "ts"):
     """Proxy live stream requests from the source specified by route"""
-    if source_route in ("full", "live", "movie", "series", "api", "static"):
-        return Response("Not found", status=404)
+    if source_route in ("full", "live", "movie", "series", "api", "static", "merged"):
+        return Response(content="Not found", status_code=404)
     source = get_source_by_route(source_route)
     if not source:
-        return Response(f"Source route '{source_route}' not found", status=404)
+        return Response(content=f"Source route '{source_route}' not found", status_code=404)
     host = source["host"].rstrip("/")
     upstream_url = f"{host}/{source['username']}/{source['password']}/{stream_id}.{ext}"
     
     if get_proxy_enabled():
-        return proxy_stream(upstream_url, stream_type="live")
-    return redirect(upstream_url, code=302)
+        return await proxy_stream(upstream_url, request, stream_type="live")
+    return RedirectResponse(url=upstream_url, status_code=302)
 
 
-@app.route("/<source_route>/movie/<username>/<password>/<stream_id>")
-@app.route("/<source_route>/movie/<username>/<password>/<stream_id>.<ext>")
-def proxy_movie_stream_source(source_route, username, password, stream_id, ext="mp4"):
+@app.get("/{source_route}/movie/{username}/{password}/{stream_id}")
+@app.get("/{source_route}/movie/{username}/{password}/{stream_id}.{ext}")
+async def proxy_movie_stream_source(request: Request, source_route: str, username: str, password: str, stream_id: str, ext: str = "mp4"):
     """Proxy VOD/movie stream requests from the source specified by route"""
-    if source_route in ("full", "live", "movie", "series", "api", "static"):
-        return Response("Not found", status=404)
+    if source_route in ("full", "live", "movie", "series", "api", "static", "merged"):
+        return Response(content="Not found", status_code=404)
     source = get_source_by_route(source_route)
     if not source:
-        return Response(f"Source route '{source_route}' not found", status=404)
+        return Response(content=f"Source route '{source_route}' not found", status_code=404)
     host = source["host"].rstrip("/")
     upstream_url = f"{host}/movie/{source['username']}/{source['password']}/{stream_id}.{ext}"
     
     if get_proxy_enabled():
-        return proxy_stream(upstream_url, stream_type="vod")
-    return redirect(upstream_url, code=302)
+        return await proxy_stream(upstream_url, request, stream_type="vod")
+    return RedirectResponse(url=upstream_url, status_code=302)
 
 
-@app.route("/<source_route>/series/<username>/<password>/<stream_id>")
-@app.route("/<source_route>/series/<username>/<password>/<stream_id>.<ext>")
-def proxy_series_stream_source(source_route, username, password, stream_id, ext="mp4"):
+@app.get("/{source_route}/series/{username}/{password}/{stream_id}")
+@app.get("/{source_route}/series/{username}/{password}/{stream_id}.{ext}")
+async def proxy_series_stream_source(request: Request, source_route: str, username: str, password: str, stream_id: str, ext: str = "mp4"):
     """Proxy series stream requests from the source specified by route"""
-    if source_route in ("full", "live", "movie", "series", "api", "static"):
-        return Response("Not found", status=404)
+    if source_route in ("full", "live", "movie", "series", "api", "static", "merged"):
+        return Response(content="Not found", status_code=404)
     source = get_source_by_route(source_route)
     if not source:
-        return Response(f"Source route '{source_route}' not found", status=404)
+        return Response(content=f"Source route '{source_route}' not found", status_code=404)
     host = source["host"].rstrip("/")
     upstream_url = f"{host}/series/{source['username']}/{source['password']}/{stream_id}.{ext}"
     
     if get_proxy_enabled():
-        return proxy_stream(upstream_url, stream_type="series")
-    return redirect(upstream_url, code=302)
+        return await proxy_stream(upstream_url, request, stream_type="series")
+    return RedirectResponse(url=upstream_url, status_code=302)
 
 
 # ============================================
 # PER-SOURCE FULL (UNFILTERED) ROUTES
 # ============================================
 
-@app.route("/<source_route>/full/player_api.php")
-def player_api_source_full(source_route):
-    """
-    Per-source UNFILTERED Xtream Codes API endpoint.
-    Returns all content from this source without applying filters.
-    """
-    if source_route in ("full", "live", "movie", "series", "api", "static"):
-        return Response("Not found", status=404)
+
+@app.get("/{source_route}/full/player_api.php")
+async def player_api_source_full(source_route: str, request: Request):
+    """Per-source UNFILTERED Xtream Codes API endpoint."""
+    if source_route in ("full", "live", "movie", "series", "api", "static", "merged"):
+        return Response(content="Not found", status_code=404)
     
     source = get_source_by_route(source_route)
     if not source:
-        return jsonify({"error": f"Source route '{source_route}' not found"}), 404
+        return JSONResponse({"error": f"Source route '{source_route}' not found"}, status_code=404)
     
     source_id = source.get("id")
     prefix = source.get("prefix", "")
-    action = request.args.get("action", "")
+    action = request.query_params.get("action", "")
+    client = await get_http_client()
 
     try:
         host = source["host"].rstrip("/")
         
-        # No action = authentication request
         if not action:
-            response = requests.get(
+            response = await client.get(
                 f"{host}/player_api.php",
                 params={"username": source["username"], "password": source["password"]},
-                headers=HEADERS,
-                timeout=30,
+                timeout=30.0,
             )
             if response.status_code == 200:
                 data = response.json()
                 if "server_info" in data:
-                    data["server_info"]["url"] = request.host_url.rstrip("/") + f"/{source_route}/full"
+                    data["server_info"]["url"] = str(request.base_url).rstrip("/") + f"/{source_route}/full"
                     data["server_info"]["port"] = "80"
                     data["server_info"]["https_port"] = "443"
                     data["server_info"]["rtmp_port"] = "80"
-                return jsonify(data)
-            return Response(response.content, status=response.status_code)
+                return data
+            return Response(content=response.content, status_code=response.status_code)
 
-        # Get Live Categories - unfiltered
         elif action == "get_live_categories":
             categories = get_cached("live_categories", source_id)
             if prefix:
@@ -2247,10 +2349,9 @@ def player_api_source_full(source_route):
                     cat_copy = safe_copy_category(cat)
                     cat_copy["category_name"] = f"{prefix}{safe_get_category_name(cat)}"
                     result.append(cat_copy)
-                return jsonify(result)
-            return jsonify(categories)
+                return result
+            return categories
 
-        # Get VOD Categories - unfiltered
         elif action == "get_vod_categories":
             categories = get_cached("vod_categories", source_id)
             if prefix:
@@ -2259,10 +2360,9 @@ def player_api_source_full(source_route):
                     cat_copy = safe_copy_category(cat)
                     cat_copy["category_name"] = f"{prefix}{safe_get_category_name(cat)}"
                     result.append(cat_copy)
-                return jsonify(result)
-            return jsonify(categories)
+                return result
+            return categories
 
-        # Get Series Categories - unfiltered
         elif action == "get_series_categories":
             categories = get_cached("series_categories", source_id)
             if prefix:
@@ -2271,152 +2371,153 @@ def player_api_source_full(source_route):
                     cat_copy = safe_copy_category(cat)
                     cat_copy["category_name"] = f"{prefix}{safe_get_category_name(cat)}"
                     result.append(cat_copy)
-                return jsonify(result)
-            return jsonify(categories)
+                return result
+            return categories
 
-        # Get Live Streams - unfiltered
         elif action == "get_live_streams":
-            return jsonify(get_cached("live_streams", source_id))
+            return get_cached("live_streams", source_id)
 
-        # Get VOD Streams - unfiltered
         elif action == "get_vod_streams":
-            return jsonify(get_cached("vod_streams", source_id))
+            return get_cached("vod_streams", source_id)
 
-        # Get Series - unfiltered
         elif action == "get_series":
-            return jsonify(get_cached("series", source_id))
+            return get_cached("series", source_id)
 
-        # Get Series Info - direct pass-through
         elif action == "get_series_info":
-            series_id = request.args.get("series_id", "")
+            series_id = request.query_params.get("series_id", "")
             params = {"username": source["username"], "password": source["password"], "action": action, "series_id": series_id}
-            response = requests.get(f"{host}/player_api.php", params=params, headers=HEADERS, timeout=60)
-            return Response(response.content, status=response.status_code, content_type="application/json")
+            response = await client.get(f"{host}/player_api.php", params=params, timeout=60.0)
+            return Response(content=response.content, status_code=response.status_code, media_type="application/json")
 
-        # Get VOD Info - direct pass-through
         elif action == "get_vod_info":
-            vod_id = request.args.get("vod_id", "")
+            vod_id = request.query_params.get("vod_id", "")
             params = {"username": source["username"], "password": source["password"], "action": action, "vod_id": vod_id}
-            response = requests.get(f"{host}/player_api.php", params=params, headers=HEADERS, timeout=60)
-            return Response(response.content, status=response.status_code, content_type="application/json")
+            response = await client.get(f"{host}/player_api.php", params=params, timeout=60.0)
+            return Response(content=response.content, status_code=response.status_code, media_type="application/json")
 
-        # Any other action - pass through
         else:
-            params = dict(request.args)
+            params = dict(request.query_params)
             params["username"] = source["username"]
             params["password"] = source["password"]
-            response = requests.get(f"{host}/player_api.php", params=params, headers=HEADERS, timeout=60)
-            return Response(response.content, status=response.status_code, content_type="application/json")
+            response = await client.get(f"{host}/player_api.php", params=params, timeout=60.0)
+            return Response(content=response.content, status_code=response.status_code, media_type="application/json")
 
-    except requests.exceptions.Timeout:
-        return jsonify({"error": "Upstream server timeout"}), 504
+    except httpx.TimeoutException:
+        return JSONResponse({"error": "Upstream server timeout"}, status_code=504)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 # Per-source FULL stream proxy routes
-@app.route("/<source_route>/full/live/<username>/<password>/<stream_id>")
-@app.route("/<source_route>/full/live/<username>/<password>/<stream_id>.<ext>")
-@app.route("/<source_route>/full/<username>/<password>/<stream_id>")
-@app.route("/<source_route>/full/<username>/<password>/<stream_id>.<ext>")
-def proxy_live_stream_source_full(source_route, username, password, stream_id, ext="ts"):
+@app.get("/{source_route}/full/live/{username}/{password}/{stream_id}")
+@app.get("/{source_route}/full/live/{username}/{password}/{stream_id}.{ext}")
+@app.get("/{source_route}/full/{username}/{password}/{stream_id}")
+@app.get("/{source_route}/full/{username}/{password}/{stream_id}.{ext}")
+async def proxy_live_stream_source_full(request: Request, source_route: str, username: str, password: str, stream_id: str, ext: str = "ts"):
     """Proxy live stream requests from the source (unfiltered path)"""
-    if source_route in ("full", "live", "movie", "series", "api", "static"):
-        return Response("Not found", status=404)
+    if source_route in ("full", "live", "movie", "series", "api", "static", "merged"):
+        return Response(content="Not found", status_code=404)
     source = get_source_by_route(source_route)
     if not source:
-        return Response(f"Source route '{source_route}' not found", status=404)
+        return Response(content=f"Source route '{source_route}' not found", status_code=404)
     host = source["host"].rstrip("/")
     upstream_url = f"{host}/{source['username']}/{source['password']}/{stream_id}.{ext}"
     
     if get_proxy_enabled():
-        return proxy_stream(upstream_url, stream_type="live")
-    return redirect(upstream_url, code=302)
+        return await proxy_stream(upstream_url, request, stream_type="live")
+    return RedirectResponse(url=upstream_url, status_code=302)
 
 
-@app.route("/<source_route>/full/movie/<username>/<password>/<stream_id>")
-@app.route("/<source_route>/full/movie/<username>/<password>/<stream_id>.<ext>")
-def proxy_movie_stream_source_full(source_route, username, password, stream_id, ext="mp4"):
+@app.get("/{source_route}/full/movie/{username}/{password}/{stream_id}")
+@app.get("/{source_route}/full/movie/{username}/{password}/{stream_id}.{ext}")
+async def proxy_movie_stream_source_full(request: Request, source_route: str, username: str, password: str, stream_id: str, ext: str = "mp4"):
     """Proxy VOD/movie stream requests from the source (unfiltered path)"""
-    if source_route in ("full", "live", "movie", "series", "api", "static"):
-        return Response("Not found", status=404)
+    if source_route in ("full", "live", "movie", "series", "api", "static", "merged"):
+        return Response(content="Not found", status_code=404)
     source = get_source_by_route(source_route)
     if not source:
-        return Response(f"Source route '{source_route}' not found", status=404)
+        return Response(content=f"Source route '{source_route}' not found", status_code=404)
     host = source["host"].rstrip("/")
     upstream_url = f"{host}/movie/{source['username']}/{source['password']}/{stream_id}.{ext}"
     
     if get_proxy_enabled():
-        return proxy_stream(upstream_url, stream_type="vod")
-    return redirect(upstream_url, code=302)
+        return await proxy_stream(upstream_url, request, stream_type="vod")
+    return RedirectResponse(url=upstream_url, status_code=302)
 
 
-@app.route("/<source_route>/full/series/<username>/<password>/<stream_id>")
-@app.route("/<source_route>/full/series/<username>/<password>/<stream_id>.<ext>")
-def proxy_series_stream_source_full(source_route, username, password, stream_id, ext="mp4"):
+@app.get("/{source_route}/full/series/{username}/{password}/{stream_id}")
+@app.get("/{source_route}/full/series/{username}/{password}/{stream_id}.{ext}")
+async def proxy_series_stream_source_full(request: Request, source_route: str, username: str, password: str, stream_id: str, ext: str = "mp4"):
     """Proxy series stream requests from the source (unfiltered path)"""
-    if source_route in ("full", "live", "movie", "series", "api", "static"):
-        return Response("Not found", status=404)
+    if source_route in ("full", "live", "movie", "series", "api", "static", "merged"):
+        return Response(content="Not found", status_code=404)
     source = get_source_by_route(source_route)
     if not source:
-        return Response(f"Source route '{source_route}' not found", status=404)
+        return Response(content=f"Source route '{source_route}' not found", status_code=404)
     host = source["host"].rstrip("/")
     upstream_url = f"{host}/series/{source['username']}/{source['password']}/{stream_id}.{ext}"
     
     if get_proxy_enabled():
-        return proxy_stream(upstream_url, stream_type="series")
-    return redirect(upstream_url, code=302)
+        return await proxy_stream(upstream_url, request, stream_type="series")
+    return RedirectResponse(url=upstream_url, status_code=302)
 
 
-# Stream proxy routes - proxy to upstream server
-@app.route("/live/<username>/<password>/<stream_id>")
-@app.route("/live/<username>/<password>/<stream_id>.<ext>")
-@app.route("/<username>/<password>/<stream_id>")
-@app.route("/<username>/<password>/<stream_id>.<ext>")
-def proxy_live_stream(username, password, stream_id, ext="ts"):
+# ============================================
+# LEGACY STREAM PROXY ROUTES
+# ============================================
+
+
+@app.get("/live/{username}/{password}/{stream_id}")
+@app.get("/live/{username}/{password}/{stream_id}.{ext}")
+async def proxy_live_stream(request: Request, username: str, password: str, stream_id: str, ext: str = "ts"):
     """Proxy live stream requests to upstream server (finds correct source)"""
     host, upstream_user, upstream_pass = get_source_credentials_for_stream(stream_id, "live")
     if not host:
-        return Response("Source not found", status=404)
+        return Response(content="Source not found", status_code=404)
     upstream_url = f"{host}/{upstream_user}/{upstream_pass}/{stream_id}.{ext}"
     
     if get_proxy_enabled():
-        return proxy_stream(upstream_url, stream_type="live")
-    return redirect(upstream_url, code=302)
+        return await proxy_stream(upstream_url, request, stream_type="live")
+    return RedirectResponse(url=upstream_url, status_code=302)
 
 
-@app.route("/movie/<username>/<password>/<stream_id>")
-@app.route("/movie/<username>/<password>/<stream_id>.<ext>")
-def proxy_movie_stream(username, password, stream_id, ext="mp4"):
+@app.get("/movie/{username}/{password}/{stream_id}")
+@app.get("/movie/{username}/{password}/{stream_id}.{ext}")
+async def proxy_movie_stream(request: Request, username: str, password: str, stream_id: str, ext: str = "mp4"):
     """Proxy VOD/movie stream requests to upstream server (finds correct source)"""
     host, upstream_user, upstream_pass = get_source_credentials_for_stream(stream_id, "vod")
     if not host:
-        return Response("Source not found", status=404)
+        return Response(content="Source not found", status_code=404)
     upstream_url = f"{host}/movie/{upstream_user}/{upstream_pass}/{stream_id}.{ext}"
     
     if get_proxy_enabled():
-        return proxy_stream(upstream_url, stream_type="vod")
-    return redirect(upstream_url, code=302)
+        return await proxy_stream(upstream_url, request, stream_type="vod")
+    return RedirectResponse(url=upstream_url, status_code=302)
 
 
-@app.route("/series/<username>/<password>/<stream_id>")
-@app.route("/series/<username>/<password>/<stream_id>.<ext>")
-def proxy_series_stream(username, password, stream_id, ext="mp4"):
+@app.get("/series/{username}/{password}/{stream_id}")
+@app.get("/series/{username}/{password}/{stream_id}.{ext}")
+async def proxy_series_stream(request: Request, username: str, password: str, stream_id: str, ext: str = "mp4"):
     """Proxy series stream requests to upstream server (finds correct source)"""
     host, upstream_user, upstream_pass = get_source_credentials_for_stream(stream_id, "series")
     if not host:
-        return Response("Source not found", status=404)
+        return Response(content="Source not found", status_code=404)
     upstream_url = f"{host}/series/{upstream_user}/{upstream_pass}/{stream_id}.{ext}"
     
     if get_proxy_enabled():
-        return proxy_stream(upstream_url, stream_type="series")
-    return redirect(upstream_url, code=302)
+        return await proxy_stream(upstream_url, request, stream_type="series")
+    return RedirectResponse(url=upstream_url, status_code=302)
 
 
-@app.route("/xmltv.php")
-@app.route("/merged/xmltv.php")
-def proxy_xmltv():
-    """Proxy EPG/XMLTV requests - merges EPG from all sources"""
+# ============================================
+# XMLTV PROXY
+# ============================================
+
+
+@app.get("/xmltv.php")
+@app.get("/merged/xmltv.php")
+async def proxy_xmltv():
+    """Proxy EPG/XMLTV requests"""
     config = load_config()
     enabled_sources = [s for s in config.get("sources", []) if s.get("enabled", True)]
     
@@ -2424,47 +2525,53 @@ def proxy_xmltv():
     if not enabled_sources and config.get("xtream", {}).get("host"):
         xtream = config["xtream"]
         host = xtream["host"].rstrip("/")
-        upstream_user = xtream["username"]
-        upstream_pass = xtream["password"]
         
         try:
-            response = requests.get(
-                f"{host}/xmltv.php",
-                params={"username": upstream_user, "password": upstream_pass},
-                headers=HEADERS,
-                timeout=120,
-                stream=True,
-            )
-            return Response(
-                response.iter_content(chunk_size=8192),
-                status=response.status_code,
-                content_type=response.headers.get("content-type", "application/xml"),
-            )
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as stream_client:
+                async with stream_client.stream(
+                    "GET",
+                    f"{host}/xmltv.php",
+                    params={"username": xtream["username"], "password": xtream["password"]},
+                    headers=HEADERS,
+                ) as response:
+                    async def generate():
+                        async for chunk in response.aiter_bytes(chunk_size=8192):
+                            yield chunk
+                    
+                    return StreamingResponse(
+                        generate(),
+                        status_code=response.status_code,
+                        media_type=response.headers.get("content-type", "application/xml"),
+                    )
         except Exception as e:
-            return Response(f"<!-- Error: {e} -->", content_type="application/xml")
+            return Response(content=f"<!-- Error: {e} -->", media_type="application/xml")
     
-    # Use first source for EPG (TODO: merge EPG from all sources in future)
+    # Use first source for EPG
     if enabled_sources:
         source = enabled_sources[0]
         host = source["host"].rstrip("/")
         
         try:
-            response = requests.get(
-                f"{host}/xmltv.php",
-                params={"username": source["username"], "password": source["password"]},
-                headers=HEADERS,
-                timeout=120,
-                stream=True,
-            )
-            return Response(
-                response.iter_content(chunk_size=8192),
-                status=response.status_code,
-                content_type=response.headers.get("content-type", "application/xml"),
-            )
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as stream_client:
+                async with stream_client.stream(
+                    "GET",
+                    f"{host}/xmltv.php",
+                    params={"username": source["username"], "password": source["password"]},
+                    headers=HEADERS,
+                ) as response:
+                    async def generate():
+                        async for chunk in response.aiter_bytes(chunk_size=8192):
+                            yield chunk
+                    
+                    return StreamingResponse(
+                        generate(),
+                        status_code=response.status_code,
+                        media_type=response.headers.get("content-type", "application/xml"),
+                    )
         except Exception as e:
-            return Response(f"<!-- Error: {e} -->", content_type="application/xml")
+            return Response(content=f"<!-- Error: {e} -->", media_type="application/xml")
     
-    return Response("<!-- No sources configured -->", content_type="application/xml")
+    return Response(content="<!-- No sources configured -->", media_type="application/xml")
 
 
 # ============================================
@@ -2472,41 +2579,40 @@ def proxy_xmltv():
 # ============================================
 
 
-@app.route("/api/options", methods=["GET"])
-def get_options():
+@app.get("/api/options")
+async def get_options():
     """Get current options"""
     config = load_config()
-    return jsonify(config.get("options", {}))
+    return config.get("options", {})
 
 
-@app.route("/api/options", methods=["POST"])
-def update_options():
+@app.post("/api/options")
+async def update_options(request: Request):
     """Update options"""
     config = load_config()
-    data = request.get_json()
+    data = await request.json()
     
     if "options" not in config:
         config["options"] = {}
     
-    # Update provided options
     for key, value in data.items():
         config["options"][key] = value
     
     save_config(config)
-    return jsonify({"status": "ok", "options": config["options"]})
+    return {"status": "ok", "options": config["options"]}
 
 
-@app.route("/api/options/proxy", methods=["GET"])
-def get_proxy_status():
+@app.get("/api/options/proxy")
+async def get_proxy_status():
     """Get proxy streaming status"""
-    return jsonify({"proxy_enabled": get_proxy_enabled()})
+    return {"proxy_enabled": get_proxy_enabled()}
 
 
-@app.route("/api/options/proxy", methods=["POST"])
-def set_proxy_status():
+@app.post("/api/options/proxy")
+async def set_proxy_status(request: Request):
     """Enable or disable proxy streaming"""
     config = load_config()
-    data = request.get_json()
+    data = await request.json()
     
     if "options" not in config:
         config["options"] = {}
@@ -2514,21 +2620,19 @@ def set_proxy_status():
     config["options"]["proxy_streams"] = data.get("enabled", True)
     save_config(config)
     
-    return jsonify({"status": "ok", "proxy_enabled": config["options"]["proxy_streams"]})
+    return {"status": "ok", "proxy_enabled": config["options"]["proxy_streams"]}
 
 
-@app.route("/api/cache/status")
-def cache_status():
+@app.get("/api/cache/status")
+async def cache_status():
     """Get cache status and statistics"""
-    # Read progress from file (visible across all workers)
     refresh_progress = load_refresh_progress()
     refresh_in_progress = refresh_progress.get("in_progress", False)
     
-    with _cache_lock:
+    async with _cache_lock:
         last_refresh = _api_cache.get("last_refresh")
         sources_cache = _api_cache.get("sources", {})
     
-    # Aggregate counts from all sources
     live_streams = sum(len(s.get("live_streams", [])) for s in sources_cache.values())
     vod_streams = sum(len(s.get("vod_streams", [])) for s in sources_cache.values())
     series_count = sum(len(s.get("series", [])) for s in sources_cache.values())
@@ -2539,7 +2643,6 @@ def cache_status():
     cache_valid = is_cache_valid()
     ttl = get_cache_ttl()
 
-    # Calculate next refresh time
     next_refresh = None
     if last_refresh:
         try:
@@ -2549,7 +2652,6 @@ def cache_status():
         except (ValueError, TypeError):
             pass
     
-    # Per-source details
     sources_info = {}
     for source_id, source_cache in sources_cache.items():
         sources_info[source_id] = {
@@ -2559,102 +2661,73 @@ def cache_status():
             "last_refresh": source_cache.get("last_refresh"),
         }
 
-    return jsonify(
-        {
-            "last_refresh": last_refresh,
-            "next_refresh": next_refresh,
-            "cache_valid": cache_valid,
-            "refresh_in_progress": refresh_in_progress,
-            "refresh_progress": refresh_progress,
-            "ttl_seconds": ttl,
-            "sources_count": len(sources_cache),
-            "counts": {
-                "live_categories": live_cats,
-                "vod_categories": vod_cats,
-                "series_categories": series_cats,
-                "live_streams": live_streams,
-                "vod_streams": vod_streams,
-                "series": series_count,
-            },
-            "sources": sources_info,
-        }
-    )
+    return {
+        "last_refresh": last_refresh,
+        "next_refresh": next_refresh,
+        "cache_valid": cache_valid,
+        "refresh_in_progress": refresh_in_progress,
+        "refresh_progress": refresh_progress,
+        "ttl_seconds": ttl,
+        "sources_count": len(sources_cache),
+        "counts": {
+            "live_categories": live_cats,
+            "vod_categories": vod_cats,
+            "series_categories": series_cats,
+            "live_streams": live_streams,
+            "vod_streams": vod_streams,
+            "series": series_count,
+        },
+        "sources": sources_info,
+    }
 
 
-@app.route("/api/cache/refresh", methods=["POST"])
-def trigger_cache_refresh():
+@app.post("/api/cache/refresh")
+async def trigger_cache_refresh():
     """Manually trigger a cache refresh"""
-
-    def refresh_async():
-        refresh_cache()
-
-    # Start refresh in background thread
-    thread = threading.Thread(target=refresh_async)
-    thread.start()
-
-    return jsonify({"status": "refresh_started", "message": "Cache refresh has been triggered in the background"})
+    asyncio.create_task(refresh_cache())
+    return {"status": "refresh_started", "message": "Cache refresh has been triggered in the background"}
 
 
-@app.route("/api/cache/cancel-refresh", methods=["POST"])
-def cancel_cache_refresh():
+@app.post("/api/cache/cancel-refresh")
+async def cancel_cache_refresh():
     """Cancel/clear a stuck refresh state"""
     clear_refresh_progress()
-    with _cache_lock:
+    async with _cache_lock:
         _api_cache["refresh_in_progress"] = False
-    return jsonify({"status": "ok", "message": "Refresh state cleared"})
+    return {"status": "ok", "message": "Refresh state cleared"}
 
 
-@app.route("/api/cache/clear", methods=["POST"])
-def clear_cache():
+@app.post("/api/cache/clear")
+async def clear_cache():
     """Clear the cache"""
     global _api_cache, _stream_source_map
-    with _cache_lock:
+    async with _cache_lock:
         _api_cache = {
             "sources": {},
             "last_refresh": None,
             "refresh_in_progress": False,
         }
     
-    with _stream_map_lock:
+    async with _stream_map_lock:
         _stream_source_map = {"live": {}, "vod": {}, "series": {}}
 
-    # Also remove disk cache
     if os.path.exists(API_CACHE_FILE):
         os.remove(API_CACHE_FILE)
 
-    return jsonify({"status": "ok", "message": "Cache cleared"})
+    return {"status": "ok", "message": "Cache cleared"}
 
 
-@app.route("/health")
-def health():
+@app.get("/health")
+async def health():
     """Health check endpoint"""
-    return jsonify({"status": "ok"})
+    return {"status": "ok"}
 
 
 # ============================================
-# APPLICATION STARTUP
+# MAIN ENTRY POINT
 # ============================================
 
-
-def initialize_app():
-    """Initialize the application - load cache and start background refresh"""
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-    # Load cache from disk
-    load_cache_from_disk()
-
-    # Start background refresh thread
-    start_background_refresh()
-
-    # If cache is empty or invalid, trigger immediate refresh
-    if not is_cache_valid():
-        logger.info("Cache is empty or invalid, triggering initial refresh...")
-        threading.Thread(target=refresh_cache, daemon=True).start()
-
-
-# Initialize on module load (for gunicorn), skip during tests
-if not os.environ.get("TESTING"):
-    initialize_app()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=5000)

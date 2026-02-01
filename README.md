@@ -145,8 +145,38 @@ When enabled, all streams are proxied through the XtreamFilter server instead of
 ### Benefits
 
 - **Privacy**: Upstream server URLs are hidden from clients
-- **4K Performance**: Better buffering with 1MB chunks and optimized settings
+- **4K Performance**: Adaptive buffering optimized for 4K streams (up to 25 Mbps)
+- **Freeze Prevention**: Smart pre-buffering and dynamic buffer sizing
 - **Single Point of Control**: All traffic flows through your server
+
+### Adaptive Buffering System
+
+The proxy includes an intelligent buffering system designed to prevent freezes when upstream servers have issues:
+
+| Feature | Value | Description |
+|---------|-------|-------------|
+| **Pre-buffer** | 4 MB | Initial buffer filled before streaming starts (~1.3s at 25 Mbps) |
+| **Min buffer** | 1 MB | Minimum adaptive buffer size |
+| **Max buffer** | 16 MB | Maximum buffer (~5s runway at 25 Mbps for 4K) |
+| **Chunk size** | 512 KB | Read chunk size for efficient memory usage |
+
+**How it works:**
+
+1. **Pre-buffering**: Before sending any data to the client, the proxy fills a 4 MB buffer to ensure smooth playback start
+2. **Throughput monitoring**: Measures upstream speed every 2 seconds, keeping 10 samples for stability
+3. **Slowdown detection**: If current throughput drops below 60% of average:
+   - Buffer doubles (e.g., 1 MB → 2 MB)
+   - On consecutive slowdowns, buffer increases 4x for faster response
+4. **Stable recovery**: After 4 stable periods (~20s), buffer reduces by 25% to optimize memory
+5. **Logging**: All buffer adjustments are logged at INFO level for monitoring
+
+**Example log output:**
+```
+Pre-buffer filled: 4096.0KB in 0.34s (11993.5 KB/s)
+Upstream slowdown detected (2285 KB/s < 11950 KB/s avg), increasing buffer: 1024KB -> 2048KB
+Upstream slowdown detected (1781 KB/s < 7832 KB/s avg), increasing buffer: 2048KB -> 8192KB
+Upstream stable (2033 KB/s), reducing buffer: 16384KB -> 12288KB
+```
 
 ### Toggle
 
@@ -390,15 +420,29 @@ Configuration is stored in `data/config.json`:
 
 Cache is stored in `data/api_cache.json` and automatically rebuilt on startup.
 
+## Architecture
+
+XtreamFilter is built on a modern async Python stack for maximum performance:
+
+| Component | Technology | Purpose |
+|-----------|------------|--------|
+| **Web Framework** | FastAPI 0.115+ | High-performance async API framework |
+| **ASGI Server** | Uvicorn | Lightning-fast async server |
+| **HTTP Client** | httpx | Async HTTP with connection pooling |
+| **Runtime** | Python 3.13+ | Latest Python with performance improvements |
+
 ## Performance Tuning
 
 For 4K streams and large catalogs, the application is optimized with:
 
-- **Gunicorn workers**: 4 workers with 8 threads each
-- **Chunk size**: 1MB for stream proxying
-- **Timeouts**: No timeout for long-running streams
+- **Fully async**: All I/O operations are non-blocking for high concurrency
+- **Connection pooling**: Reuses connections to upstream servers (100 max, 20 per host)
+- **Adaptive buffering**: Dynamic buffer sizing from 1 MB to 16 MB based on upstream speed
+- **Pre-buffering**: 4 MB initial buffer before streaming starts
+- **Smart timeouts**: 30s connect, 600s read for large streams
+- **Retry mechanism**: Automatic retry with exponential backoff on upstream failures
 - **Keep-alive**: 65 seconds for connection reuse
-- **Direct passthrough**: Efficient memory usage for large streams
+- **Streaming response**: Memory-efficient async generators for large streams
 
 ## Docker Compose
 
@@ -421,11 +465,21 @@ Run locally without Docker:
 
 ```bash
 cd app
-pip install flask requests gunicorn
-python main.py
+pip install fastapi uvicorn httpx jinja2 aiofiles
+uvicorn main:app --host 0.0.0.0 --port 5000 --reload
 ```
 
 The app will be available at `http://localhost:5000`
+
+### Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|--------|
+| fastapi | ≥0.115.0 | Async web framework |
+| uvicorn | ≥0.34.0 | ASGI server |
+| httpx | ≥0.28.0 | Async HTTP client |
+| jinja2 | ≥3.1.0 | Template engine |
+| aiofiles | ≥24.0 | Async file operations |
 
 ## Running Tests
 

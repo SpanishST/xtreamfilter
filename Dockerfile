@@ -3,7 +3,8 @@ FROM python:3.13-slim
 WORKDIR /app
 
 # Install dependencies
-RUN pip install --no-cache-dir flask requests gunicorn
+# FastAPI with uvicorn for async support, httpx for async HTTP client
+RUN pip install --no-cache-dir fastapi uvicorn[standard] httpx jinja2 python-multipart
 
 # Copy application
 COPY app/ /app/
@@ -14,8 +15,7 @@ RUN mkdir -p /data
 # Expose port
 EXPOSE 5000
 
-# Run with gunicorn for production
-# - 4 workers for parallel stream handling
-# - 8 threads per worker for concurrent connections
-# - Increased timeout for long-running streams
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "--threads", "8", "--timeout", "0", "--keep-alive", "65", "main:app"]
+# Run with uvicorn for async production
+# - Single worker (async handles concurrency)
+# - Increased timeouts for long-running streams
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000", "--timeout-keep-alive", "65"]

@@ -3780,6 +3780,49 @@ async def test_telegram_notification():
         )
 
 
+@app.post("/api/config/telegram/test-diff")
+async def test_telegram_diff_notification(request: Request):
+    """Send a test diff notification (simulates new items found in a category)
+    
+    Query params:
+    - single: if "true", sends single item with cover (uses sendPhoto)
+    - otherwise sends multiple items (uses sendMessage)
+    """
+    try:
+        body = await request.json()
+    except:
+        body = {}
+    
+    single = body.get("single", False)
+    
+    if single:
+        # Single item with cover - will use sendPhoto
+        sample_items = [
+            {
+                "name": "Avatar: The Way of Water (2022) 4K HDR",
+                "cover": "https://image.tmdb.org/t/p/w500/t6HIqrRAclMCA60NsSmeqe9RmNV.jpg"
+            }
+        ]
+        msg = "Test diff notification sent with 1 item (with cover image)"
+    else:
+        # Multiple items - will use sendMessage with list
+        sample_items = [
+            {"name": "Test Movie 1 - 4K HDR", "cover": ""},
+            {"name": "Test Movie 2 - Dolby Vision", "cover": ""},
+            {"name": "Test Series S01E01", "cover": ""}
+        ]
+        msg = "Test diff notification sent with 3 sample items"
+    
+    try:
+        await send_telegram_notification("🧪 Test Category", sample_items)
+        return {"status": "ok", "message": msg}
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": f"Failed to send: {str(e)}"}
+        )
+
+
 @app.get("/api/cache/status")
 async def cache_status():
     """Get cache status and statistics"""

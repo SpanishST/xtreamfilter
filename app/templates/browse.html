@@ -340,6 +340,7 @@
         let sources = [];
         let categories = [];
         let selectedCategoryId = null;
+        let currentFetchController = null; // AbortController for cancelling in-flight requests
 
         const iconMap = {
             'folder': '📁', 'heart': '❤️', 'star': '⭐', 'film': '🎬', 'tv': '📺',
@@ -460,6 +461,13 @@
         }
 
         async function applyFilters() {
+            // Cancel any in-flight request
+            if (currentFetchController) {
+                currentFetchController.abort();
+            }
+            currentFetchController = new AbortController();
+            const signal = currentFetchController.signal;
+
             const searchQuery = document.getElementById('search-input').value;
             const sourceId = document.getElementById('source-filter').value;
             const group = document.getElementById('group-filter').value;
@@ -484,7 +492,7 @@
                     url += '&category_id=' + selectedCategoryId;
                 }
 
-                const response = await fetch(url);
+                const response = await fetch(url, { signal });
                 const data = await response.json();
 
                 loadingState.style.display = 'none';
@@ -515,6 +523,10 @@
                 renderContent(data.items);
                 updatePagination();
             } catch (error) {
+                // Ignore aborted requests (user clicked another category)
+                if (error.name === 'AbortError') {
+                    return;
+                }
                 console.error('Error fetching content:', error);
                 loadingState.style.display = 'none';
                 emptyState.style.display = 'block';

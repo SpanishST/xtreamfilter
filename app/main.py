@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -835,6 +836,14 @@ async def refresh_cache():
             save_cache_to_disk()
             
             # Refresh pattern-based categories
+            save_refresh_progress({
+                "in_progress": True,
+                "current_source": total_sources,
+                "total_sources": total_sources,
+                "current_source_name": "Categories",
+                "current_step": "Refreshing automatic categories...",
+                "percent": 95
+            })
             refresh_pattern_categories()
 
             logger.info(
@@ -1305,6 +1314,124 @@ def safe_copy_category(cat):
     return {"category_id": "", "category_name": ""}
 
 
+# Icon name to emoji mapping for custom categories
+ICON_EMOJI_MAP = {
+    "folder": "📁",
+    "heart": "❤️",
+    "star": "⭐",
+    "fire": "🔥",
+    "clock": "🕐",
+    "film": "🎬",
+    "tv": "📺",
+    "music": "🎵",
+    "sports": "⚽",
+    "news": "📰",
+    "kids": "👶",
+    "bookmark": "🔖",
+    "tag": "🏷️",
+    "check": "✅",
+    "play": "▶️",
+    "list": "📋"
+}
+
+def get_icon_emoji(icon_name: str) -> str:
+    """Convert icon name to emoji, or return empty string if not found."""
+    return ICON_EMOJI_MAP.get(icon_name, "")
+
+# Base offset for custom category IDs - using low numbers that fit normal Xtream range
+# Starting at 99001 to avoid conflicts with source categories (typically under 10000)
+CUSTOM_CAT_ID_BASE = 99001
+
+def get_custom_cat_id_map() -> dict:
+    """Build a mapping of custom category string IDs to sequential numeric IDs.
+    
+    Returns dict: {cat_id_string: numeric_id}
+    """
+    data = load_categories()
+    cat_id_map = {}
+    for idx, cat in enumerate(data.get("categories", [])):
+        cat_id_map[cat.get("id")] = CUSTOM_CAT_ID_BASE + idx
+    return cat_id_map
+
+def custom_cat_id_to_numeric(cat_id: str) -> str:
+    """Convert a custom category string ID to a unique positive numeric ID string.
+    
+    Uses sequential IDs starting from CUSTOM_CAT_ID_BASE (50,000,001).
+    Returns as string to match Xtream API format.
+    """
+    cat_id_map = get_custom_cat_id_map()
+    return str(cat_id_map.get(cat_id, CUSTOM_CAT_ID_BASE))
+
+def get_custom_categories_for_content_type(content_type: str) -> list:
+    """Get all custom categories that have items for the specified content type.
+    
+    Args:
+        content_type: 'live', 'vod', or 'series'
+        
+    Returns:
+        List of category dicts with 'category_id', 'category_name', and 'items' 
+    """
+    data = load_categories()
+    result = []
+    
+    # Map browse content types to internal types
+    type_map = {"live": "live", "vod": "vod", "series": "series"}
+    internal_type = type_map.get(content_type, content_type)
+    
+    for cat in data.get("categories", []):
+        # Skip if this content type is not in the category's allowed types
+        if internal_type not in cat.get("content_types", []):
+            continue
+        
+        # Get items based on mode
+        if cat.get("mode") == "manual":
+            items = cat.get("items", [])
+        else:
+            items = cat.get("cached_items", [])
+        
+        # Filter items to only those of the requested content type
+        filtered_items = [
+            item for item in items 
+            if item.get("content_type") == internal_type
+        ]
+        
+        # Only include category if it has items for this content type
+        if filtered_items:
+            result.append({
+                "id": cat.get("id"),
+                "name": cat.get("name"),
+                "icon": cat.get("icon", "📁"),
+                "items": filtered_items
+            })
+    
+    return result
+
+
+def get_custom_category_streams(content_type: str, custom_cat_id: str) -> list:
+    """Get all streams that belong to a custom category for the specified content type.
+    
+    Returns list of (source_id, item_id) tuples.
+    """
+    data = load_categories()
+    
+    for cat in data.get("categories", []):
+        if cat.get("id") != custom_cat_id:
+            continue
+        
+        if cat.get("mode") == "manual":
+            items = cat.get("items", [])
+        else:
+            items = cat.get("cached_items", [])
+        
+        return [
+            (item.get("source_id"), str(item.get("id")))
+            for item in items 
+            if item.get("content_type") == content_type
+        ]
+    
+    return []
+
+
 # ============================================
 # M3U GENERATION
 # ============================================
@@ -1486,6 +1613,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="XtreamFilter", lifespan=lifespan)
+
+
+# Middleware to ensure UTF-8 charset in JSON responses
+@app.middleware("http")
+async def add_utf8_charset(request: Request, call_next):
+    response = await call_next(request)
+    content_type = response.headers.get("content-type", "")
+    if "application/json" in content_type and "charset" not in content_type:
+        response.headers["content-type"] = "application/json; charset=utf-8"
+    return response
 
 
 # ============================================
@@ -1963,6 +2100,18 @@ async def api_browse(
 
     cat_map = build_category_map(categories)
     
+    # Build reverse lookup map for category membership (item -> list of category IDs)
+    # This is done ONCE instead of calling get_item_categories for each item
+    categories_data = load_categories()
+    category_membership = {}  # (content_type, item_id, source_id) -> [cat_id, ...]
+    for cat in categories_data.get("categories", []):
+        if cat.get("mode") == "manual":
+            for item in cat.get("items", []):
+                key = (item.get("content_type"), str(item.get("id")), item.get("source_id"))
+                if key not in category_membership:
+                    category_membership[key] = []
+                category_membership[key].append(cat.get("id"))
+    
     # Build category item set if filtering by category
     category_item_set = set()
     if category_id:
@@ -2051,7 +2200,6 @@ async def api_browse(
             "source_id": src_id,
             "source_name": src_name,
             "added": added_ts,
-            "categories": get_item_categories(type, item_id, src_id),
         })
 
     total = len(items)
@@ -2065,6 +2213,11 @@ async def api_browse(
     start = (page - 1) * per_page
     end = start + per_page
     paginated = items[start:end]
+    
+    # Add category membership only to paginated items (fast lookup)
+    for item in paginated:
+        key = (type, item["id"], item["source_id"])
+        item["categories"] = category_membership.get(key, [])
 
     groups_list = [{"name": g, "count": c} for g, c in sorted(group_counts.items())]
     sources_list = [{"id": sid, "name": sname} for sid, sname in sorted(source_set.items(), key=lambda x: x[1])]
@@ -2504,6 +2657,15 @@ async def player_api_merged(request: Request):
 
         elif action == "get_live_categories":
             result = []
+            # First, add custom categories at the beginning
+            custom_cats = get_custom_categories_for_content_type("live")
+            for custom_cat in custom_cats:
+                result.append({
+                    "category_id": custom_cat_id_to_numeric(custom_cat['id']),
+                    "category_name": custom_cat['name'],
+                    "parent_id": 0
+                })
+            # Then add source categories
             for idx, source in enumerate(enabled_sources):
                 source_id = source.get("id")
                 prefix = source.get("prefix", "")
@@ -2514,12 +2676,21 @@ async def player_api_merged(request: Request):
                         display_name = f"{prefix}{cat_name}" if prefix else cat_name
                         cat_copy = safe_copy_category(cat)
                         cat_copy["category_name"] = display_name
-                        cat_copy["category_id"] = encode_virtual_id(idx, safe_get_category_id(cat))
+                        cat_copy["category_id"] = str(encode_virtual_id(idx, safe_get_category_id(cat)))
                         result.append(cat_copy)
             return result
 
         elif action == "get_vod_categories":
             result = []
+            # First, add custom categories at the beginning
+            custom_cats = get_custom_categories_for_content_type("vod")
+            for custom_cat in custom_cats:
+                result.append({
+                    "category_id": custom_cat_id_to_numeric(custom_cat['id']),
+                    "category_name": custom_cat['name'],
+                    "parent_id": 0
+                })
+            # Then add source categories
             for idx, source in enumerate(enabled_sources):
                 source_id = source.get("id")
                 prefix = source.get("prefix", "")
@@ -2530,12 +2701,21 @@ async def player_api_merged(request: Request):
                         display_name = f"{prefix}{cat_name}" if prefix else cat_name
                         cat_copy = safe_copy_category(cat)
                         cat_copy["category_name"] = display_name
-                        cat_copy["category_id"] = encode_virtual_id(idx, safe_get_category_id(cat))
+                        cat_copy["category_id"] = str(encode_virtual_id(idx, safe_get_category_id(cat)))
                         result.append(cat_copy)
             return result
 
         elif action == "get_series_categories":
             result = []
+            # First, add custom categories at the beginning
+            custom_cats = get_custom_categories_for_content_type("series")
+            for custom_cat in custom_cats:
+                result.append({
+                    "category_id": custom_cat_id_to_numeric(custom_cat['id']),
+                    "category_name": custom_cat['name'],
+                    "parent_id": 0
+                })
+            # Then add source categories
             for idx, source in enumerate(enabled_sources):
                 source_id = source.get("id")
                 prefix = source.get("prefix", "")
@@ -2546,12 +2726,28 @@ async def player_api_merged(request: Request):
                         display_name = f"{prefix}{cat_name}" if prefix else cat_name
                         cat_copy = safe_copy_category(cat)
                         cat_copy["category_name"] = display_name
-                        cat_copy["category_id"] = encode_virtual_id(idx, safe_get_category_id(cat))
+                        cat_copy["category_id"] = str(encode_virtual_id(idx, safe_get_category_id(cat)))
                         result.append(cat_copy)
             return result
 
         elif action == "get_live_streams":
             result = []
+            requested_cat_id = request.query_params.get("category_id")
+            
+            # Build lookup of source index by source_id
+            source_idx_map = {source.get("id"): idx for idx, source in enumerate(enabled_sources)}
+            
+            # Get custom categories and build a lookup: (source_id, item_id) -> list of custom_cat_ids (strings)
+            custom_cats = get_custom_categories_for_content_type("live")
+            custom_item_cats = {}  # (source_id, item_id) -> [cat_id_str, ...]
+            for custom_cat in custom_cats:
+                cat_id_str = custom_cat_id_to_numeric(custom_cat['id'])
+                for item in custom_cat["items"]:
+                    key = (item.get("source_id"), str(item.get("id")))
+                    if key not in custom_item_cats:
+                        custom_item_cats[key] = []
+                    custom_item_cats[key].append(cat_id_str)
+            
             for idx, source in enumerate(enabled_sources):
                 source_id = source.get("id")
                 filters = source.get("filters", {})
@@ -2564,15 +2760,48 @@ async def player_api_merged(request: Request):
                     cat_id = str(stream.get("category_id", ""))
                     group_name = cat_map.get(cat_id, "")
                     channel_name = stream.get("name", "")
+                    stream_id = str(stream.get("stream_id", ""))
+                    
                     if should_include(group_name, group_filters) and should_include(channel_name, channel_filters):
-                        stream_copy = stream.copy()
-                        stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
-                        stream_copy["category_id"] = encode_virtual_id(idx, stream.get("category_id", 0))
-                        result.append(stream_copy)
+                        virtual_cat_id = str(encode_virtual_id(idx, stream.get("category_id", 0)))
+                        # Only include if no category filter or matches
+                        if requested_cat_id is None or requested_cat_id == virtual_cat_id:
+                            stream_copy = stream.copy()
+                            stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
+                            stream_copy["category_id"] = virtual_cat_id
+                            stream_copy["category_ids"] = [int(virtual_cat_id)]
+                            result.append(stream_copy)
+                    
+                    # Also add to custom categories if applicable
+                    custom_cat_ids = custom_item_cats.get((source_id, stream_id), [])
+                    for custom_cat_id in custom_cat_ids:
+                        # Only include if no category filter or matches this custom category
+                        if requested_cat_id is None or requested_cat_id == custom_cat_id:
+                            stream_copy = stream.copy()
+                            stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
+                            stream_copy["category_id"] = custom_cat_id
+                            stream_copy["category_ids"] = [int(custom_cat_id)]
+                            result.append(stream_copy)
             return result
 
         elif action == "get_vod_streams":
             result = []
+            requested_cat_id = request.query_params.get("category_id")
+            
+            # Build lookup of source index by source_id
+            source_idx_map = {source.get("id"): idx for idx, source in enumerate(enabled_sources)}
+            
+            # Get custom categories and build a lookup: (source_id, item_id) -> list of custom_cat_ids (strings)
+            custom_cats = get_custom_categories_for_content_type("vod")
+            custom_item_cats = {}
+            for custom_cat in custom_cats:
+                cat_id_str = custom_cat_id_to_numeric(custom_cat['id'])
+                for item in custom_cat["items"]:
+                    key = (item.get("source_id"), str(item.get("id")))
+                    if key not in custom_item_cats:
+                        custom_item_cats[key] = []
+                    custom_item_cats[key].append(cat_id_str)
+            
             for idx, source in enumerate(enabled_sources):
                 source_id = source.get("id")
                 filters = source.get("filters", {})
@@ -2585,15 +2814,48 @@ async def player_api_merged(request: Request):
                     cat_id = str(stream.get("category_id", ""))
                     group_name = cat_map.get(cat_id, "")
                     channel_name = stream.get("name", "")
+                    stream_id = str(stream.get("stream_id", ""))
+                    
                     if should_include(group_name, group_filters) and should_include(channel_name, channel_filters):
-                        stream_copy = stream.copy()
-                        stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
-                        stream_copy["category_id"] = encode_virtual_id(idx, stream.get("category_id", 0))
-                        result.append(stream_copy)
+                        virtual_cat_id = str(encode_virtual_id(idx, stream.get("category_id", 0)))
+                        # Only include if no category filter or matches
+                        if requested_cat_id is None or requested_cat_id == virtual_cat_id:
+                            stream_copy = stream.copy()
+                            stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
+                            stream_copy["category_id"] = virtual_cat_id
+                            stream_copy["category_ids"] = [int(virtual_cat_id)]
+                            result.append(stream_copy)
+                    
+                    # Also add to custom categories if applicable
+                    custom_cat_ids = custom_item_cats.get((source_id, stream_id), [])
+                    for custom_cat_id in custom_cat_ids:
+                        # Only include if no category filter or matches this custom category
+                        if requested_cat_id is None or requested_cat_id == custom_cat_id:
+                            stream_copy = stream.copy()
+                            stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
+                            stream_copy["category_id"] = custom_cat_id
+                            stream_copy["category_ids"] = [int(custom_cat_id)]
+                            result.append(stream_copy)
             return result
 
         elif action == "get_series":
             result = []
+            requested_cat_id = request.query_params.get("category_id")
+            
+            # Build lookup of source index by source_id
+            source_idx_map = {source.get("id"): idx for idx, source in enumerate(enabled_sources)}
+            
+            # Get custom categories and build a lookup: (source_id, item_id) -> list of custom_cat_ids (strings)
+            custom_cats = get_custom_categories_for_content_type("series")
+            custom_item_cats = {}
+            for custom_cat in custom_cats:
+                cat_id_str = custom_cat_id_to_numeric(custom_cat['id'])
+                for item in custom_cat["items"]:
+                    key = (item.get("source_id"), str(item.get("id")))
+                    if key not in custom_item_cats:
+                        custom_item_cats[key] = []
+                    custom_item_cats[key].append(cat_id_str)
+            
             for idx, source in enumerate(enabled_sources):
                 source_id = source.get("id")
                 filters = source.get("filters", {})
@@ -2606,11 +2868,28 @@ async def player_api_merged(request: Request):
                     cat_id = str(series.get("category_id", ""))
                     group_name = cat_map.get(cat_id, "")
                     series_name = series.get("name", "")
+                    series_id = str(series.get("series_id", ""))
+                    
                     if should_include(group_name, group_filters) and should_include(series_name, channel_filters):
-                        series_copy = series.copy()
-                        series_copy["series_id"] = encode_virtual_id(idx, series.get("series_id", 0))
-                        series_copy["category_id"] = encode_virtual_id(idx, series.get("category_id", 0))
-                        result.append(series_copy)
+                        virtual_cat_id = str(encode_virtual_id(idx, series.get("category_id", 0)))
+                        # Only include if no category filter or matches
+                        if requested_cat_id is None or requested_cat_id == virtual_cat_id:
+                            series_copy = series.copy()
+                            series_copy["series_id"] = encode_virtual_id(idx, series.get("series_id", 0))
+                            series_copy["category_id"] = virtual_cat_id
+                            series_copy["category_ids"] = [int(virtual_cat_id)]
+                            result.append(series_copy)
+                    
+                    # Also add to custom categories if applicable
+                    custom_cat_ids = custom_item_cats.get((source_id, series_id), [])
+                    for custom_cat_id in custom_cat_ids:
+                        # Only include if no category filter or matches this custom category
+                        if requested_cat_id is None or requested_cat_id == custom_cat_id:
+                            series_copy = series.copy()
+                            series_copy["series_id"] = encode_virtual_id(idx, series.get("series_id", 0))
+                            series_copy["category_id"] = custom_cat_id
+                            series_copy["category_ids"] = [int(custom_cat_id)]
+                            result.append(series_copy)
             return result
 
         elif action == "get_series_info":

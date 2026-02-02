@@ -783,6 +783,24 @@
                     <button type="button" class="btn btn-secondary btn-sm" onclick="openTelegramModal()">⚙️ Configure</button>
                     <span style="color: #666; font-size: 0.8em;">(Get notified when automatic categories find new items)</span>
                 </div>
+                
+                <!-- Refresh Interval -->
+                <div style="display: flex; align-items: center; gap: 15px; padding: 10px; background: rgba(255,255,255,0.03); border-radius: 8px; flex-wrap: wrap;">
+                    <span style="color: #888;">🔄 Auto-Refresh Interval:</span>
+                    <select id="refresh-interval-select" onchange="updateRefreshInterval(this.value)" style="padding: 6px 12px; border-radius: 6px; background: #2a2a2a; color: #fff; border: 1px solid #444;">
+                        <option value="300">5 minutes</option>
+                        <option value="600">10 minutes</option>
+                        <option value="900">15 minutes</option>
+                        <option value="1800">30 minutes</option>
+                        <option value="3600">1 hour</option>
+                        <option value="7200">2 hours</option>
+                        <option value="14400">4 hours</option>
+                        <option value="21600">6 hours</option>
+                        <option value="43200">12 hours</option>
+                        <option value="86400">24 hours</option>
+                    </select>
+                    <span style="color: #666; font-size: 0.8em;">(How often the cache is automatically refreshed)</span>
+                </div>
             </div>
         </div>
 
@@ -820,9 +838,6 @@
                         <span>📺 TV Series</span>
                     </label>
                 </div>
-                <p style="color: #888; font-size: 0.85em; margin-top: 10px;">
-                    ⚠️ Note: Series can take longer to load as each series requires an additional API call to fetch episodes.
-                </p>
                 
                 <button type="submit" class="btn btn-primary btn-sm" style="margin-top: 15px;">Save Settings</button>
             </div>
@@ -1195,6 +1210,9 @@
             
             // Load proxy status
             loadProxyStatus();
+            
+            // Load refresh interval
+            loadRefreshInterval();
         }
         
         function loadProxyStatus() {
@@ -1221,6 +1239,26 @@
                 document.getElementById('proxy-status-label').textContent = isEnabled ? 'Enabled' : 'Disabled';
                 document.getElementById('proxy-status-label').style.color = isEnabled ? '#2ed573' : '#ff6b6b';
             })
+            .catch(() => {});
+        }
+        
+        function loadRefreshInterval() {
+            fetch('/api/options/refresh_interval')
+                .then(r => r.json())
+                .then(data => {
+                    const interval = data.refresh_interval || 3600;
+                    document.getElementById('refresh-interval-select').value = interval;
+                })
+                .catch(() => {});
+        }
+        
+        function updateRefreshInterval(value) {
+            fetch('/api/options/refresh_interval', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ refresh_interval: parseInt(value) })
+            })
+            .then(r => r.json())
             .catch(() => {});
         }
         

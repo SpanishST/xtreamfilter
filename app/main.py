@@ -459,6 +459,17 @@ def get_cache_ttl():
     return config.get("options", {}).get("cache_ttl", 3600)
 
 
+def get_refresh_interval():
+    """Get cache refresh interval from config (in seconds).
+    
+    This controls how often the background task checks and refreshes the cache.
+    Defaults to 3600 seconds (1 hour). Minimum is 300 seconds (5 minutes).
+    """
+    config = load_config()
+    interval = config.get("options", {}).get("refresh_interval", 3600)
+    return max(interval, 300)  # Minimum 5 minutes to avoid API abuse
+
+
 def load_cache_from_disk():
     """Load cache from disk on startup"""
     global _api_cache, _stream_source_map
@@ -1193,7 +1204,7 @@ async def background_refresh_loop():
 
     while True:
         try:
-            ttl = get_cache_ttl()
+            refresh_interval = get_refresh_interval()
 
             if not is_cache_valid():
                 logger.info("Cache expired, triggering refresh...")
@@ -1202,8 +1213,8 @@ async def background_refresh_loop():
                 last_refresh = _api_cache.get("last_refresh", "Never")
                 logger.info(f"Cache still valid. Last refresh: {last_refresh}")
 
-            sleep_time = max(ttl // 4, 300)
-            await asyncio.sleep(sleep_time)
+            logger.debug(f"Next cache check in {refresh_interval} seconds")
+            await asyncio.sleep(refresh_interval)
 
         except asyncio.CancelledError:
             logger.info("Background refresh task cancelled")
@@ -1238,6 +1249,7 @@ def load_config():
         "options": {
             "cache_enabled": True,
             "cache_ttl": 3600,
+            "refresh_interval": 3600,
             "proxy_streams": True,
             "telegram": {
                 "enabled": False,
@@ -4343,6 +4355,29 @@ async def set_proxy_status(request: Request):
     save_config(config)
     
     return {"status": "ok", "proxy_enabled": config["options"]["proxy_streams"]}
+
+
+@app.get("/api/options/refresh_interval")
+async def get_refresh_interval_api():
+    """Get cache refresh interval"""
+    return {"refresh_interval": get_refresh_interval()}
+
+
+@app.post("/api/options/refresh_interval")
+async def set_refresh_interval_api(request: Request):
+    """Set cache refresh interval (in seconds)"""
+    config = load_config()
+    data = await request.json()
+    
+    if "options" not in config:
+        config["options"] = {}
+    
+    # Minimum 300 seconds (5 minutes)
+    interval = max(int(data.get("refresh_interval", 3600)), 300)
+    config["options"]["refresh_interval"] = interval
+    save_config(config)
+    
+    return {"status": "ok", "refresh_interval": interval}
 
 
 @app.get("/api/config/telegram")

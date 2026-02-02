@@ -3,8 +3,8 @@ FROM python:3.13-slim
 WORKDIR /app
 
 # Install dependencies
-# FastAPI with uvicorn for async support, httpx for async HTTP client
-RUN pip install --no-cache-dir fastapi uvicorn[standard] httpx jinja2 python-multipart
+# FastAPI with uvicorn for async support, httpx for async HTTP client, lxml for XML parsing
+RUN pip install --no-cache-dir fastapi uvicorn[standard] httpx jinja2 python-multipart lxml
 
 # Copy application
 COPY app/ /app/

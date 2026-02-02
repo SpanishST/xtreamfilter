@@ -1205,20 +1205,47 @@ async def send_telegram_notification(category_name: str, new_items: list):
 
 
 async def _send_telegram_text_message(client, bot_token: str, chat_id: str, category_name: str, new_items: list):
-    """Send a text-only Telegram message with item list."""
-    item_list = "\n".join([f"• {item['name']}" for item in new_items[:20]])
-    if len(new_items) > 20:
-        item_list += f"\n\n... and {len(new_items) - 20} more"
-    
-    message = f"🆕 <b>{category_name}</b> - {len(new_items)} new item(s)\n\n{item_list}"
-    
+    """Send a text-only Telegram message with item list, split into multiple messages if needed."""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "HTML"
-    }
-    await client.post(url, json=payload)
+    
+    # Telegram message limit is 4096 characters
+    MAX_MESSAGE_LENGTH = 4096
+    
+    # Build header for first message
+    header = f"🆕 <b>{category_name}</b> - {len(new_items)} new item(s)\n\n"
+    
+    # Build all items
+    all_items = [f"• {item['name']}" for item in new_items]
+    
+    # Split into messages respecting the character limit
+    messages = []
+    current_message = header
+    
+    for i, item in enumerate(all_items):
+        item_line = item + "\n"
+        
+        # Check if adding this item would exceed the limit
+        if len(current_message) + len(item_line) > MAX_MESSAGE_LENGTH - 50:  # Leave some margin
+            # Save current message and start a new one
+            messages.append(current_message.rstrip())
+            # For continuation messages, add a shorter header
+            part_num = len(messages) + 1
+            current_message = f"📋 <b>{category_name}</b> (continued - part {part_num})\n\n{item_line}"
+        else:
+            current_message += item_line
+    
+    # Don't forget the last message
+    if current_message.strip():
+        messages.append(current_message.rstrip())
+    
+    # Send all messages
+    for message in messages:
+        payload = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        await client.post(url, json=payload)
 
 
 def get_item_details_from_cache(item_id: str, source_id: str, content_type: str) -> dict:

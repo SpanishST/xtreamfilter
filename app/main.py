@@ -652,8 +652,98 @@ async def fetch_epg_from_source(source: dict) -> bytes | None:
     return None
 
 
+def get_filtered_epg_ids_for_source(source: dict) -> set:
+    """
+    Get the set of valid EPG channel IDs for a source based on its live channel filters.
+    Returns prefixed IDs in lowercase format (e.g., 'source_id_channel.epg').
+    """
+    source_id = source.get("id", "unknown")
+    filters = source.get("filters", {})
+    live_filters = filters.get("live", {"groups": [], "channels": []})
+    group_filters = live_filters.get("groups", [])
+    channel_filters = live_filters.get("channels", [])
+    
+    # Get cached data for this source
+    categories = _api_cache.get("sources", {}).get(source_id, {}).get("live_categories", [])
+    streams = _api_cache.get("sources", {}).get(source_id, {}).get("live_streams", [])
+    
+    if not streams:
+        logger.debug(f"No cached streams for source '{source_id}', including all EPG channels")
+        return None  # None means include all (no filter applied)
+    
+    # Build category map
+    cat_map = {}
+    for cat in categories:
+        if isinstance(cat, dict):
+            cat_id = str(cat.get("category_id", ""))
+            cat_name = cat.get("category_name", "")
+            cat_map[cat_id] = cat_name
+    
+    valid_epg_ids = set()
+    
+    for stream in streams:
+        name = stream.get("name", "Unknown")
+        cat_id = str(stream.get("category_id", ""))
+        group = cat_map.get(cat_id, "Unknown")
+        epg_id = stream.get("epg_channel_id", "")
+        
+        if not epg_id:
+            continue
+        
+        # Apply group filters
+        if group_filters:
+            include_rules = [r for r in group_filters if r.get("type") == "include"]
+            exclude_rules = [r for r in group_filters if r.get("type") == "exclude"]
+            
+            excluded = False
+            for rule in exclude_rules:
+                if matches_filter(group, rule):
+                    excluded = True
+                    break
+            if excluded:
+                continue
+            
+            if include_rules:
+                included = False
+                for rule in include_rules:
+                    if matches_filter(group, rule):
+                        included = True
+                        break
+                if not included:
+                    continue
+        
+        # Apply channel filters
+        if channel_filters:
+            include_rules = [r for r in channel_filters if r.get("type") == "include"]
+            exclude_rules = [r for r in channel_filters if r.get("type") == "exclude"]
+            
+            excluded = False
+            for rule in exclude_rules:
+                if matches_filter(name, rule):
+                    excluded = True
+                    break
+            if excluded:
+                continue
+            
+            if include_rules:
+                included = False
+                for rule in include_rules:
+                    if matches_filter(name, rule):
+                        included = True
+                        break
+                if not included:
+                    continue
+        
+        # This channel passed all filters - add its prefixed EPG ID
+        prefixed_epg_id = f"{source_id}_{epg_id}".lower()
+        valid_epg_ids.add(prefixed_epg_id)
+    
+    logger.debug(f"Source '{source_id}': {len(valid_epg_ids)} EPG IDs pass filters (from {len(streams)} streams)")
+    return valid_epg_ids
+
+
 async def refresh_epg_cache():
-    """Fetch and merge EPG from all enabled sources."""
+    """Fetch and merge EPG from all enabled sources, filtered to match channel filters."""
     global _epg_cache
     
     async with _epg_cache_lock:
@@ -672,6 +762,17 @@ async def refresh_epg_cache():
         
         logger.info(f"Starting EPG refresh from {len(enabled_sources)} source(s)")
         
+        # Build set of valid EPG IDs for each source based on filters
+        source_epg_filters = {}
+        for source in enabled_sources:
+            source_id = source.get("id", "unknown")
+            valid_ids = get_filtered_epg_ids_for_source(source)
+            source_epg_filters[source_id] = valid_ids
+            if valid_ids is not None:
+                logger.info(f"Source '{source.get('name', source_id)}': filtering EPG to {len(valid_ids)} channels")
+            else:
+                logger.info(f"Source '{source.get('name', source_id)}': no cache data, including all EPG channels")
+        
         # Fetch EPG from all sources in parallel
         tasks = [fetch_epg_from_source(source) for source in enabled_sources]
         results = await asyncio.gather(*tasks)
@@ -679,11 +780,14 @@ async def refresh_epg_cache():
         # Create merged XMLTV document
         merged_root = etree.Element("tv", attrib={"generator-info-name": "XtreamFilter Merged EPG"})
         
+        total_stats = {"channels_included": 0, "channels_excluded": 0, "programmes_included": 0, "programmes_excluded": 0}
+        
         for source, epg_data in zip(enabled_sources, results):
             if epg_data is None:
                 continue
             
             source_id = source.get("id", "unknown")
+            valid_epg_ids = source_epg_filters.get(source_id)
             
             try:
                 # Parse the XMLTV data
@@ -691,14 +795,23 @@ async def refresh_epg_cache():
                 tree = etree.parse(io.BytesIO(epg_data), parser)
                 root = tree.getroot()
                 
+                source_stats = {"channels": 0, "channels_excluded": 0, "programmes": 0, "programmes_excluded": 0}
+                
                 # Process channel elements - prefix the ID with source_id and normalize to lowercase
                 for channel in root.findall("channel"):
                     original_id = channel.get("id", "")
                     if original_id:
                         # Prefix the channel ID with source_id and normalize to lowercase for consistent matching
                         new_id = f"{source_id}_{original_id}".lower()
+                        
+                        # Filter: only include if valid_epg_ids is None (no filter) or ID is in the set
+                        if valid_epg_ids is not None and new_id not in valid_epg_ids:
+                            source_stats["channels_excluded"] += 1
+                            continue
+                        
                         channel.set("id", new_id)
                     merged_root.append(channel)
+                    source_stats["channels"] += 1
                 
                 # Process programme elements - prefix the channel reference and normalize to lowercase
                 for programme in root.findall("programme"):
@@ -706,11 +819,24 @@ async def refresh_epg_cache():
                     if original_channel:
                         # Prefix the channel reference with source_id and normalize to lowercase
                         new_channel = f"{source_id}_{original_channel}".lower()
+                        
+                        # Filter: only include if valid_epg_ids is None (no filter) or channel is in the set
+                        if valid_epg_ids is not None and new_channel not in valid_epg_ids:
+                            source_stats["programmes_excluded"] += 1
+                            continue
+                        
                         programme.set("channel", new_channel)
                     merged_root.append(programme)
+                    source_stats["programmes"] += 1
+                
+                total_stats["channels_included"] += source_stats["channels"]
+                total_stats["channels_excluded"] += source_stats["channels_excluded"]
+                total_stats["programmes_included"] += source_stats["programmes"]
+                total_stats["programmes_excluded"] += source_stats["programmes_excluded"]
                 
                 logger.info(f"Merged EPG from source '{source.get('name', source_id)}': "
-                           f"{len(root.findall('channel'))} channels, {len(root.findall('programme'))} programmes")
+                           f"{source_stats['channels']} channels (+{source_stats['channels_excluded']} filtered), "
+                           f"{source_stats['programmes']} programmes (+{source_stats['programmes_excluded']} filtered)")
                 
             except Exception as e:
                 logger.error(f"Error parsing EPG from source '{source.get('name', source_id)}': {e}")
@@ -732,8 +858,10 @@ async def refresh_epg_cache():
         # Save to disk
         save_epg_cache_to_disk()
         
-        logger.info(f"EPG refresh complete. Merged {len(merged_root.findall('channel'))} channels, "
-                   f"{len(merged_root.findall('programme'))} programmes. Size: {len(merged_data)} bytes")
+        logger.info(f"EPG refresh complete. Total: {total_stats['channels_included']} channels, "
+                   f"{total_stats['programmes_included']} programmes. "
+                   f"Filtered out: {total_stats['channels_excluded']} channels, {total_stats['programmes_excluded']} programmes. "
+                   f"Size: {len(merged_data)} bytes ({len(merged_data) / 1024 / 1024:.1f} MB)")
         
     except Exception as e:
         logger.error(f"EPG refresh failed: {e}")
@@ -1340,10 +1468,15 @@ async def send_telegram_notification(category_name: str, new_items: list):
                 }
                 # Only first item gets the caption
                 if i == 0:
+                    # Telegram caption limit is 1024 chars - fit as many as possible
                     caption = f"🆕 <b>{category_name}</b> - {len(new_items)} new item(s)\n\n"
-                    caption += "\n".join([f"• {it['name']}" for it in new_items[:20]])
-                    if len(new_items) > 20:
-                        caption += f"\n\n... and {len(new_items) - 20} more"
+                    for it in new_items:
+                        line = f"• {it['name']}\n"
+                        if len(caption) + len(line) < 1000:
+                            caption += line
+                        else:
+                            break
+                    caption = caption.rstrip()
                     media_obj["caption"] = caption
                     media_obj["parse_mode"] = "HTML"
                 media.append(media_obj)
@@ -1357,10 +1490,15 @@ async def send_telegram_notification(category_name: str, new_items: list):
             response = await client.post(url, json=payload)
             logger.info(f"Telegram sendMediaGroup response: {response.status_code} - {response.text[:200]}")
             
-            # If media group fails, fallback to text message
+            # If media group fails, fallback to text message with all items
             if response.status_code != 200:
                 logger.warning(f"Telegram sendMediaGroup failed, falling back to text: {response.text}")
                 await _send_telegram_text_message(client, bot_token, chat_id, category_name, new_items)
+            else:
+                # If album succeeded but we couldn't fit all items in caption, send text message with full list
+                items_in_caption = caption.count("• ")
+                if items_in_caption < len(new_items):
+                    await _send_telegram_text_message(client, bot_token, chat_id, category_name, new_items)
         
         # Single item with cover: use sendPhoto
         elif len(items_with_covers) == 1:

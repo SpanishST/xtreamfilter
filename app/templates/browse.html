@@ -501,11 +501,13 @@
 
             try {
                 let url = '/api/browse?type=' + contentType + '&page=' + currentPage + '&per_page=50';
-                if (searchQuery) url += '&search=' + encodeURIComponent(searchQuery);
-                if (sourceId) url += '&source=' + sourceId;
-                if (group) url += '&group=' + encodeURIComponent(group);
-                if (useSourceFilters) url += '&use_source_filters=true';
-                if (currentView === 'categories' && selectedCategoryId) {
+                // Only apply search/source/group filters when in "all" view, not in categories view
+                if (currentView === 'all') {
+                    if (searchQuery) url += '&search=' + encodeURIComponent(searchQuery);
+                    if (sourceId) url += '&source=' + sourceId;
+                    if (group) url += '&group=' + encodeURIComponent(group);
+                    if (useSourceFilters) url += '&use_source_filters=true';
+                } else if (currentView === 'categories' && selectedCategoryId) {
                     url += '&category_id=' + selectedCategoryId;
                 }
 

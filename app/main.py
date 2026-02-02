@@ -1,11 +1,15 @@
 import asyncio
 import hashlib
+import io
 import json
 import logging
 import os
 import re
 import time
 import uuid
+from pathlib import Path
+
+from lxml import etree
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -34,6 +38,7 @@ CACHE_FILE = os.path.join(DATA_DIR, "playlist_cache.m3u")
 API_CACHE_FILE = os.path.join(DATA_DIR, "api_cache.json")
 PROGRESS_FILE = os.path.join(DATA_DIR, "refresh_progress.json")
 CATEGORIES_FILE = os.path.join(DATA_DIR, "categories.json")
+EPG_CACHE_FILE = os.path.join(DATA_DIR, "epg_cache.xml")
 
 # Templates
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
@@ -401,6 +406,14 @@ _stream_map_lock = asyncio.Lock()
 # Background task reference
 _background_task: Optional[asyncio.Task] = None
 
+# EPG cache - stores merged XMLTV data
+_epg_cache = {
+    "data": None,  # bytes of merged XMLTV
+    "last_refresh": None,
+    "refresh_in_progress": False,
+}
+_epg_cache_lock = asyncio.Lock()
+
 
 def save_refresh_progress(progress_data):
     """Save refresh progress to file for cross-worker visibility"""
@@ -553,6 +566,180 @@ def is_cache_valid():
         return age < get_cache_ttl()
     except (ValueError, TypeError):
         return False
+
+
+# ============================================
+# EPG CACHING SYSTEM
+# ============================================
+
+
+def get_epg_cache_ttl():
+    """Get EPG cache TTL from config (in seconds). Defaults to 6 hours."""
+    config = load_config()
+    return config.get("options", {}).get("epg_cache_ttl", 21600)  # Default: 6 hours
+
+
+def is_epg_cache_valid():
+    """Check if EPG cache is still valid based on TTL"""
+    last_refresh = _epg_cache.get("last_refresh")
+
+    if not last_refresh or _epg_cache.get("data") is None:
+        return False
+
+    try:
+        last_time = datetime.fromisoformat(last_refresh)
+        age = (datetime.now() - last_time).total_seconds()
+        return age < get_epg_cache_ttl()
+    except (ValueError, TypeError):
+        return False
+
+
+def load_epg_cache_from_disk():
+    """Load EPG cache from disk on startup"""
+    global _epg_cache
+    if os.path.exists(EPG_CACHE_FILE):
+        try:
+            with open(EPG_CACHE_FILE, "rb") as f:
+                _epg_cache["data"] = f.read()
+            # Load metadata from a companion JSON file
+            meta_file = EPG_CACHE_FILE + ".meta"
+            if os.path.exists(meta_file):
+                with open(meta_file) as f:
+                    meta = json.load(f)
+                    _epg_cache["last_refresh"] = meta.get("last_refresh")
+            logger.info(f"Loaded EPG cache from disk. Last refresh: {_epg_cache.get('last_refresh', 'Unknown')}")
+        except Exception as e:
+            logger.error(f"Failed to load EPG cache from disk: {e}")
+
+
+def save_epg_cache_to_disk():
+    """Save EPG cache to disk"""
+    try:
+        if _epg_cache.get("data"):
+            os.makedirs(os.path.dirname(EPG_CACHE_FILE), exist_ok=True)
+            with open(EPG_CACHE_FILE, "wb") as f:
+                f.write(_epg_cache["data"])
+            # Save metadata to a companion JSON file
+            meta_file = EPG_CACHE_FILE + ".meta"
+            with open(meta_file, "w") as f:
+                json.dump({"last_refresh": _epg_cache.get("last_refresh")}, f)
+            logger.info(f"EPG cache saved to disk at {datetime.now().isoformat()}")
+    except Exception as e:
+        logger.error(f"Failed to save EPG cache to disk: {e}")
+
+
+async def fetch_epg_from_source(source: dict) -> bytes | None:
+    """Fetch XMLTV data from a single source."""
+    host = source["host"].rstrip("/")
+    url = f"{host}/xmltv.php"
+    params = {"username": source["username"], "password": source["password"]}
+    
+    try:
+        async with httpx.AsyncClient(
+            headers=HEADERS,
+            timeout=httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0),
+            follow_redirects=True,
+        ) as client:
+            response = await client.get(url, params=params)
+            if response.status_code == 200:
+                logger.info(f"Fetched EPG from source '{source.get('name', source['id'])}': {len(response.content)} bytes")
+                return response.content
+            else:
+                logger.warning(f"Failed to fetch EPG from source '{source.get('name', source['id'])}': HTTP {response.status_code}")
+    except Exception as e:
+        logger.error(f"Error fetching EPG from source '{source.get('name', source['id'])}': {e}")
+    
+    return None
+
+
+async def refresh_epg_cache():
+    """Fetch and merge EPG from all enabled sources."""
+    global _epg_cache
+    
+    async with _epg_cache_lock:
+        if _epg_cache.get("refresh_in_progress"):
+            logger.info("EPG refresh already in progress, skipping")
+            return
+        _epg_cache["refresh_in_progress"] = True
+    
+    try:
+        config = load_config()
+        enabled_sources = [s for s in config.get("sources", []) if s.get("enabled", True)]
+        
+        if not enabled_sources:
+            logger.warning("No enabled sources for EPG refresh")
+            return
+        
+        logger.info(f"Starting EPG refresh from {len(enabled_sources)} source(s)")
+        
+        # Fetch EPG from all sources in parallel
+        tasks = [fetch_epg_from_source(source) for source in enabled_sources]
+        results = await asyncio.gather(*tasks)
+        
+        # Create merged XMLTV document
+        merged_root = etree.Element("tv", attrib={"generator-info-name": "XtreamFilter Merged EPG"})
+        
+        for source, epg_data in zip(enabled_sources, results):
+            if epg_data is None:
+                continue
+            
+            source_id = source.get("id", "unknown")
+            
+            try:
+                # Parse the XMLTV data
+                parser = etree.XMLParser(recover=True)  # Recover from malformed XML
+                tree = etree.parse(io.BytesIO(epg_data), parser)
+                root = tree.getroot()
+                
+                # Process channel elements - prefix the ID with source_id and normalize to lowercase
+                for channel in root.findall("channel"):
+                    original_id = channel.get("id", "")
+                    if original_id:
+                        # Prefix the channel ID with source_id and normalize to lowercase for consistent matching
+                        new_id = f"{source_id}_{original_id}".lower()
+                        channel.set("id", new_id)
+                    merged_root.append(channel)
+                
+                # Process programme elements - prefix the channel reference and normalize to lowercase
+                for programme in root.findall("programme"):
+                    original_channel = programme.get("channel", "")
+                    if original_channel:
+                        # Prefix the channel reference with source_id and normalize to lowercase
+                        new_channel = f"{source_id}_{original_channel}".lower()
+                        programme.set("channel", new_channel)
+                    merged_root.append(programme)
+                
+                logger.info(f"Merged EPG from source '{source.get('name', source_id)}': "
+                           f"{len(root.findall('channel'))} channels, {len(root.findall('programme'))} programmes")
+                
+            except Exception as e:
+                logger.error(f"Error parsing EPG from source '{source.get('name', source_id)}': {e}")
+                continue
+        
+        # Serialize the merged document
+        merged_data = etree.tostring(
+            merged_root,
+            encoding="UTF-8",
+            xml_declaration=True,
+            pretty_print=False
+        )
+        
+        # Update cache
+        async with _epg_cache_lock:
+            _epg_cache["data"] = merged_data
+            _epg_cache["last_refresh"] = datetime.now().isoformat()
+        
+        # Save to disk
+        save_epg_cache_to_disk()
+        
+        logger.info(f"EPG refresh complete. Merged {len(merged_root.findall('channel'))} channels, "
+                   f"{len(merged_root.findall('programme'))} programmes. Size: {len(merged_data)} bytes")
+        
+    except Exception as e:
+        logger.error(f"EPG refresh failed: {e}")
+    finally:
+        async with _epg_cache_lock:
+            _epg_cache["refresh_in_progress"] = False
 
 
 def get_cached(key, source_id=None):
@@ -1708,6 +1895,10 @@ def generate_m3u(config, request: Request, use_virtual_ids=True):
                 cat_id = str(stream.get("category_id", ""))
                 group = cat_map.get(cat_id, "Unknown")
                 epg_id = stream.get("epg_channel_id", "")
+                
+                # Prefix EPG ID with source_id to match merged XMLTV (lowercase for consistent matching)
+                if epg_id:
+                    epg_id = f"{source_id}_{epg_id}".lower()
 
                 if not should_include(group, live_group_filters):
                     stats["excluded"] += 1
@@ -1792,6 +1983,118 @@ def generate_m3u(config, request: Request, use_virtual_ids=True):
     return "\n".join(lines)
 
 
+def generate_m3u_for_source(source: dict, request: Request, source_route: str):
+    """Generate filtered M3U playlist for a single source with direct stream URLs."""
+    source_id = source.get("id", "default")
+    prefix = source.get("prefix", "")
+    filters = source.get("filters", {})
+    
+    server_url = str(request.base_url).rstrip("/")
+    stream_base = f"/{source_route}"
+
+    lines = ["#EXTM3U"]
+    stats = {"live": 0, "vod": 0, "series": 0, "excluded": 0}
+
+    # Live TV
+    live_filters = filters.get("live", {"groups": [], "channels": []})
+    live_group_filters = live_filters.get("groups", [])
+    live_channel_filters = live_filters.get("channels", [])
+
+    categories = get_cached("live_categories", source_id)
+    cat_map = build_category_map(categories)
+    streams = get_cached("live_streams", source_id)
+
+    for stream in streams:
+        stream_id = stream.get("stream_id")
+        name = stream.get("name", "Unknown")
+        icon = stream.get("stream_icon", "")
+        cat_id = str(stream.get("category_id", ""))
+        group = cat_map.get(cat_id, "Unknown")
+        epg_id = stream.get("epg_channel_id", "")
+        
+        # Prefix EPG ID with source_id to match XMLTV (lowercase for consistent matching)
+        if epg_id:
+            epg_id = f"{source_id}_{epg_id}".lower()
+
+        if not should_include(group, live_group_filters):
+            stats["excluded"] += 1
+            continue
+
+        if not should_include(name, live_channel_filters):
+            stats["excluded"] += 1
+            continue
+
+        display_group = f"{prefix}{group}" if prefix else group
+        stream_url = f"{server_url}{stream_base}/user/pass/{stream_id}.ts"
+        lines.append(f'#EXTINF:-1 tvg-id="{epg_id}" tvg-logo="{icon}" group-title="{display_group}",{name}')
+        lines.append(stream_url)
+        stats["live"] += 1
+
+    # VOD
+    vod_filters = filters.get("vod", {"groups": [], "channels": []})
+    vod_group_filters = vod_filters.get("groups", [])
+    vod_channel_filters = vod_filters.get("channels", [])
+
+    vod_categories = get_cached("vod_categories", source_id)
+    vod_cat_map = build_category_map(vod_categories)
+    vod_streams = get_cached("vod_streams", source_id)
+
+    for vod in vod_streams:
+        stream_id = vod.get("stream_id")
+        name = vod.get("name", "Unknown")
+        icon = vod.get("stream_icon", "")
+        cat_id = str(vod.get("category_id", ""))
+        group = vod_cat_map.get(cat_id, "Movies")
+        extension = vod.get("container_extension", "mp4")
+
+        if not should_include(group, vod_group_filters):
+            stats["excluded"] += 1
+            continue
+
+        if not should_include(name, vod_channel_filters):
+            stats["excluded"] += 1
+            continue
+
+        display_group = f"{prefix}{group}" if prefix else group
+        stream_url = f"{server_url}{stream_base}/movie/user/pass/{stream_id}.{extension}"
+        lines.append(f'#EXTINF:-1 tvg-logo="{icon}" group-title="{display_group}",{name}')
+        lines.append(stream_url)
+        stats["vod"] += 1
+
+    # Series
+    series_filters = filters.get("series", {"groups": [], "channels": []})
+    series_group_filters = series_filters.get("groups", [])
+    series_channel_filters = series_filters.get("channels", [])
+
+    series_categories = get_cached("series_categories", source_id)
+    series_cat_map = build_category_map(series_categories)
+    all_series = get_cached("series", source_id)
+
+    for series in all_series:
+        series_name = series.get("name", "Unknown")
+        series_icon = series.get("cover", "")
+        cat_id = str(series.get("category_id", ""))
+        group = series_cat_map.get(cat_id, "Series")
+
+        if not should_include(group, series_group_filters):
+            stats["excluded"] += 1
+            continue
+
+        if not should_include(series_name, series_channel_filters):
+            stats["excluded"] += 1
+            continue
+
+        display_group = f"{prefix}{group}" if prefix else group
+        lines.append(f'#EXTINF:-1 tvg-logo="{series_icon}" group-title="{display_group}",{series_name}')
+        lines.append("# Series - use Xtream API for episodes")
+        stats["series"] += 1
+
+    stats_line = f"# Content: {stats['live']} live, {stats['vod']} movies, {stats['series']} series | {stats['excluded']} excluded | Source: {source.get('name', source_id)}"
+    lines.insert(1, stats_line)
+
+    return "\n".join(lines)
+
+
 # ============================================
 # FASTAPI APPLICATION
 # ============================================
@@ -1805,6 +2108,7 @@ async def lifespan(app: FastAPI):
     # Startup
     os.makedirs(DATA_DIR, exist_ok=True)
     load_cache_from_disk()
+    load_epg_cache_from_disk()
     
     # Start background refresh task
     _background_task = asyncio.create_task(background_refresh_loop())
@@ -1813,6 +2117,11 @@ async def lifespan(app: FastAPI):
     if not is_cache_valid():
         logger.info("Cache is empty or invalid, triggering initial refresh...")
         asyncio.create_task(refresh_cache())
+    
+    # If EPG cache is empty or invalid, trigger EPG refresh
+    if not is_epg_cache_valid():
+        logger.info("EPG cache is empty or invalid, triggering initial EPG refresh...")
+        asyncio.create_task(refresh_epg_cache())
     
     yield
     
@@ -2989,6 +3298,10 @@ async def player_api_merged(request: Request):
                             stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
                             stream_copy["category_id"] = virtual_cat_id
                             stream_copy["category_ids"] = [int(virtual_cat_id)]
+                            # Prefix epg_channel_id to match XMLTV channel IDs (lowercase for consistent matching)
+                            epg_id = stream.get("epg_channel_id", "")
+                            if epg_id:
+                                stream_copy["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
                             result.append(stream_copy)
                     
                     # Also add to custom categories if applicable
@@ -3000,6 +3313,10 @@ async def player_api_merged(request: Request):
                             stream_copy["stream_id"] = encode_virtual_id(idx, stream.get("stream_id", 0))
                             stream_copy["category_id"] = custom_cat_id
                             stream_copy["category_ids"] = [int(custom_cat_id)]
+                            # Prefix epg_channel_id to match XMLTV channel IDs (lowercase for consistent matching)
+                            epg_id = stream.get("epg_channel_id", "")
+                            if epg_id:
+                                stream_copy["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
                             result.append(stream_copy)
             return result
 
@@ -3323,7 +3640,12 @@ async def player_api_source(source_route: str, request: Request):
                 group_name = cat_map.get(cat_id, "")
                 channel_name = stream.get("name", "")
                 if should_include(group_name, group_filters) and should_include(channel_name, channel_filters):
-                    result.append(stream)
+                    stream_copy = stream.copy()
+                    # Prefix epg_channel_id to match XMLTV channel IDs (lowercase for consistent matching)
+                    epg_id = stream.get("epg_channel_id", "")
+                    if epg_id:
+                        stream_copy["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
+                    result.append(stream_copy)
             return result
 
         elif action == "get_vod_streams":
@@ -3381,6 +3703,113 @@ async def player_api_source(source_route: str, request: Request):
         return JSONResponse({"error": "Upstream server timeout"}, status_code=504)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# Per-source M3U playlist routes
+@app.get("/{source_route}/playlist.m3u")
+@app.get("/{source_route}/get.php")
+async def playlist_source(source_route: str, request: Request):
+    """Serve filtered M3U playlist for a specific source."""
+    if source_route in ("full", "live", "movie", "series", "api", "static", "merged"):
+        return Response(content="Not found", status_code=404)
+    
+    source = get_source_by_route(source_route)
+    if not source:
+        return JSONResponse({"error": f"Source route '{source_route}' not found"}, status_code=404)
+    
+    # Build a config with only this source
+    source_id = source.get("id")
+    single_source_config = {
+        "sources": [source],
+        "content_types": {"live": True, "vod": True, "series": True},
+    }
+    
+    # Generate M3U with source-relative URLs (no virtual IDs needed for single source)
+    m3u_content = generate_m3u_for_source(source, request, source_route)
+    
+    return Response(
+        content=m3u_content,
+        media_type="audio/x-mpegurl",
+        headers={"Content-Disposition": f'attachment; filename="{source_route}_playlist.m3u"', "Cache-Control": "no-cache"},
+    )
+
+
+# Per-source XMLTV/EPG routes
+@app.get("/{source_route}/xmltv.php")
+@app.get("/{source_route}/epg.xml")
+async def xmltv_source(source_route: str, request: Request):
+    """Serve XMLTV EPG for a specific source from the cached EPG file.
+    
+    Reads from the merged EPG cache and filters only the channels/programmes 
+    belonging to the specific source (identified by their source_id prefix).
+    """
+    # Handle merged route - serve full merged EPG
+    if source_route == "merged":
+        return await get_merged_xmltv()
+    
+    if source_route in ("full", "live", "movie", "series", "api", "static"):
+        return Response(content="Not found", status_code=404)
+    
+    source = get_source_by_route(source_route)
+    if not source:
+        return JSONResponse({"error": f"Source route '{source_route}' not found"}, status_code=404)
+    
+    source_id = source.get("id")
+    source_prefix = f"{source_id}_"
+    
+    # Read from the cached EPG file
+    cache_path = Path("/data/epg_cache.xml")
+    if not cache_path.exists():
+        return Response(
+            content='<?xml version="1.0" encoding="UTF-8"?><tv generator-info-name="XtreamFilter"><!-- No EPG cache available --></tv>',
+            media_type="application/xml"
+        )
+    
+    try:
+        # Parse the cached EPG file
+        parser = etree.XMLParser(recover=True)
+        tree = etree.parse(str(cache_path), parser)
+        root = tree.getroot()
+        
+        # Create a new root for this source's EPG
+        new_root = etree.Element("tv", attrib={"generator-info-name": f"XtreamFilter - {source.get('name', source_id)}"})
+        
+        # Filter channel elements - only include those belonging to this source
+        for channel in root.findall("channel"):
+            channel_id = channel.get("id", "")
+            if channel_id.startswith(source_prefix):
+                # Create a copy of the channel element
+                new_channel = etree.Element("channel", id=channel_id)
+                for child in channel:
+                    new_channel.append(child)
+                new_root.append(new_channel)
+        
+        # Filter programme elements - only include those belonging to this source
+        for programme in root.findall("programme"):
+            programme_channel = programme.get("channel", "")
+            if programme_channel.startswith(source_prefix):
+                new_root.append(programme)
+        
+        # Log the count
+        channel_count = len(new_root.findall("channel"))
+        programme_count = len(new_root.findall("programme"))
+        logger.info(f"Serving EPG for source '{source_route}': {channel_count} channels, {programme_count} programmes")
+        
+        # Serialize
+        result = etree.tostring(new_root, encoding="UTF-8", xml_declaration=True, pretty_print=False)
+        
+        return Response(
+            content=result,
+            media_type="application/xml",
+            headers={"Content-Type": "application/xml; charset=utf-8"}
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing EPG for source '{source_route}': {e}")
+        return Response(
+            content='<?xml version="1.0" encoding="UTF-8"?><tv generator-info-name="XtreamFilter"><!-- EPG processing error --></tv>',
+            media_type="application/xml"
+        )
 
 
 # Per-source stream proxy routes
@@ -3510,7 +3939,16 @@ async def player_api_source_full(source_route: str, request: Request):
             return categories
 
         elif action == "get_live_streams":
-            return get_cached("live_streams", source_id)
+            streams = get_cached("live_streams", source_id)
+            result = []
+            for stream in streams:
+                stream_copy = stream.copy()
+                # Prefix epg_channel_id to match XMLTV channel IDs (lowercase for consistent matching)
+                epg_id = stream.get("epg_channel_id", "")
+                if epg_id:
+                    stream_copy["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
+                result.append(stream_copy)
+            return result
 
         elif action == "get_vod_streams":
             return get_cached("vod_streams", source_id)
@@ -3645,68 +4083,79 @@ async def proxy_series_stream(request: Request, username: str, password: str, st
 
 
 # ============================================
-# XMLTV PROXY
+# XMLTV MERGED EPG
 # ============================================
 
 
 @app.get("/xmltv.php")
 @app.get("/merged/xmltv.php")
-async def proxy_xmltv():
-    """Proxy EPG/XMLTV requests"""
-    config = load_config()
-    enabled_sources = [s for s in config.get("sources", []) if s.get("enabled", True)]
+async def get_merged_xmltv():
+    """Return merged EPG/XMLTV from all enabled sources with cached support."""
+    # Check if cache is valid
+    if is_epg_cache_valid() and _epg_cache.get("data"):
+        logger.debug("Serving EPG from cache")
+        return Response(
+            content=_epg_cache["data"],
+            media_type="application/xml",
+            headers={"Content-Type": "application/xml; charset=utf-8"}
+        )
     
-    # Fallback to legacy config
-    if not enabled_sources and config.get("xtream", {}).get("host"):
-        xtream = config["xtream"]
-        host = xtream["host"].rstrip("/")
-        
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as stream_client:
-                async with stream_client.stream(
-                    "GET",
-                    f"{host}/xmltv.php",
-                    params={"username": xtream["username"], "password": xtream["password"]},
-                    headers=HEADERS,
-                ) as response:
-                    async def generate():
-                        async for chunk in response.aiter_bytes(chunk_size=8192):
-                            yield chunk
-                    
-                    return StreamingResponse(
-                        generate(),
-                        status_code=response.status_code,
-                        media_type=response.headers.get("content-type", "application/xml"),
-                    )
-        except Exception as e:
-            return Response(content=f"<!-- Error: {e} -->", media_type="application/xml")
+    # Check if refresh is already in progress
+    if _epg_cache.get("refresh_in_progress"):
+        # Return stale cache if available while refresh is in progress
+        if _epg_cache.get("data"):
+            logger.info("EPG refresh in progress, serving stale cache")
+            return Response(
+                content=_epg_cache["data"],
+                media_type="application/xml",
+                headers={"Content-Type": "application/xml; charset=utf-8"}
+            )
+        else:
+            return Response(
+                content='<?xml version="1.0" encoding="UTF-8"?><tv generator-info-name="XtreamFilter"><!-- EPG refresh in progress --></tv>',
+                media_type="application/xml"
+            )
     
-    # Use first source for EPG
-    if enabled_sources:
-        source = enabled_sources[0]
-        host = source["host"].rstrip("/")
-        
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as stream_client:
-                async with stream_client.stream(
-                    "GET",
-                    f"{host}/xmltv.php",
-                    params={"username": source["username"], "password": source["password"]},
-                    headers=HEADERS,
-                ) as response:
-                    async def generate():
-                        async for chunk in response.aiter_bytes(chunk_size=8192):
-                            yield chunk
-                    
-                    return StreamingResponse(
-                        generate(),
-                        status_code=response.status_code,
-                        media_type=response.headers.get("content-type", "application/xml"),
-                    )
-        except Exception as e:
-            return Response(content=f"<!-- Error: {e} -->", media_type="application/xml")
+    # Trigger refresh and wait for it
+    await refresh_epg_cache()
     
-    return Response(content="<!-- No sources configured -->", media_type="application/xml")
+    # Return the freshly cached data
+    if _epg_cache.get("data"):
+        return Response(
+            content=_epg_cache["data"],
+            media_type="application/xml",
+            headers={"Content-Type": "application/xml; charset=utf-8"}
+        )
+    
+    return Response(
+        content='<?xml version="1.0" encoding="UTF-8"?><tv generator-info-name="XtreamFilter"><!-- No EPG data available --></tv>',
+        media_type="application/xml"
+    )
+
+
+@app.post("/api/epg/refresh")
+async def trigger_epg_refresh():
+    """Manually trigger EPG cache refresh."""
+    if _epg_cache.get("refresh_in_progress"):
+        return {"status": "already_in_progress", "message": "EPG refresh is already in progress"}
+    
+    # Trigger refresh in background
+    asyncio.create_task(refresh_epg_cache())
+    
+    return {"status": "started", "message": "EPG refresh started"}
+
+
+@app.get("/api/epg/status")
+async def get_epg_status():
+    """Get EPG cache status."""
+    return {
+        "cached": _epg_cache.get("data") is not None,
+        "last_refresh": _epg_cache.get("last_refresh"),
+        "refresh_in_progress": _epg_cache.get("refresh_in_progress", False),
+        "cache_valid": is_epg_cache_valid(),
+        "cache_ttl_seconds": get_epg_cache_ttl(),
+        "cache_size_bytes": len(_epg_cache.get("data", b"")) if _epg_cache.get("data") else 0
+    }
 
 
 # ============================================

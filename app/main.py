@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import httpx
+from rapidfuzz import fuzz
 from fastapi import FastAPI, Form, Query, Request
 from fastapi.responses import (
     HTMLResponse,
@@ -1461,29 +1463,33 @@ async def send_telegram_notification(category_name: str, new_items: list):
     if not new_items:
         return
     
+    # Group similar items to avoid duplicate listings
+    grouped = _group_new_items_for_notification(new_items)
+    unique_count = len(grouped)
+    
     try:
         client = await get_http_client()
         
-        # Collect items with valid covers
-        items_with_covers = [item for item in new_items if item.get("cover")]
+        # Collect unique grouped items with valid covers (one per group)
+        groups_with_covers = [g for g in grouped if g.get("cover")]
         
         # If we have multiple items with covers, use sendMediaGroup (album)
-        if len(items_with_covers) >= 2:
+        if len(groups_with_covers) >= 2:
             # Telegram allows max 10 media items per group
-            media_items = items_with_covers[:10]
+            media_items = groups_with_covers[:10]
             
             media = []
-            for i, item in enumerate(media_items):
+            for i, g in enumerate(media_items):
                 media_obj = {
                     "type": "photo",
-                    "media": item["cover"],
+                    "media": g["cover"],
                 }
                 # Only first item gets the caption
                 if i == 0:
                     # Telegram caption limit is 1024 chars - fit as many as possible
-                    caption = f"🆕 <b>{category_name}</b> - {len(new_items)} new item(s)\n\n"
-                    for it in new_items:
-                        line = f"• {it['name']}\n"
+                    caption = f"🆕 <b>{category_name}</b> - {unique_count} new unique title(s)\n\n"
+                    for gr in grouped:
+                        line = _format_grouped_item_line(gr)
                         if len(caption) + len(line) < 1000:
                             caption += line
                         else:
@@ -1505,22 +1511,22 @@ async def send_telegram_notification(category_name: str, new_items: list):
             # If media group fails, fallback to text message with all items
             if response.status_code != 200:
                 logger.warning(f"Telegram sendMediaGroup failed, falling back to text: {response.text}")
-                await _send_telegram_text_message(client, bot_token, chat_id, category_name, new_items)
+                await _send_telegram_text_message(client, bot_token, chat_id, category_name, grouped)
             else:
                 # If album succeeded but we couldn't fit all items in caption, send text message with full list
                 items_in_caption = caption.count("• ")
-                if items_in_caption < len(new_items):
-                    await _send_telegram_text_message(client, bot_token, chat_id, category_name, new_items)
+                if items_in_caption < unique_count:
+                    await _send_telegram_text_message(client, bot_token, chat_id, category_name, grouped)
         
         # Single item with cover: use sendPhoto
-        elif len(items_with_covers) == 1:
-            item = items_with_covers[0]
-            caption = f"🆕 <b>{category_name}</b>\n\n• {item['name']}"
+        elif len(groups_with_covers) == 1:
+            g = groups_with_covers[0]
+            caption = f"🆕 <b>{category_name}</b>\n\n" + _format_grouped_item_line(g).rstrip()
             
             url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
             payload = {
                 "chat_id": chat_id,
-                "photo": item["cover"],
+                "photo": g["cover"],
                 "caption": caption,
                 "parse_mode": "HTML"
             }
@@ -1529,38 +1535,42 @@ async def send_telegram_notification(category_name: str, new_items: list):
             # If photo fails (invalid URL), fallback to text message
             if response.status_code != 200:
                 logger.warning(f"Telegram sendPhoto failed, falling back to text: {response.text}")
-                await _send_telegram_text_message(client, bot_token, chat_id, category_name, new_items)
+                await _send_telegram_text_message(client, bot_token, chat_id, category_name, grouped)
         
         # No covers: send text message
         else:
-            await _send_telegram_text_message(client, bot_token, chat_id, category_name, new_items)
+            await _send_telegram_text_message(client, bot_token, chat_id, category_name, grouped)
         
-        logger.info(f"Telegram notification sent for category '{category_name}': {len(new_items)} new items")
+        logger.info(f"Telegram notification sent for category '{category_name}': {len(new_items)} new items ({unique_count} unique)")
         
     except Exception as e:
         logger.error(f"Failed to send Telegram notification: {e}")
 
 
-async def _send_telegram_text_message(client, bot_token: str, chat_id: str, category_name: str, new_items: list):
-    """Send a text-only Telegram message with item list, split into multiple messages if needed."""
+async def _send_telegram_text_message(client, bot_token: str, chat_id: str, category_name: str, grouped_items: list):
+    """Send a text-only Telegram message with grouped item list, split into multiple messages if needed.
+    
+    Args:
+        grouped_items: List of grouped dicts with 'name', 'sources' (list of source names), and optionally 'cover'.
+    """
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     
     # Telegram message limit is 4096 characters
     MAX_MESSAGE_LENGTH = 4096
     
+    unique_count = len(grouped_items)
+    
     # Build header for first message
-    header = f"🆕 <b>{category_name}</b> - {len(new_items)} new item(s)\n\n"
+    header = f"🆕 <b>{category_name}</b> - {unique_count} new unique title(s)\n\n"
     
     # Build all items
-    all_items = [f"• {item['name']}" for item in new_items]
+    all_lines = [_format_grouped_item_line(g) for g in grouped_items]
     
     # Split into messages respecting the character limit
     messages = []
     current_message = header
     
-    for i, item in enumerate(all_items):
-        item_line = item + "\n"
-        
+    for item_line in all_lines:
         # Check if adding this item would exceed the limit
         if len(current_message) + len(item_line) > MAX_MESSAGE_LENGTH - 50:  # Leave some margin
             # Save current message and start a new one
@@ -1583,6 +1593,72 @@ async def _send_telegram_text_message(client, bot_token: str, chat_id: str, cate
             "parse_mode": "HTML"
         }
         await client.post(url, json=payload)
+
+
+def _group_new_items_for_notification(new_items: list) -> list:
+    """Group new items by name similarity for notification deduplication.
+    
+    Args:
+        new_items: List of dicts with 'name' and optionally 'cover' keys
+    
+    Returns:
+        List of grouped dicts: {'name': str, 'cover': str, 'sources': [str], 'count': int}
+    """
+    if not new_items:
+        return []
+    
+    groups = []  # Each: {'normalized': str, 'name': str, 'cover': str, 'sources': []}
+    
+    # Load source configs to resolve source names
+    config = load_config()
+    sources_by_id = {s.get("id"): s.get("name", s.get("id", "?")) for s in config.get("sources", [])}
+    
+    for item in new_items:
+        item_name = item.get('name', '')
+        item_normalized = normalize_name(item_name)
+        source_name = sources_by_id.get(item.get('source_id', ''), '')
+        
+        best_group = None
+        best_score = 0
+        
+        for group in groups:
+            score = fuzz.token_sort_ratio(item_normalized, group['normalized'])
+            if score >= 85 and score > best_score:
+                best_score = score
+                best_group = group
+        
+        if best_group is not None:
+            if source_name and source_name not in best_group['sources']:
+                best_group['sources'].append(source_name)
+            if not best_group['cover'] and item.get('cover'):
+                best_group['cover'] = item['cover']
+            # Use shortest name as canonical
+            if len(item_name) < len(best_group['name']):
+                best_group['name'] = item_name
+        else:
+            groups.append({
+                'normalized': item_normalized,
+                'name': item_name,
+                'cover': item.get('cover', ''),
+                'sources': [source_name] if source_name else [],
+            })
+    
+    return [{'name': g['name'], 'cover': g['cover'], 'sources': g['sources'], 'count': len(g['sources'])} for g in groups]
+
+
+def _format_grouped_item_line(grouped_item: dict) -> str:
+    """Format a single grouped item as a text line for Telegram.
+    
+    If the item has multiple sources, shows: • Movie Name (Source A, Source B)
+    Otherwise just: • Movie Name
+    """
+    name = grouped_item.get('name', '')
+    sources = grouped_item.get('sources', [])
+    if len(sources) > 1:
+        return f"• {name} ({', '.join(sources)})\n"
+    elif len(sources) == 1:
+        return f"• {name} ({sources[0]})\n"
+    return f"• {name}\n"
 
 
 def get_item_details_from_cache(item_id: str, source_id: str, content_type: str) -> dict:
@@ -1730,7 +1806,7 @@ def _refresh_pattern_categories_internal():
         for item in matched_items:
             key = (item["id"], item["source_id"], item["content_type"])
             if key not in old_item_keys:
-                new_items.append({"name": item["name"], "cover": item["cover"]})
+                new_items.append({"name": item["name"], "cover": item["cover"], "source_id": item["source_id"]})
         
         # Check if notifications are enabled for this category
         if cat.get("notify_telegram", False) and new_items:
@@ -1825,6 +1901,110 @@ def should_include(value, filter_rules):
         return False
 
     return True
+
+
+def normalize_name(name: str) -> str:
+    """Normalize a title for fuzzy comparison.
+    
+    Strips common channel/source prefixes, language suffixes/tags, quality markers,
+    and accents so that e.g. 'A+ - Hijack (2023) (GB)', 'FR - Hijack (2023) (GB)',
+    and 'Hijack_fr' are all compared on their core title.
+    """
+    n = name.strip().lower()
+    # Strip accents for cross-language matching (e.g. Téhéran vs Tehran)
+    n = ''.join(c for c in unicodedata.normalize('NFD', n) if unicodedata.category(c) != 'Mn')
+    # Remove common channel/source prefixes like "FR - ", "A+ - ", "NF - ", "4K-FR - ", "D+ - ",
+    # "FR -4KL ", etc. These are typically short tags before the actual title.
+    # Strategy: repeatedly strip a leading short code (1-6 non-space chars) followed by " - " or "- "
+    for _ in range(3):  # Handle up to 3 chained prefixes
+        m = re.match(r'^(\S{1,6})\s*-\s+', n)
+        if not m:
+            # Also handle "XX -YYY " pattern (no space after dash, e.g. "FR -4KL Star Wars")
+            m = re.match(r'^(\S{1,6})\s+-\S+\s+', n)
+        if not m:
+            # Handle "XX: title" prefix (e.g. "FR: Industry")
+            m = re.match(r'^([A-Za-z0-9+]{1,4}):\s+', n)
+        if m:
+            n = n[m.end():]
+        else:
+            break
+    # Strip trailing language suffixes like "_fr", "-fr", "_en", "_vost"
+    n = re.sub(r'[_-](fr|en|de|es|it|pt|nl|pl|ar|tr|jp|kr|gb|us|br|as|vost|vostfr|multi)\s*$', '', n)
+    # Remove common suffixes/tags in parentheses or brackets
+    n = re.sub(r'\s*[\(\[][^)\]]*[\)\]]\s*', ' ', n)
+    # Remove trailing standalone language/region codes and compound codes (e.g. "Title FR", "Title FR-EN")
+    n = re.sub(r'\s+(?:(?:fr|en|de|es|it|pt|nl|pl)(?:-(?:fr|en|de|es|it|pt|nl|pl))?)\s*$', '', n)
+    # Remove common quality / codec / language tags
+    n = re.sub(r'\b(4k|uhd|fhd|hd|sd|hdr|hdr10|dolby|atmos|hevc|h\.?265|h\.?264|x264|x265|bluray|blu-ray|webrip|web-dl|remux|multi|vf|vo|vost|vostfr|french|english|truefrench)\b', '', n, flags=re.IGNORECASE)
+    # Collapse whitespace
+    n = re.sub(r'\s+', ' ', n).strip()
+    # Remove leading/trailing punctuation like " -" or "| "
+    n = re.sub(r'^[\s\-\|\.:]+', '', n)
+    n = re.sub(r'[\s\-\|\.:]+$', '', n)
+    return n
+
+
+def group_similar_items(items: list, threshold: int = 85) -> list:
+    """Group items with similar names using fuzzy matching.
+    
+    Args:
+        items: List of item dicts (must have 'name' key)
+        threshold: Minimum similarity ratio (0-100) for grouping
+    
+    Returns:
+        List of group dicts: {
+            'name': canonical name (shortest variant),
+            'icon': best cover (first non-empty),
+            'items': [original items],
+            'count': number of items in group
+        }
+    """
+    if not items:
+        return []
+    
+    groups = []  # Each group: {'normalized': str, 'name': str, 'icon': str, 'items': []}
+    
+    for item in items:
+        item_name = item.get('name', '')
+        item_normalized = normalize_name(item_name)
+        
+        best_group = None
+        best_score = 0
+        
+        # Compare against existing groups
+        for group in groups:
+            score = fuzz.token_sort_ratio(item_normalized, group['normalized'])
+            if score >= threshold and score > best_score:
+                best_score = score
+                best_group = group
+        
+        if best_group is not None:
+            best_group['items'].append(item)
+            # Use shortest name as canonical (usually the cleanest)
+            if len(item_name) < len(best_group['name']):
+                best_group['name'] = item_name
+            # Use first non-empty icon
+            if not best_group['icon'] and item.get('icon'):
+                best_group['icon'] = item['icon']
+        else:
+            groups.append({
+                'normalized': item_normalized,
+                'name': item_name,
+                'icon': item.get('icon', ''),
+                'items': [item],
+            })
+    
+    # Build result without the internal 'normalized' key
+    result = []
+    for g in groups:
+        result.append({
+            'name': g['name'],
+            'icon': g['icon'],
+            'items': g['items'],
+            'count': len(g['items']),
+        })
+    
+    return result
 
 
 def build_category_map(categories):
@@ -2885,20 +3065,37 @@ async def api_browse(
     else:
         items.sort(key=lambda x: (x["group"].lower(), x["name"].lower()))
 
-    start = (page - 1) * per_page
-    end = start + per_page
-    paginated = items[start:end]
-    
-    # Add category membership only to paginated items (fast lookup)
-    for item in paginated:
-        key = (type, item["id"], item["source_id"])
-        item["categories"] = category_membership.get(key, [])
+    # Group similar items when browsing a category (duplicates across sources/groups)
+    grouped = False
+    if category_id:
+        grouped_items = group_similar_items(items, threshold=85)
+        # Enrich each sub-item with category membership
+        for gi in grouped_items:
+            for sub in gi["items"]:
+                key = (type, sub["id"], sub["source_id"])
+                sub["categories"] = category_membership.get(key, [])
+        total = len(grouped_items)
+        grouped = True
+        
+        start = (page - 1) * per_page
+        end = start + per_page
+        paginated = grouped_items[start:end]
+    else:
+        start = (page - 1) * per_page
+        end = start + per_page
+        paginated = items[start:end]
+        
+        # Add category membership only to paginated items (fast lookup)
+        for item in paginated:
+            key = (type, item["id"], item["source_id"])
+            item["categories"] = category_membership.get(key, [])
 
     groups_list = [{"name": g, "count": c} for g, c in sorted(group_counts.items())]
     sources_list = [{"id": sid, "name": sname} for sid, sname in sorted(source_set.items(), key=lambda x: x[1])]
 
     return {
         "items": paginated,
+        "grouped": grouped,
         "groups": groups_list,
         "sources": sources_list,
         "total": total,

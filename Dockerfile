@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Install dependencies
 # FastAPI with uvicorn for async support, httpx for async HTTP client, lxml for XML parsing
-RUN pip install --no-cache-dir fastapi uvicorn[standard] httpx jinja2 python-multipart lxml
+RUN pip install --no-cache-dir fastapi uvicorn[standard] httpx jinja2 python-multipart lxml rapidfuzz
 
 # Copy application
 COPY app/ /app/

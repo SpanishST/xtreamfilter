@@ -137,6 +137,23 @@
         .toast-success { background: linear-gradient(135deg, #2ed573, #1abc9c); color: #000; font-weight: 500; }
         .toast-info { background: rgba(0, 212, 255, 0.9); color: #000; font-weight: 500; }
         .toast-error { background: rgba(255, 71, 87, 0.9); color: #fff; font-weight: 500; }
+        /* Grouped items (category view) */
+        .sources-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 0.7em; padding: 3px 8px; border-radius: 4px; background: rgba(0, 212, 255, 0.15); color: #00d4ff; cursor: pointer; margin-left: 4px; }
+        .sources-toggle { display: flex; align-items: center; justify-content: center; padding: 6px; cursor: pointer; border-top: 1px solid rgba(255, 255, 255, 0.05); color: #888; font-size: 0.8em; transition: all 0.2s; user-select: none; }
+        .sources-toggle:hover { background: rgba(255, 255, 255, 0.05); color: #00d4ff; }
+        .sources-toggle .arrow { display: inline-block; transition: transform 0.2s; margin-right: 4px; }
+        .sources-toggle.expanded .arrow { transform: rotate(180deg); }
+        .sources-list { display: none; border-top: 1px solid rgba(255, 255, 255, 0.05); background: rgba(0, 0, 0, 0.2); }
+        .sources-list.show { display: block; }
+        .source-row { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.03); font-size: 0.8em; }
+        .source-row:last-child { border-bottom: none; }
+        .source-row .source-row-name { color: #ccc; word-break: break-word; line-height: 1.3; }
+        .source-row .source-row-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+        .source-row .source-row-group { color: #888; font-size: 0.9em; background: rgba(255, 255, 255, 0.05); padding: 2px 6px; border-radius: 3px; }
+        .source-row .source-row-actions { display: flex; gap: 4px; margin-left: auto; }
+        .source-row .source-row-cat-btn { width: 24px; height: 24px; border-radius: 50%; background: rgba(0, 0, 0, 0.4); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.9em; color: rgba(255, 255, 255, 0.5); transition: all 0.2s; }
+        .source-row .source-row-cat-btn:hover { color: #00d4ff; background: rgba(0, 0, 0, 0.6); }
+        .source-row .source-row-cat-btn.has-categories { color: #2ed573; }
         @media (max-width: 768px) { .controls-row { flex-direction: column; } .control-group { width: 100%; } .content-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; } .form-row { flex-direction: column; } }
     </style>
 </head>
@@ -540,7 +557,7 @@
 
                 totalPages = data.total_pages;
                 currentPage = data.page;
-                renderContent(data.items);
+                renderContent(data.items, data.grouped);
                 updatePagination();
             } catch (error) {
                 // Ignore aborted requests (user clicked another category)
@@ -553,42 +570,126 @@
             }
         }
 
-        function renderContent(items) {
+        function renderContent(items, grouped) {
             const grid = document.getElementById('content-grid');
-            grid.innerHTML = items.map(item => {
-                const posterClass = contentType === 'live' ? 'card-poster-placeholder live' : 'card-poster-placeholder';
-                const poster = item.icon;
-                const placeholderIcon = contentType === 'live' ? '📡' : '🎬';
-                const imgClass = 'card-poster' + (contentType === 'live' ? ' card-poster-live' : '');
-                const posterHtml = poster
-                    ? '<img class="' + imgClass + '" src="' + poster + '" loading="lazy" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'"><div class="' + posterClass + '" style="display:none">' + placeholderIcon + '</div>'
-                    : '<div class="' + posterClass + '">' + placeholderIcon + '</div>';
-                const sourceIndex = sources.findIndex(s => s.id === item.source_id) + 1;
-                const sourceName = item.source_name || 'Unknown';
-                const isNew = item.added && isRecent(item.added, 7);
-                const itemCategories = getItemCategories(item);
-                const hasCats = itemCategories.length > 0;
-
-                let catBadges = '';
-                if (itemCategories.length > 0) {
-                    catBadges = '<div class="card-categories">' + itemCategories.slice(0, 3).map(c => '<span class="card-cat-badge">' + (iconMap[c.icon] || c.icon) + ' ' + c.name + '</span>').join('') + '</div>';
+            grid.innerHTML = items.map((item, idx) => {
+                if (grouped && item.count > 1) {
+                    return renderGroupedCard(item, idx);
                 }
-
-                return '<div class="content-card">' +
-                    (isNew ? '<div class="new-badge">NEW</div>' : '') +
-                    '<button class="add-category-btn' + (hasCats ? ' has-categories' : '') + '" onclick="toggleCategoryDropdown(event, \'' + item.source_id + '\', \'' + item.id + '\', \'' + contentType + '\')">+</button>' +
-                    '<div class="category-dropdown" id="cat-dropdown-' + item.source_id + '-' + item.id + '"></div>' +
-                    posterHtml +
-                    '<div class="card-info">' +
-                    '<div class="card-title">' + escapeHtml(item.name) + '</div>' +
-                    '<div class="card-meta">' +
-                    '<span class="source-badge" data-color="' + (sourceIndex % 5 || 5) + '">' + escapeHtml(sourceName) + '</span>' +
-                    (item.group ? '<span class="card-group">' + escapeHtml(item.group) + '</span>' : '') +
-                    '</div>' +
-                    catBadges +
-                    (item.added ? '<div class="card-date">Added: ' + formatDate(item.added) + '</div>' : '') +
-                    '</div></div>';
+                // Single item (or non-grouped mode)
+                const single = (grouped && item.items) ? item.items[0] : item;
+                return renderSingleCard(single);
             }).join('');
+        }
+
+        function renderSingleCard(item) {
+            const posterClass = contentType === 'live' ? 'card-poster-placeholder live' : 'card-poster-placeholder';
+            const poster = item.icon;
+            const placeholderIcon = contentType === 'live' ? '📡' : '🎬';
+            const imgClass = 'card-poster' + (contentType === 'live' ? ' card-poster-live' : '');
+            const posterHtml = poster
+                ? '<img class="' + imgClass + '" src="' + poster + '" loading="lazy" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'"><div class="' + posterClass + '" style="display:none">' + placeholderIcon + '</div>'
+                : '<div class="' + posterClass + '">' + placeholderIcon + '</div>';
+            const sourceIndex = sources.findIndex(s => s.id === item.source_id) + 1;
+            const sourceName = item.source_name || 'Unknown';
+            const isNew = item.added && isRecent(item.added, 7);
+            const itemCategories = getItemCategories(item);
+            const hasCats = itemCategories.length > 0;
+
+            let catBadges = '';
+            if (itemCategories.length > 0) {
+                catBadges = '<div class="card-categories">' + itemCategories.slice(0, 3).map(c => '<span class="card-cat-badge">' + (iconMap[c.icon] || c.icon) + ' ' + c.name + '</span>').join('') + '</div>';
+            }
+
+            return '<div class="content-card">' +
+                (isNew ? '<div class="new-badge">NEW</div>' : '') +
+                '<button class="add-category-btn' + (hasCats ? ' has-categories' : '') + '" onclick="toggleCategoryDropdown(event, \'' + item.source_id + '\', \'' + item.id + '\', \'' + contentType + '\')">+</button>' +
+                '<div class="category-dropdown" id="cat-dropdown-' + item.source_id + '-' + item.id + '"></div>' +
+                posterHtml +
+                '<div class="card-info">' +
+                '<div class="card-title">' + escapeHtml(item.name) + '</div>' +
+                '<div class="card-meta">' +
+                '<span class="source-badge" data-color="' + (sourceIndex % 5 || 5) + '">' + escapeHtml(sourceName) + '</span>' +
+                (item.group ? '<span class="card-group">' + escapeHtml(item.group) + '</span>' : '') +
+                '</div>' +
+                catBadges +
+                (item.added ? '<div class="card-date">Added: ' + formatDate(item.added) + '</div>' : '') +
+                '</div></div>';
+        }
+
+        function renderGroupedCard(group, idx) {
+            const posterClass = contentType === 'live' ? 'card-poster-placeholder live' : 'card-poster-placeholder';
+            const poster = group.icon;
+            const placeholderIcon = contentType === 'live' ? '📡' : '🎬';
+            const imgClass = 'card-poster' + (contentType === 'live' ? ' card-poster-live' : '');
+            const posterHtml = poster
+                ? '<img class="' + imgClass + '" src="' + poster + '" loading="lazy" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'"><div class="' + posterClass + '" style="display:none">' + placeholderIcon + '</div>'
+                : '<div class="' + posterClass + '">' + placeholderIcon + '</div>';
+
+            // Collect categories from all sub-items (deduplicated)
+            const allCatIds = new Set();
+            const allCats = [];
+            group.items.forEach(sub => {
+                getItemCategories(sub).forEach(c => {
+                    if (!allCatIds.has(c.id)) { allCatIds.add(c.id); allCats.push(c); }
+                });
+            });
+            let catBadges = '';
+            if (allCats.length > 0) {
+                catBadges = '<div class="card-categories">' + allCats.slice(0, 3).map(c => '<span class="card-cat-badge">' + (iconMap[c.icon] || c.icon) + ' ' + c.name + '</span>').join('') + '</div>';
+            }
+
+            // Check if any sub-item is new
+            const isNew = group.items.some(sub => sub.added && isRecent(sub.added, 7));
+
+            // Build source rows for expand area
+            const sourceRows = group.items.map(sub => {
+                const si = sources.findIndex(s => s.id === sub.source_id) + 1;
+                const sName = sub.source_name || 'Unknown';
+                const subCats = getItemCategories(sub);
+                const subHasCats = subCats.length > 0;
+                return '<div class="source-row">' +
+                    '<div class="source-row-name">' + escapeHtml(sub.name) + '</div>' +
+                    '<div class="source-row-meta">' +
+                    '<span class="source-badge" data-color="' + (si % 5 || 5) + '">' + escapeHtml(sName) + '</span>' +
+                    (sub.group ? '<span class="source-row-group">' + escapeHtml(sub.group) + '</span>' : '') +
+                    '<span class="source-row-actions">' +
+                    '<button class="source-row-cat-btn' + (subHasCats ? ' has-categories' : '') + '" onclick="toggleCategoryDropdown(event, \'' + sub.source_id + '\', \'' + sub.id + '\', \'' + contentType + '\')">+</button>' +
+                    '<div class="category-dropdown" id="cat-dropdown-' + sub.source_id + '-' + sub.id + '" style="position:relative;top:0;right:0;"></div>' +
+                    '</span>' +
+                    '</div>' +
+                    '</div>';
+            }).join('');
+
+            const groupId = 'group-' + idx;
+
+            return '<div class="content-card">' +
+                (isNew ? '<div class="new-badge">NEW</div>' : '') +
+                posterHtml +
+                '<div class="card-info">' +
+                '<div class="card-title">' + escapeHtml(group.name) +
+                '<span class="sources-badge">' + group.count + ' sources</span>' +
+                '</div>' +
+                catBadges +
+                '</div>' +
+                '<div class="sources-toggle" onclick="toggleSourcesList(this, \'' + groupId + '\')">' +
+                '<span class="arrow">▼</span> Show ' + group.count + ' sources' +
+                '</div>' +
+                '<div class="sources-list" id="' + groupId + '">' +
+                sourceRows +
+                '</div>' +
+                '</div>';
+        }
+
+        function toggleSourcesList(toggleEl, groupId) {
+            const list = document.getElementById(groupId);
+            const isOpen = list.classList.contains('show');
+            list.classList.toggle('show');
+            toggleEl.classList.toggle('expanded');
+            toggleEl.querySelector('.arrow').textContent = isOpen ? '▼' : '▲';
+            const label = isOpen ? 'Show' : 'Hide';
+            const count = list.querySelectorAll('.source-row').length;
+            toggleEl.innerHTML = '<span class="arrow">' + (isOpen ? '▼' : '▲') + '</span> ' + label + ' ' + count + ' sources';
         }
 
         function getItemCategories(item) {

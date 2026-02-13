@@ -285,6 +285,7 @@
                             <div class="pattern-row">
                                 <select>
                                     <option value="contains">Contains</option>
+                                    <option value="not_contains">Does not contain</option>
                                     <option value="starts_with">Starts with</option>
                                     <option value="ends_with">Ends with</option>
                                     <option value="exact">Exact match</option>
@@ -754,9 +755,9 @@
         function renderPatterns(patterns) {
             const container = document.getElementById('patterns-container');
             if (patterns.length === 0) {
-                container.innerHTML = '<div class="pattern-row"><select><option value="contains">Contains</option><option value="starts_with">Starts with</option><option value="ends_with">Ends with</option><option value="exact">Exact match</option><option value="regex">Regex</option></select><input type="text" placeholder="e.g. 4K, Sport, Movie"><button onclick="removePattern(this)">X</button></div>';
+                container.innerHTML = '<div class="pattern-row"><select><option value="contains">Contains</option><option value="not_contains">Does not contain</option><option value="starts_with">Starts with</option><option value="ends_with">Ends with</option><option value="exact">Exact match</option><option value="regex">Regex</option></select><input type="text" placeholder="e.g. 4K, Sport, Movie"><button onclick="removePattern(this)">X</button></div>';
             } else {
-                container.innerHTML = patterns.map(p => '<div class="pattern-row"><select>' + ['contains', 'starts_with', 'ends_with', 'exact', 'regex'].map(m => '<option value="' + m + '"' + (p.match === m ? ' selected' : '') + '>' + m.replace('_', ' ').charAt(0).toUpperCase() + m.replace('_', ' ').slice(1) + '</option>').join('') + '</select><input type="text" value="' + escapeHtml(p.value) + '"><button onclick="removePattern(this)">X</button></div>').join('');
+                container.innerHTML = patterns.map(p => '<div class="pattern-row"><select>' + ['contains', 'not_contains', 'starts_with', 'ends_with', 'exact', 'regex'].map(m => '<option value="' + m + '"' + (p.match === m ? ' selected' : '') + '>' + {'contains':'Contains','not_contains':'Does not contain','starts_with':'Starts with','ends_with':'Ends with','exact':'Exact match','regex':'Regex'}[m] + '</option>').join('') + '</select><input type="text" value="' + escapeHtml(p.value) + '"><button onclick="removePattern(this)">X</button></div>').join('');
             }
         }
 
@@ -764,7 +765,7 @@
             const container = document.getElementById('patterns-container');
             const newRow = document.createElement('div');
             newRow.className = 'pattern-row';
-            newRow.innerHTML = '<select><option value="contains">Contains</option><option value="starts_with">Starts with</option><option value="ends_with">Ends with</option><option value="exact">Exact match</option><option value="regex">Regex</option></select><input type="text" placeholder="e.g. 4K, Sport, Movie"><button onclick="removePattern(this)">X</button>';
+            newRow.innerHTML = '<select><option value="contains">Contains</option><option value="not_contains">Does not contain</option><option value="starts_with">Starts with</option><option value="ends_with">Ends with</option><option value="exact">Exact match</option><option value="regex">Regex</option></select><input type="text" placeholder="e.g. 4K, Sport, Movie"><button onclick="removePattern(this)">X</button>';
             container.appendChild(newRow);
         }
 

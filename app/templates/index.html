@@ -676,7 +676,10 @@
 <body>
     <div class="container">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; flex-wrap: wrap; gap: 15px;">
-            <h1 style="margin-bottom: 0;">📺 XtreamFilter</h1>
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <h1 style="margin-bottom: 0;">📺 XtreamFilter</h1>
+                <span id="version-badge" style="display: none; font-size: 0.7em; padding: 3px 10px; border-radius: 12px; background: rgba(255,255,255,0.08); color: #888; cursor: default;"></span>
+            </div>
             <a href="/browse" style="display: inline-block; padding: 12px 25px; background: linear-gradient(135deg, #00d4ff, #0099cc); color: #000; font-weight: 600; border-radius: 8px; text-decoration: none; transition: all 0.3s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 5px 20px rgba(0, 212, 255, 0.4)';" onmouseout="this.style.transform='none'; this.style.boxShadow='none';">🔍 Browse Content</a>
         </div>
         
@@ -1121,6 +1124,7 @@
         // Load sources, filters and cache status on page load
         loadSources();
         loadCacheStatus();
+        checkVersion();
         
         // Refresh cache status every 30 seconds (when not actively refreshing)
         setInterval(() => {
@@ -2242,6 +2246,23 @@
             }
             
             statusEl.textContent = message;
+        }
+        function checkVersion() {
+            fetch('/api/version').then(r => r.json()).then(data => {
+                const badge = document.getElementById('version-badge');
+                if (!badge) return;
+                if (data.update_available) {
+                    badge.textContent = 'v' + data.current + ' → v' + data.latest;
+                    badge.style.background = 'rgba(255, 165, 0, 0.15)';
+                    badge.style.color = '#ffa500';
+                    badge.style.cursor = 'pointer';
+                    badge.title = 'Click to view release notes';
+                    badge.onclick = function() { window.open(data.release_url, '_blank'); };
+                } else {
+                    badge.textContent = 'v' + data.current;
+                }
+                badge.style.display = 'inline-block';
+            }).catch(() => {});
         }
     </script>
 </body>

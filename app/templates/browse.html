@@ -160,7 +160,10 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>Browse Content</h1>
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <h1>Browse Content</h1>
+                <span id="version-badge" style="display: none; font-size: 0.65em; padding: 3px 10px; border-radius: 12px; background: rgba(255,255,255,0.08); color: #888; cursor: default;"></span>
+            </div>
             <div class="header-nav"><a href="/" class="btn btn-secondary">Settings</a></div>
         </div>
         <div class="main-tabs">
@@ -965,6 +968,25 @@
         }
 
         loadGroups();
+
+        function checkVersion() {
+            fetch('/api/version').then(r => r.json()).then(data => {
+                const badge = document.getElementById('version-badge');
+                if (!badge) return;
+                if (data.update_available) {
+                    badge.textContent = 'v' + data.current + ' → v' + data.latest;
+                    badge.style.background = 'rgba(255, 165, 0, 0.15)';
+                    badge.style.color = '#ffa500';
+                    badge.style.cursor = 'pointer';
+                    badge.title = 'Click to view release notes';
+                    badge.onclick = function() { window.open(data.release_url, '_blank'); };
+                } else {
+                    badge.textContent = 'v' + data.current;
+                }
+                badge.style.display = 'inline-block';
+            }).catch(() => {});
+        }
+        checkVersion();
     </script>
 </body>
 </html>

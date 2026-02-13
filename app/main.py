@@ -33,6 +33,10 @@ from fastapi.templating import Jinja2Templates
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger(__name__)
 
+# Application version
+APP_VERSION = "0.2.7"
+GITHUB_REPO = "SpanishST/xtreamfilter"
+
 # Data directory - use environment variable or default to /data (Docker) or ./data (local)
 DATA_DIR = os.environ.get("DATA_DIR", "/data" if os.path.exists("/data") else "./data")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
@@ -52,6 +56,9 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Connection": "keep-alive",
 }
+
+# Cache for version check (avoid hitting GitHub API too often)
+_version_cache = {"latest": None, "checked_at": 0}
 
 # Stream chunk size for proxying
 # 1MB chunks work better for high-bitrate 4K streams
@@ -4838,6 +4845,50 @@ async def clear_cache():
 async def health():
     """Health check endpoint"""
     return {"status": "ok"}
+
+
+@app.get("/api/version")
+async def check_version():
+    """Check current version and whether a newer version is available on GitHub."""
+    import time as _time
+    now = _time.time()
+    # Cache for 1 hour to avoid hitting GitHub API too often
+    if _version_cache["latest"] and now - _version_cache["checked_at"] < 3600:
+        latest = _version_cache["latest"]
+        release_url = _version_cache.get("release_url", "")
+    else:
+        latest = None
+        release_url = ""
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                    headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "XtreamFilter"}
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    latest = data.get("tag_name", "").lstrip("v")
+                    release_url = data.get("html_url", "")
+                    _version_cache["latest"] = latest
+                    _version_cache["release_url"] = release_url
+                    _version_cache["checked_at"] = now
+        except Exception as e:
+            logger.warning(f"Failed to check for updates: {e}")
+
+    update_available = False
+    if latest:
+        try:
+            from packaging.version import Version
+            update_available = Version(latest) > Version(APP_VERSION)
+        except Exception:
+            update_available = latest != APP_VERSION
+
+    return {
+        "current": APP_VERSION,
+        "latest": latest,
+        "update_available": update_available,
+        "release_url": release_url,
+    }
 
 
 # ============================================

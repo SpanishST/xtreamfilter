@@ -1913,14 +1913,24 @@ def normalize_name(name: str) -> str:
     n = name.strip().lower()
     # Strip accents for cross-language matching (e.g. Téhéran vs Tehran)
     n = ''.join(c for c in unicodedata.normalize('NFD', n) if unicodedata.category(c) != 'Mn')
-    # Remove common channel/source prefixes like "FR - ", "A+ - ", "NF - ", "4K-FR - ", "D+ - ",
+    # Remove common channel/source prefixes like "FR - ", "A+ - ", "NF - ", "4K-FR - ", "4K-FR-HDR - ",
     # "FR -4KL ", etc. These are typically short tags before the actual title.
-    # Strategy: repeatedly strip a leading short code (1-6 non-space chars) followed by " - " or "- "
+    # Strategy: repeatedly strip a leading prefix followed by " - " or "- "
+    # Prefixes are either short (1-4 chars) or longer codes containing digits/+/non-alpha (up to 10 chars)
     for _ in range(3):  # Handle up to 3 chained prefixes
-        m = re.match(r'^(\S{1,6})\s*-\s+', n)
+        # Short prefix (any 1-4 chars): "FR - ", "NF - ", "A+ - ", "D+ - "
+        m = re.match(r'^(\S{1,4})\s*-\s+', n)
         if not m:
-            # Also handle "XX -YYY " pattern (no space after dash, e.g. "FR -4KL Star Wars")
-            m = re.match(r'^(\S{1,6})\s+-\S+\s+', n)
+            # Longer prefix containing at least one digit or '+' (e.g. "4K-FR-HDR - ", "4K-A+ - ")
+            m = re.match(r'^(\S*[\d+]\S*)\s*-\s+', n)
+            # Safety: only accept if prefix is <= 10 chars to avoid stripping title words
+            if m and len(m.group(1)) > 10:
+                m = None
+        if not m:
+            m = re.match(r'^(\S{1,4})\s+-\S+\s+', n)
+        if not m:
+            # Handle "XX: title" prefix (e.g. "FR: Industry")
+            m = re.match(r'^([A-Za-z0-9+]{1,4}):\s+', n)
         if not m:
             # Handle "XX: title" prefix (e.g. "FR: Industry")
             m = re.match(r'^([A-Za-z0-9+]{1,4}):\s+', n)
@@ -1935,7 +1945,10 @@ def normalize_name(name: str) -> str:
     # Remove trailing standalone language/region codes and compound codes (e.g. "Title FR", "Title FR-EN")
     n = re.sub(r'\s+(?:(?:fr|en|de|es|it|pt|nl|pl)(?:-(?:fr|en|de|es|it|pt|nl|pl))?)\s*$', '', n)
     # Remove common quality / codec / language tags
-    n = re.sub(r'\b(4k|uhd|fhd|hd|sd|hdr|hdr10|dolby|atmos|hevc|h\.?265|h\.?264|x264|x265|bluray|blu-ray|webrip|web-dl|remux|multi|vf|vo|vost|vostfr|french|english|truefrench)\b', '', n, flags=re.IGNORECASE)
+    n = re.sub(r'\b(4k|uhd|fhd|hd|sd|hdr|hdr10|dolby|atmos|hevc|h\.?265|h\.?264|x264|x265|bluray|blu-ray|webrip|web-dl|remux|multi|vf|vo|vost|vostfr|french|english|truefrench|cam|ts|md)\b', '', n, flags=re.IGNORECASE)
+    # Remove trailing "- YYYY" or standalone trailing YYYY year pattern
+    n = re.sub(r'\s*-\s*\d{4}\s*$', '', n)
+    n = re.sub(r'\s+\d{4}\s*$', '', n)
     # Collapse whitespace
     n = re.sub(r'\s+', ' ', n).strip()
     # Remove leading/trailing punctuation like " -" or "| "

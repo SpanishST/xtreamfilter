@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
 import unicodedata
 import uuid
@@ -1418,7 +1419,7 @@ _download_cart: list = []
 _download_task: Optional[asyncio.Task] = None
 _download_cancel_event: Optional[asyncio.Event] = None
 _download_current_item: Optional[dict] = None
-_download_progress: dict = {"bytes_downloaded": 0, "total_bytes": 0, "speed": 0}
+_download_progress: dict = {"bytes_downloaded": 0, "total_bytes": 0, "speed": 0, "paused": False, "pause_remaining": 0}
 
 
 def load_cart() -> list:
@@ -1452,6 +1453,13 @@ def get_download_path() -> str:
     return config.get("options", {}).get("download_path", "/data/downloads")
 
 
+def get_download_temp_path() -> str:
+    """Get the configured temporary download path.
+    Downloads go here first, then are moved to the final destination on completion."""
+    config = load_config()
+    return config.get("options", {}).get("download_temp_path", "/data/downloads/.tmp")
+
+
 def sanitize_filename(name: str) -> str:
     """Sanitize a string for use as a filename"""
     # Normalize unicode
@@ -1464,10 +1472,11 @@ def sanitize_filename(name: str) -> str:
     return name or "untitled"
 
 
-def build_download_filepath(item: dict) -> str:
-    """Build the destination file path for a download item"""
+def build_download_filepath(item: dict, ext_override: str = None) -> str:
+    """Build the destination file path for a download item.
+    If ext_override is provided, use that instead of the item's container_extension."""
     base_path = get_download_path()
-    ext = item.get("container_extension", "mp4")
+    ext = ext_override or item.get("container_extension", "mp4")
     name = sanitize_filename(item.get("name", "untitled"))
 
     if item.get("content_type") == "vod":
@@ -1490,8 +1499,44 @@ def build_download_filepath(item: dict) -> str:
         return os.path.join(base_path, f"{name}.{ext}")
 
 
+def _resolve_output_format(item_ext: str, allowed_formats: list) -> str:
+    """Resolve the correct file extension based on provider's allowed output formats.
+    
+    If the item's extension (e.g. mp4, mkv) is in the allowed list, use it as-is.
+    Otherwise, pick the best alternative from the allowed list.
+    Priority: ts > mp4 > mkv > m3u8 (ts is widely supported for Xtream downloads).
+    """
+    if not allowed_formats:
+        # No info from provider, keep original
+        return item_ext
+    
+    # Normalize
+    item_ext_lower = item_ext.lower()
+    allowed_lower = [f.lower().strip() for f in allowed_formats]
+    
+    if item_ext_lower in allowed_lower:
+        return item_ext  # Original extension is allowed
+    
+    # Pick the best alternative
+    preferred_order = ["ts", "mp4", "mkv", "m3u8"]
+    for pref in preferred_order:
+        if pref in allowed_lower:
+            logger.info(f"Format '{item_ext}' not in allowed formats {allowed_formats}, using '{pref}' instead")
+            return pref
+    
+    # Last resort: use the first allowed format
+    if allowed_lower:
+        fallback = allowed_lower[0]
+        logger.info(f"Format '{item_ext}' not in allowed formats {allowed_formats}, falling back to '{fallback}'")
+        return fallback
+    
+    return item_ext
+
+
 def build_upstream_url(item: dict) -> Optional[str]:
-    """Build the upstream URL for downloading an item"""
+    """Build the upstream URL for downloading an item.
+    Always uses the item's original container_extension — VOD/series files have
+    a fixed format on the server. allowed_output_formats only applies to live transcoding."""
     source = get_source_by_id(item.get("source_id", ""))
     if not source:
         return None
@@ -1509,10 +1554,138 @@ def build_upstream_url(item: dict) -> Optional[str]:
     return None
 
 
+def get_download_throttle_settings() -> dict:
+    """Get download throttle settings from config"""
+    config = load_config()
+    opts = config.get("options", {})
+    return {
+        "bandwidth_limit": opts.get("download_bandwidth_limit", 0),       # KB/s, 0 = unlimited
+        "pause_interval": opts.get("download_pause_interval", 0),         # seconds between pauses, 0 = disabled
+        "pause_duration": opts.get("download_pause_duration", 0),         # seconds to pause
+        "player_profile": opts.get("download_player_profile", "tivimate"),  # IPTV player to emulate
+    }
+
+
+# Predefined IPTV player header profiles
+# These mimic real players to avoid provider blocks (HTTP 551, etc.)
+PLAYER_PROFILES = {
+    "tivimate": {
+        "name": "TiviMate",
+        "headers": {
+            "User-Agent": "TiviMate/4.7.0 (Linux; Android 14) OkHttp/4.12.0",
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Connection": "keep-alive",
+        },
+    },
+    "smarters": {
+        "name": "IPTV Smarters Pro",
+        "headers": {
+            "User-Agent": "IPTVSmartersPro",
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Connection": "keep-alive",
+        },
+    },
+    "vlc": {
+        "name": "VLC Media Player",
+        "headers": {
+            "User-Agent": "VLC/3.0.20 LibVLC/3.0.20",
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Connection": "keep-alive",
+        },
+    },
+    "kodi": {
+        "name": "Kodi",
+        "headers": {
+            "User-Agent": "Kodi/21.0 (Linux; Android 14) Kodi_Home/21.0 ExoPlayerLib/2.19.1",
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Connection": "keep-alive",
+        },
+    },
+    "xciptv": {
+        "name": "XCIPTV Player",
+        "headers": {
+            "User-Agent": "xciptv/6.0.0 (Linux; Android 14) ExoPlayerLib/2.19.1",
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Connection": "keep-alive",
+        },
+    },
+    "ott_navigator": {
+        "name": "OTT Navigator",
+        "headers": {
+            "User-Agent": "OTT Navigator/1.7.1.3 (Linux; Android 14) ExoPlayerLib/2.19.1",
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Connection": "keep-alive",
+        },
+    },
+    "ffmpeg": {
+        "name": "FFmpeg / Lavf",
+        "headers": {
+            "User-Agent": "Lavf/60.16.100",
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Connection": "close",
+            "Icy-MetaData": "1",
+        },
+    },
+}
+
+
+def get_player_headers(profile_key: str = "tivimate") -> dict:
+    """Get the HTTP headers for a given IPTV player profile"""
+    profile = PLAYER_PROFILES.get(profile_key, PLAYER_PROFILES["tivimate"])
+    return dict(profile["headers"])
+
+
+async def _get_provider_info(source: dict) -> dict:
+    """Fetch provider info including connection slots and allowed output formats.
+    Returns dict with 'has_free_slot' (bool) and 'allowed_output_formats' (list)."""
+    result = {"has_free_slot": True, "allowed_output_formats": []}
+    try:
+        host = source["host"].rstrip("/")
+        params = {
+            "username": source["username"],
+            "password": source["password"],
+        }
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0), follow_redirects=True, headers={"Connection": "close"}) as client:
+            resp = await client.get(f"{host}/player_api.php", params=params)
+            if resp.status_code == 200:
+                data = resp.json()
+                ui = data.get("user_info", {})
+                active = int(ui.get("active_cons", 0))
+                max_cons = int(ui.get("max_connections", 1))
+                allowed = ui.get("allowed_output_formats", [])
+                if isinstance(allowed, str):
+                    allowed = [allowed]
+                logger.info(f"Provider {source.get('name', '')}: {active}/{max_cons} connections, allowed formats: {allowed}")
+                result["has_free_slot"] = active < max_cons
+                result["allowed_output_formats"] = allowed
+    except Exception as e:
+        logger.warning(f"Could not check provider info: {e}")
+    return result
+
+
+async def _check_provider_connections(source: dict) -> bool:
+    """Check if a provider has free connection slots (convenience wrapper)."""
+    info = await _get_provider_info(source)
+    return info["has_free_slot"]
+
+
 async def download_worker():
-    """Background worker that processes the download cart sequentially"""
+    """Background worker that processes the download cart sequentially.
+    Supports bandwidth throttling and periodic pauses to mimic a media player."""
     global _download_current_item, _download_progress, _download_cancel_event
     _download_cancel_event = asyncio.Event()
+
+    # Close the global keepalive HTTP client to free any persistent connections
+    # to the provider (Xtream-Codes counts keepalive connections as active)
+    await close_http_client()
+    logger.info("Closed global HTTP client to free provider connection slots")
 
     while True:
         # Find next queued item
@@ -1524,12 +1697,14 @@ async def download_worker():
         item = queued[0]
         item_id = item["id"]
         _download_current_item = item
-        _download_progress = {"bytes_downloaded": 0, "total_bytes": 0, "speed": 0}
+        _download_progress = {"bytes_downloaded": 0, "total_bytes": 0, "speed": 0, "paused": False, "pause_remaining": 0}
 
         # Update status
         item["status"] = "downloading"
         item["progress"] = 0
         save_cart()
+
+        source = get_source_by_id(item.get("source_id", ""))
 
         upstream_url = build_upstream_url(item)
         if not upstream_url:
@@ -1541,79 +1716,277 @@ async def download_worker():
         file_path = build_download_filepath(item)
         item["file_path"] = file_path
 
+        # Build temp file path — download here first, move to final path on completion
+        temp_dir = get_download_temp_path()
+        temp_filename = f"{item['id']}_{os.path.basename(file_path)}"
+        temp_path = os.path.join(temp_dir, temp_filename)
+
+        logger.info(f"Download URL: {upstream_url} -> {temp_path} (final: {file_path})")
+
         try:
-            # Create directory
+            # Create directories
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            os.makedirs(temp_dir, exist_ok=True)
+
+            # Read throttle settings at start of each file
+            throttle = get_download_throttle_settings()
+            bw_limit = throttle["bandwidth_limit"] * 1024  # convert KB/s to B/s
+            pause_interval = throttle["pause_interval"]
+            pause_duration = throttle["pause_duration"]
+            player_profile = throttle["player_profile"]
+
+            # Use a smaller chunk size when bandwidth is limited for finer control
+            chunk_size = min(64 * 1024, bw_limit) if bw_limit > 0 else 512 * 1024
+
+            # Use the selected IPTV player profile headers
+            player_headers = get_player_headers(player_profile)
+            # Use Connection: close to prevent keepalive from counting as active connection
+            player_headers["Connection"] = "close"
+            logger.info(f"Downloading with player profile '{player_profile}': {player_headers.get('User-Agent', '')}")
 
             timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
-            async with httpx.AsyncClient(headers=HEADERS, timeout=timeout, follow_redirects=True) as client:
-                async with client.stream("GET", upstream_url) as response:
-                    if response.status_code >= 400:
+
+            # Auto-retry logic for connection-limit errors (458, 429, 503)
+            max_retries = 5
+            retry_base_delay = 30  # seconds — start with 30s, then 60s, 90s, 120s, 150s
+            RETRYABLE_CODES = {429, 458, 503, 551}
+
+            for attempt in range(1, max_retries + 1):
+                # On retries, just wait with backoff then try again
+                # (Don't pre-check connections — with max_connections=1 providers,
+                #  the check itself counts as an active connection and creates a deadlock)
+                if attempt > 1:
+                    delay = retry_base_delay * attempt
+                    logger.info(f"Retry {attempt}/{max_retries}: waiting {delay}s before next attempt")
+                    _download_progress["paused"] = True
+                    _download_progress["pause_remaining"] = delay
+                    item["error"] = f"Retrying in {delay}s ({attempt}/{max_retries})"
+                    save_cart()
+                    remaining = delay
+                    while remaining > 0:
+                        if _download_cancel_event.is_set():
+                            item["status"] = "cancelled"
+                            item["error"] = "Cancelled by user"
+                            save_cart()
+                            _download_current_item = None
+                            _download_cancel_event.clear()
+                            return
+                        sleep_step = min(1.0, remaining)
+                        await asyncio.sleep(sleep_step)
+                        remaining -= sleep_step
+                        _download_progress["pause_remaining"] = round(remaining, 1)
+                    _download_progress["paused"] = False
+                    _download_progress["pause_remaining"] = 0
+                    item["error"] = None
+
+                async with httpx.AsyncClient(headers=player_headers, timeout=timeout, follow_redirects=True) as client:
+                    async with client.stream("GET", upstream_url) as response:
+                        if response.status_code in RETRYABLE_CODES and attempt < max_retries:
+                            delay = retry_base_delay * attempt
+                            error_msg = {
+                                458: "Max connections reached",
+                                429: "Rate limited",
+                                503: "Service unavailable",
+                                551: "Access denied by provider",
+                            }.get(response.status_code, f"HTTP {response.status_code}")
+                            logger.warning(f"Download blocked: HTTP {response.status_code} ({error_msg}) — retry {attempt}/{max_retries} in {delay}s")
+                            _download_progress["paused"] = True
+                            _download_progress["pause_remaining"] = delay
+                            item["error"] = f"{error_msg} — retrying in {delay}s ({attempt}/{max_retries})"
+                            save_cart()
+                            remaining = delay
+                            while remaining > 0:
+                                if _download_cancel_event.is_set():
+                                    item["status"] = "cancelled"
+                                    item["error"] = "Cancelled by user"
+                                    save_cart()
+                                    _download_current_item = None
+                                    _download_cancel_event.clear()
+                                    return
+                                sleep_step = min(1.0, remaining)
+                                await asyncio.sleep(sleep_step)
+                                remaining -= sleep_step
+                                _download_progress["pause_remaining"] = round(remaining, 1)
+                            _download_progress["paused"] = False
+                            _download_progress["pause_remaining"] = 0
+                            item["error"] = None
+                            continue  # retry the request
+
+                        if response.status_code >= 400:
+                            error_msg = {
+                                458: "Max connections reached (all retries exhausted)",
+                                429: "Rate limited (all retries exhausted)",
+                                503: "Service unavailable (all retries exhausted)",
+                                551: "Access denied by provider (possible IP temp-ban from too many attempts)",
+                            }.get(response.status_code, f"HTTP {response.status_code}")
+                            item["status"] = "failed"
+                            item["error"] = error_msg
+                            save_cart()
+                            # Clean up partial temp file
+                            try:
+                                if os.path.exists(temp_path):
+                                    os.remove(temp_path)
+                            except OSError:
+                                pass
+                            break  # break out of retry loop, continue to next item
+
+                        # Success — proceed with download
+                        item["error"] = None
+
+                        # Content-Range header may contain total size for 206 responses
+                        total = 0
+                        content_range = response.headers.get("content-range", "")
+                        if content_range and "/" in content_range:
+                            try:
+                                total = int(content_range.split("/")[-1])
+                            except (ValueError, IndexError):
+                                pass
+                        if not total:
+                            total = int(response.headers.get("content-length", 0))
+                        _download_progress["total_bytes"] = total
+                        downloaded = 0
+                        start_time = time.time()
+                        last_save = time.time()
+                        # Bandwidth throttle: track bytes in the current 1-second window
+                        window_start = time.time()
+                        window_bytes = 0
+                        # Pause timer: track when we last paused
+                        last_pause_time = time.time()
+
+                        with open(temp_path, "wb") as f:
+                            async for chunk in response.aiter_bytes(chunk_size=chunk_size):
+                                if _download_cancel_event.is_set():
+                                    item["status"] = "cancelled"
+                                    item["error"] = "Cancelled by user"
+                                    save_cart()
+                                    # Clean up partial temp file
+                                    try:
+                                        os.remove(temp_path)
+                                    except OSError:
+                                        pass
+                                    _download_current_item = None
+                                    _download_cancel_event.clear()
+                                    return  # Stop the worker entirely
+
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                window_bytes += len(chunk)
+                                elapsed = time.time() - start_time
+                                speed = downloaded / elapsed if elapsed > 0 else 0
+
+                                _download_progress["bytes_downloaded"] = downloaded
+                                _download_progress["speed"] = speed
+
+                                if total > 0:
+                                    item["progress"] = round((downloaded / total) * 100, 1)
+                                else:
+                                    item["progress"] = 0
+
+                                # Persist progress every 5 seconds
+                                if time.time() - last_save > 5:
+                                    save_cart()
+                                    last_save = time.time()
+
+                                # --- Bandwidth throttling ---
+                                if bw_limit > 0:
+                                    now = time.time()
+                                    window_elapsed = now - window_start
+                                    if window_bytes >= bw_limit:
+                                        # We've used up this second's budget, sleep the rest
+                                        sleep_time = max(0, 1.0 - window_elapsed)
+                                        if sleep_time > 0:
+                                            await asyncio.sleep(sleep_time)
+                                        window_start = time.time()
+                                        window_bytes = 0
+                                    elif window_elapsed >= 1.0:
+                                        # Window expired, reset
+                                        window_start = now
+                                        window_bytes = 0
+
+                                # --- Periodic pause (simulate player buffering) ---
+                                if pause_interval > 0 and pause_duration > 0:
+                                    now = time.time()
+                                    if now - last_pause_time >= pause_interval:
+                                        _download_progress["paused"] = True
+                                        _download_progress["pause_remaining"] = pause_duration
+                                        logger.info(f"Download throttle: pausing for {pause_duration}s (simulating player buffer)")
+                                        # Sleep in 1-second increments so cancel is responsive
+                                        remaining = pause_duration
+                                        while remaining > 0:
+                                            if _download_cancel_event.is_set():
+                                                break
+                                            sleep_step = min(1.0, remaining)
+                                            await asyncio.sleep(sleep_step)
+                                            remaining -= sleep_step
+                                            _download_progress["pause_remaining"] = round(remaining, 1)
+                                        _download_progress["paused"] = False
+                                        _download_progress["pause_remaining"] = 0
+                                        last_pause_time = time.time()
+                                        # Reset bandwidth window after pause
+                                        window_start = time.time()
+                                        window_bytes = 0
+
+                        # Download succeeded, break out of retry loop
+                        break
+
+            # Only mark completed if the download actually succeeded
+            if item.get("status") == "downloading":
+                # Move from temp to final destination
+                try:
+                    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                    shutil.move(temp_path, file_path)
+                    logger.info(f"Moved completed download: {temp_path} -> {file_path}")
+                except Exception as e:
+                    logger.error(f"Failed to move download to final path: {e}")
+                    # If move fails (e.g. cross-device), try copy+delete
+                    try:
+                        shutil.copy2(temp_path, file_path)
+                        os.remove(temp_path)
+                        logger.info(f"Copied completed download: {temp_path} -> {file_path}")
+                    except Exception as e2:
+                        logger.error(f"Failed to copy download to final path: {e2}")
                         item["status"] = "failed"
-                        item["error"] = f"HTTP {response.status_code}"
+                        item["error"] = f"Download OK but failed to move file: {e2}"
                         save_cart()
                         continue
 
-                    total = int(response.headers.get("content-length", 0))
-                    _download_progress["total_bytes"] = total
-                    downloaded = 0
-                    start_time = time.time()
-                    last_save = time.time()
+                item["status"] = "completed"
+                item["progress"] = 100
+                file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+                item["file_size"] = file_size
+                save_cart()
+                logger.info(f"Download completed: {item.get('name')} -> {file_path} ({file_size / 1024 / 1024:.1f} MB)")
 
-                    with open(file_path, "wb") as f:
-                        async for chunk in response.aiter_bytes(chunk_size=512 * 1024):
-                            if _download_cancel_event.is_set():
-                                item["status"] = "cancelled"
-                                item["error"] = "Cancelled by user"
-                                save_cart()
-                                # Clean up partial file
-                                try:
-                                    os.remove(file_path)
-                                except OSError:
-                                    pass
-                                _download_current_item = None
-                                _download_cancel_event.clear()
-                                return  # Stop the worker entirely
-
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            elapsed = time.time() - start_time
-                            speed = downloaded / elapsed if elapsed > 0 else 0
-
-                            _download_progress["bytes_downloaded"] = downloaded
-                            _download_progress["speed"] = speed
-
-                            if total > 0:
-                                item["progress"] = round((downloaded / total) * 100, 1)
-                            else:
-                                item["progress"] = 0
-
-                            # Persist progress every 5 seconds
-                            if time.time() - last_save > 5:
-                                save_cart()
-                                last_save = time.time()
-
-            item["status"] = "completed"
-            item["progress"] = 100
-            file_size = os.path.getsize(file_path) if os.path.exists(file_path) else downloaded
-            item["file_size"] = file_size
-            save_cart()
-            logger.info(f"Download completed: {item.get('name')} -> {file_path} ({file_size / 1024 / 1024:.1f} MB)")
+            # Pause between files if throttle is active
+            if pause_interval > 0 and pause_duration > 0:
+                logger.info(f"Download throttle: pausing {pause_duration}s between files")
+                _download_progress["paused"] = True
+                _download_progress["pause_remaining"] = pause_duration
+                remaining = pause_duration
+                while remaining > 0:
+                    if _download_cancel_event.is_set():
+                        break
+                    sleep_step = min(1.0, remaining)
+                    await asyncio.sleep(sleep_step)
+                    remaining -= sleep_step
+                    _download_progress["pause_remaining"] = round(remaining, 1)
+                _download_progress["paused"] = False
+                _download_progress["pause_remaining"] = 0
 
         except Exception as e:
             logger.error(f"Download error for {item.get('name')}: {e}")
             item["status"] = "failed"
             item["error"] = str(e)
             save_cart()
-            # Clean up partial file on error
+            # Clean up partial temp file on error
             try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
             except OSError:
                 pass
 
     _download_current_item = None
-    _download_progress = {"bytes_downloaded": 0, "total_bytes": 0, "speed": 0}
+    _download_progress = {"bytes_downloaded": 0, "total_bytes": 0, "speed": 0, "paused": False, "pause_remaining": 0}
 
 
 async def fetch_series_episodes(source_id: str, series_id: str) -> list:
@@ -2712,6 +3085,18 @@ async def lifespan(app: FastAPI):
     load_epg_cache_from_disk()
     load_cart()
     
+    # Recovery: reset any items stuck in "downloading" from a previous run/crash
+    recovered = 0
+    for item in _download_cart:
+        if item.get("status") == "downloading":
+            item["status"] = "queued"
+            item["progress"] = 0
+            item["error"] = None
+            recovered += 1
+    if recovered:
+        save_cart()
+        logger.info(f"Recovered {recovered} stuck download(s) back to queued")
+    
     # Start background refresh task
     _background_task = asyncio.create_task(background_refresh_loop())
     
@@ -3319,7 +3704,7 @@ async def api_browse(
         if group and grp != group:
             continue
 
-        items.append({
+        item_data = {
             "name": name,
             "group": grp,
             "icon": icon,
@@ -3327,7 +3712,11 @@ async def api_browse(
             "source_id": src_id,
             "source_name": src_name,
             "added": added_ts,
-        })
+        }
+        # Include container_extension for VOD items (needed for correct download URLs)
+        if type == "vod":
+            item_data["container_extension"] = s.get("container_extension", "mp4")
+        items.append(item_data)
 
     total = len(items)
     
@@ -5224,6 +5613,39 @@ async def remove_from_cart(item_id: str):
     return {"status": "ok"}
 
 
+@app.post("/api/cart/{item_id}/retry")
+async def retry_cart_item(item_id: str):
+    """Retry a failed or cancelled cart item by resetting it to queued"""
+    for item in _download_cart:
+        if item.get("id") == item_id:
+            if item.get("status") not in ("failed", "cancelled"):
+                return JSONResponse({"error": "Item is not in a retryable state"}, status_code=400)
+            item["status"] = "queued"
+            item["progress"] = 0
+            item["error"] = None
+            item["file_path"] = None
+            item["file_size"] = None
+            save_cart()
+            return {"status": "ok", "message": f"Re-queued: {item.get('name', '')}"}
+    return JSONResponse({"error": "Item not found"}, status_code=404)
+
+
+@app.post("/api/cart/retry-all")
+async def retry_all_failed():
+    """Retry all failed/cancelled items"""
+    count = 0
+    for item in _download_cart:
+        if item.get("status") in ("failed", "cancelled"):
+            item["status"] = "queued"
+            item["progress"] = 0
+            item["error"] = None
+            item["file_path"] = None
+            item["file_size"] = None
+            count += 1
+    save_cart()
+    return {"status": "ok", "retried": count}
+
+
 @app.post("/api/cart/clear")
 async def clear_cart(request: Request):
     """Clear cart items by status. Body: { mode: 'completed'|'failed'|'all' }"""
@@ -5298,6 +5720,8 @@ async def cart_status():
             "bytes_downloaded": _download_progress.get("bytes_downloaded", 0),
             "total_bytes": _download_progress.get("total_bytes", 0),
             "speed": _download_progress.get("speed", 0),
+            "paused": _download_progress.get("paused", False),
+            "pause_remaining": _download_progress.get("pause_remaining", 0),
         }
 
     is_running = _download_task is not None and not _download_task.done()
@@ -5341,6 +5765,81 @@ async def set_download_path_api(request: Request):
     save_config(config)
 
     return {"status": "ok", "download_path": path}
+
+
+@app.get("/api/options/download_temp_path")
+async def get_download_temp_path_api():
+    """Get configured temporary download path"""
+    return {"download_temp_path": get_download_temp_path()}
+
+
+@app.post("/api/options/download_temp_path")
+async def set_download_temp_path_api(request: Request):
+    """Set temporary download path"""
+    config = load_config()
+    data = await request.json()
+    path = data.get("download_temp_path", "/data/downloads/.tmp").strip()
+
+    if not path:
+        return JSONResponse({"error": "Path cannot be empty"}, status_code=400)
+
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as e:
+        return JSONResponse({"error": f"Invalid path: {e}"}, status_code=400)
+
+    if "options" not in config:
+        config["options"] = {}
+    config["options"]["download_temp_path"] = path
+    save_config(config)
+
+    return {"status": "ok", "download_temp_path": path}
+
+
+@app.get("/api/options/download_throttle")
+async def get_download_throttle_api():
+    """Get download throttle settings"""
+    return get_download_throttle_settings()
+
+
+@app.post("/api/options/download_throttle")
+async def set_download_throttle_api(request: Request):
+    """Set download throttle settings (bandwidth limit, periodic pause, player profile)"""
+    config = load_config()
+    data = await request.json()
+
+    bw = data.get("bandwidth_limit", 0)
+    interval = data.get("pause_interval", 0)
+    duration = data.get("pause_duration", 0)
+    profile = data.get("player_profile", "tivimate")
+
+    # Validate
+    try:
+        bw = max(0, int(bw))
+        interval = max(0, int(interval))
+        duration = max(0, int(duration))
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "Invalid numeric values"}, status_code=400)
+
+    if profile not in PLAYER_PROFILES:
+        profile = "tivimate"
+
+    if "options" not in config:
+        config["options"] = {}
+    config["options"]["download_bandwidth_limit"] = bw
+    config["options"]["download_pause_interval"] = interval
+    config["options"]["download_pause_duration"] = duration
+    config["options"]["download_player_profile"] = profile
+    save_config(config)
+
+    logger.info(f"Download throttle updated: bandwidth={bw} KB/s, pause every {interval}s for {duration}s, profile={profile}")
+    return {"status": "ok", "bandwidth_limit": bw, "pause_interval": interval, "pause_duration": duration, "player_profile": profile}
+
+
+@app.get("/api/options/player_profiles")
+async def get_player_profiles_api():
+    """Get available IPTV player profiles"""
+    return {k: {"name": v["name"], "user_agent": v["headers"]["User-Agent"]} for k, v in PLAYER_PROFILES.items()}
 
 
 @app.get("/api/cart/series-episodes/{source_id}/{series_id}")

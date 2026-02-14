@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Download Cart - XtreamFilter</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); min-height: 100vh; color: #e0e0e0; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; flex-wrap: wrap; gap: 15px; }
+        .header h1 { color: #00d4ff; font-size: 2em; text-shadow: 0 0 20px rgba(0, 212, 255, 0.3); }
+        .header-nav { display: flex; gap: 10px; }
+        .btn { display: inline-block; padding: 10px 20px; border: none; border-radius: 8px; font-size: 0.95em; cursor: pointer; transition: all 0.3s; text-decoration: none; }
+        .btn-secondary { background: rgba(255, 255, 255, 0.1); color: #fff; border: 1px solid rgba(255, 255, 255, 0.2); }
+        .btn-secondary:hover { background: rgba(255, 255, 255, 0.2); }
+        .btn-primary { background: linear-gradient(135deg, #00d4ff, #0099cc); color: #000; font-weight: 600; }
+        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(0, 212, 255, 0.4); }
+        .btn-success { background: linear-gradient(135deg, #2ed573, #1abc9c); color: #000; font-weight: 600; }
+        .btn-success:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(46, 213, 115, 0.4); }
+        .btn-danger { background: rgba(255, 71, 87, 0.2); color: #ff4757; border: 1px solid rgba(255, 71, 87, 0.3); }
+        .btn-danger:hover { background: rgba(255, 71, 87, 0.3); }
+        .btn-small { padding: 6px 12px; font-size: 0.85em; }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+
+        /* Settings bar */
+        .settings-bar { background: rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 20px; margin-bottom: 20px; border: 1px solid rgba(255, 255, 255, 0.1); }
+        .settings-row { display: flex; gap: 15px; align-items: flex-end; flex-wrap: wrap; }
+        .setting-group { display: flex; flex-direction: column; gap: 6px; }
+        .setting-group label { font-size: 0.8em; color: #888; text-transform: uppercase; }
+        .setting-group input { padding: 10px 14px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; background: rgba(0, 0, 0, 0.3); color: #fff; font-size: 0.95em; min-width: 350px; }
+        .setting-group input:focus { outline: none; border-color: #00d4ff; }
+        .setting-group input[type="number"] { min-width: 100px; width: 120px; }
+        .setting-group .input-suffix { font-size: 0.8em; color: #888; margin-left: 4px; }
+        .settings-section-title { font-size: 0.9em; color: #00d4ff; margin-bottom: 10px; font-weight: 600; }
+        .settings-row + .settings-section-title { margin-top: 16px; }
+        .pause-indicator { display: none; align-items: center; gap: 8px; padding: 8px 16px; background: rgba(255, 165, 2, 0.15); border: 1px solid rgba(255, 165, 2, 0.3); border-radius: 8px; margin-top: 10px; font-size: 0.9em; color: #ffa502; }
+        .pause-indicator.show { display: flex; }
+        .pause-indicator .pulse { display: inline-block; width: 8px; height: 8px; background: #ffa502; border-radius: 50%; animation: pulse 1s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+        /* Summary bar */
+        .summary-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 15px; }
+        .summary-stats { display: flex; gap: 20px; flex-wrap: wrap; }
+        .stat-item { display: flex; flex-direction: column; align-items: center; padding: 10px 18px; background: rgba(255, 255, 255, 0.05); border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.08); min-width: 80px; }
+        .stat-value { font-size: 1.5em; font-weight: 700; color: #00d4ff; }
+        .stat-label { font-size: 0.75em; color: #888; text-transform: uppercase; margin-top: 2px; }
+        .stat-item.downloading .stat-value { color: #ffa502; }
+        .stat-item.completed .stat-value { color: #2ed573; }
+        .stat-item.failed .stat-value { color: #ff4757; }
+        .summary-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+        /* Current download progress */
+        .current-download { background: rgba(0, 212, 255, 0.05); border-radius: 12px; padding: 20px; margin-bottom: 20px; border: 1px solid rgba(0, 212, 255, 0.2); display: none; }
+        .current-download.show { display: block; }
+        .current-download h3 { color: #00d4ff; font-size: 1em; margin-bottom: 12px; }
+        .current-info { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px; }
+        .current-name { font-weight: 500; }
+        .current-stats { font-size: 0.85em; color: #888; display: flex; gap: 15px; }
+        .progress-bar-container { width: 100%; height: 8px; background: rgba(255, 255, 255, 0.1); border-radius: 4px; overflow: hidden; }
+        .progress-bar { height: 100%; background: linear-gradient(90deg, #00d4ff, #2ed573); border-radius: 4px; transition: width 0.5s ease; width: 0%; }
+
+        /* Cart items table */
+        .cart-table { width: 100%; border-collapse: collapse; }
+        .cart-table th { text-align: left; padding: 12px 16px; font-size: 0.8em; color: #888; text-transform: uppercase; border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
+        .cart-table td { padding: 12px 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); vertical-align: middle; }
+        .cart-table tr:hover { background: rgba(255, 255, 255, 0.03); }
+        .item-info { display: flex; align-items: center; gap: 12px; }
+        .item-thumb { width: 45px; height: 65px; object-fit: cover; border-radius: 4px; background: rgba(0, 0, 0, 0.3); flex-shrink: 0; }
+        .item-thumb-placeholder { width: 45px; height: 65px; border-radius: 4px; background: linear-gradient(135deg, rgba(0, 212, 255, 0.1), rgba(0, 0, 0, 0.3)); display: flex; align-items: center; justify-content: center; font-size: 1.2em; flex-shrink: 0; }
+        .item-details { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+        .item-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 400px; }
+        .item-meta { font-size: 0.8em; color: #888; }
+        .type-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75em; font-weight: 600; }
+        .type-badge.vod { background: rgba(116, 185, 255, 0.2); color: #74b9ff; }
+        .type-badge.series { background: rgba(162, 155, 254, 0.2); color: #a29bfe; }
+        .status-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.8em; font-weight: 500; }
+        .status-badge.queued { background: rgba(255, 255, 255, 0.1); color: #888; }
+        .status-badge.downloading { background: rgba(255, 165, 2, 0.2); color: #ffa502; }
+        .status-badge.completed { background: rgba(46, 213, 115, 0.2); color: #2ed573; }
+        .status-badge.failed, .status-badge.cancelled { background: rgba(255, 71, 87, 0.2); color: #ff4757; }
+        .item-progress { width: 80px; }
+        .item-progress-bar { width: 100%; height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; overflow: hidden; }
+        .item-progress-fill { height: 100%; background: #00d4ff; border-radius: 2px; transition: width 0.5s ease; }
+        .item-progress-text { font-size: 0.75em; color: #888; text-align: center; margin-top: 2px; }
+        .item-error { font-size: 0.75em; color: #ff4757; max-width: 200px; word-break: break-word; }
+        .remove-btn { background: none; border: none; color: #666; font-size: 1.2em; cursor: pointer; padding: 5px; border-radius: 4px; transition: all 0.2s; }
+        .remove-btn:hover { color: #ff4757; background: rgba(255, 71, 87, 0.1); }
+
+        .empty-state { text-align: center; padding: 60px 20px; color: #666; }
+        .empty-state-icon { font-size: 4em; margin-bottom: 20px; opacity: 0.3; }
+        .empty-state h3 { color: #888; margin-bottom: 10px; }
+        .empty-state a { color: #00d4ff; text-decoration: none; }
+        .empty-state a:hover { text-decoration: underline; }
+
+        .toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(100px); padding: 12px 24px; border-radius: 8px; font-size: 0.95em; z-index: 10000; opacity: 0; transition: all 0.3s ease; }
+        .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+        .toast-success { background: linear-gradient(135deg, #2ed573, #1abc9c); color: #000; font-weight: 500; }
+        .toast-info { background: rgba(0, 212, 255, 0.9); color: #000; font-weight: 500; }
+        .toast-error { background: rgba(255, 71, 87, 0.9); color: #fff; font-weight: 500; }
+
+        .cart-section { background: rgba(255, 255, 255, 0.03); border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.08); overflow: hidden; }
+
+        @media (max-width: 768px) {
+            .settings-row { flex-direction: column; }
+            .setting-group input { min-width: 100%; }
+            .summary-bar { flex-direction: column; align-items: stretch; }
+            .item-name { max-width: 200px; }
+            .cart-table th:nth-child(4), .cart-table td:nth-child(4) { display: none; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <h1>🛒 Download Cart</h1>
+            </div>
+            <div class="header-nav">
+                <a href="/browse" class="btn btn-secondary">Custom categories & Downloads</a>
+                <a href="/" class="btn btn-secondary">Settings</a>
+            </div>
+        </div>
+
+        <!-- Settings -->
+        <div class="settings-bar">
+            <div class="settings-section-title">📁 Storage</div>
+            <div class="settings-row">
+                <div class="setting-group" style="flex:1;">
+                    <label>Download Path</label>
+                    <div style="display: flex; gap: 8px;">
+                        <input type="text" id="download-path" placeholder="/data/downloads">
+                        <button class="btn btn-primary btn-small" onclick="saveDownloadPath()" style="white-space:nowrap;">Save</button>
+                    </div>
+                </div>
+                <div class="setting-group" style="flex:1;">
+                    <label>Temp Path <span style="font-size:0.8em;color:#888;">(download here first, then move)</span></label>
+                    <div style="display: flex; gap: 8px;">
+                        <input type="text" id="download-temp-path" placeholder="/data/downloads/.tmp">
+                        <button class="btn btn-primary btn-small" onclick="saveTempPath()" style="white-space:nowrap;">Save</button>
+                    </div>
+                </div>
+            </div>
+            <div class="settings-section-title">🛡️ Anti-Ban Throttle</div>
+            <div class="settings-row">
+                <div class="setting-group">
+                    <label>Player Profile</label>
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <select id="throttle-player-profile" style="padding:10px 14px; border:1px solid rgba(255,255,255,0.1); border-radius:6px; background:rgba(0,0,0,0.3); color:#fff; font-size:0.95em; min-width:200px;"></select>
+                    </div>
+                </div>
+                <div class="setting-group">
+                    <label>Bandwidth Limit</label>
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <input type="number" id="throttle-bandwidth" min="0" step="100" placeholder="0">
+                        <span class="input-suffix">KB/s (0 = unlimited)</span>
+                    </div>
+                </div>
+                <div class="setting-group">
+                    <label>Pause Every</label>
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <input type="number" id="throttle-pause-interval" min="0" step="10" placeholder="0">
+                        <span class="input-suffix">seconds (0 = off)</span>
+                    </div>
+                </div>
+                <div class="setting-group">
+                    <label>Pause Duration</label>
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <input type="number" id="throttle-pause-duration" min="0" step="1" placeholder="0">
+                        <span class="input-suffix">seconds</span>
+                    </div>
+                </div>
+                <button class="btn btn-primary btn-small" onclick="saveThrottle()" style="align-self:flex-end; white-space:nowrap;">Save Throttle</button>
+            </div>
+            <div id="player-ua-preview" style="font-size:0.75em; color:#666; margin-top:8px; font-family:monospace;"></div>
+        </div>
+
+        <!-- Summary -->
+        <div class="summary-bar">
+            <div class="summary-stats">
+                <div class="stat-item">
+                    <span class="stat-value" id="stat-total">0</span>
+                    <span class="stat-label">Total</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-value" id="stat-queued">0</span>
+                    <span class="stat-label">Queued</span>
+                </div>
+                <div class="stat-item downloading">
+                    <span class="stat-value" id="stat-downloading">0</span>
+                    <span class="stat-label">Downloading</span>
+                </div>
+                <div class="stat-item completed">
+                    <span class="stat-value" id="stat-completed">0</span>
+                    <span class="stat-label">Completed</span>
+                </div>
+                <div class="stat-item failed">
+                    <span class="stat-value" id="stat-failed">0</span>
+                    <span class="stat-label">Failed</span>
+                </div>
+            </div>
+            <div class="summary-actions">
+                <button class="btn btn-success" id="start-btn" onclick="startDownloads()">▶ Start Downloads</button>
+                <button class="btn btn-danger btn-small" id="cancel-btn" onclick="cancelDownload()" style="display:none;">⏹ Cancel</button>
+                <button class="btn btn-primary btn-small" id="retry-all-btn" onclick="retryAllFailed()" style="display:none;">🔄 Retry Failed</button>
+                <button class="btn btn-secondary btn-small" onclick="clearCart('finished')">Clear Finished</button>
+                <button class="btn btn-danger btn-small" onclick="clearCart('all')">Clear All</button>
+            </div>
+        </div>
+
+        <!-- Current Download Progress -->
+        <div class="current-download" id="current-download">
+            <h3>⬇️ Currently Downloading</h3>
+            <div class="current-info">
+                <span class="current-name" id="current-name"></span>
+                <div class="current-stats">
+                    <span id="current-speed"></span>
+                    <span id="current-size"></span>
+                    <span id="current-percent"></span>
+                </div>
+            </div>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="current-progress-bar"></div>
+            </div>
+            <div class="pause-indicator" id="pause-indicator">
+                <span class="pulse"></span>
+                <span>⏸ Paused — simulating player buffering (<span id="pause-remaining">0</span>s remaining)</span>
+            </div>
+        </div>
+
+        <!-- Cart Items -->
+        <div class="cart-section">
+            <table class="cart-table" id="cart-table">
+                <thead>
+                    <tr>
+                        <th style="width:45%">Item</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>Progress</th>
+                        <th style="width:40px"></th>
+                    </tr>
+                </thead>
+                <tbody id="cart-body">
+                </tbody>
+            </table>
+        </div>
+
+        <div class="empty-state" id="empty-state" style="display:none;">
+            <div class="empty-state-icon">🛒</div>
+            <h3>Your cart is empty</h3>
+            <p>Go to <a href="/browse">Custom categories & Downloads</a> to add films and series to your download cart.</p>
+        </div>
+    </div>
+
+    <script>
+        let cartItems = [];
+        let pollInterval = null;
+        let isRunning = false;
+
+        document.addEventListener('DOMContentLoaded', function() {
+            loadDownloadPath();
+            loadThrottleSettings();
+            loadCart();
+            startPolling();
+        });
+
+        async function loadDownloadPath() {
+            try {
+                const resp = await fetch('/api/options/download_path');
+                const data = await resp.json();
+                document.getElementById('download-path').value = data.download_path || '/data/downloads';
+            } catch (e) { console.error('Error loading download path:', e); }
+            try {
+                const resp = await fetch('/api/options/download_temp_path');
+                const data = await resp.json();
+                document.getElementById('download-temp-path').value = data.download_temp_path || '/data/downloads/.tmp';
+            } catch (e) { console.error('Error loading temp path:', e); }
+        }
+
+        async function saveDownloadPath() {
+            const path = document.getElementById('download-path').value.trim();
+            if (!path) return showToast('Path cannot be empty', 'error');
+            try {
+                const resp = await fetch('/api/options/download_path', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ download_path: path })
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    showToast('Download path saved', 'success');
+                } else {
+                    showToast(data.error || 'Failed to save path', 'error');
+                }
+            } catch (e) { showToast('Error saving path', 'error'); }
+        }
+
+        async function saveTempPath() {
+            const path = document.getElementById('download-temp-path').value.trim();
+            if (!path) return showToast('Path cannot be empty', 'error');
+            try {
+                const resp = await fetch('/api/options/download_temp_path', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ download_temp_path: path })
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    showToast('Temp path saved', 'success');
+                } else {
+                    showToast(data.error || 'Failed to save temp path', 'error');
+                }
+            } catch (e) { showToast('Error saving temp path', 'error'); }
+        }
+
+        let playerProfiles = {};
+
+        async function loadThrottleSettings() {
+            try {
+                // Load available player profiles first
+                const profilesResp = await fetch('/api/options/player_profiles');
+                playerProfiles = await profilesResp.json();
+                const select = document.getElementById('throttle-player-profile');
+                select.innerHTML = Object.entries(playerProfiles).map(([key, p]) =>
+                    '<option value="' + key + '">' + p.name + '</option>'
+                ).join('');
+                select.addEventListener('change', function() {
+                    updatePlayerUaPreview();
+                });
+
+                // Load current settings
+                const resp = await fetch('/api/options/download_throttle');
+                const data = await resp.json();
+                document.getElementById('throttle-bandwidth').value = data.bandwidth_limit || 0;
+                document.getElementById('throttle-pause-interval').value = data.pause_interval || 0;
+                document.getElementById('throttle-pause-duration').value = data.pause_duration || 0;
+                select.value = data.player_profile || 'tivimate';
+                updatePlayerUaPreview();
+            } catch (e) { console.error('Error loading throttle settings:', e); }
+        }
+
+        function updatePlayerUaPreview() {
+            const key = document.getElementById('throttle-player-profile').value;
+            const profile = playerProfiles[key];
+            const preview = document.getElementById('player-ua-preview');
+            if (profile) {
+                preview.textContent = 'User-Agent: ' + profile.user_agent;
+            } else {
+                preview.textContent = '';
+            }
+        }
+
+        async function saveThrottle() {
+            const bw = parseInt(document.getElementById('throttle-bandwidth').value) || 0;
+            const interval = parseInt(document.getElementById('throttle-pause-interval').value) || 0;
+            const duration = parseInt(document.getElementById('throttle-pause-duration').value) || 0;
+            const profile = document.getElementById('throttle-player-profile').value;
+            try {
+                const resp = await fetch('/api/options/download_throttle', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ bandwidth_limit: bw, pause_interval: interval, pause_duration: duration, player_profile: profile })
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    showToast('Throttle settings saved (applies to next file)', 'success');
+                } else {
+                    showToast(data.error || 'Failed to save', 'error');
+                }
+            } catch (e) { showToast('Error saving throttle settings', 'error'); }
+        }
+
+        async function loadCart() {
+            try {
+                const resp = await fetch('/api/cart');
+                const data = await resp.json();
+                cartItems = data.items || [];
+                renderCart();
+                updateStatus();
+            } catch (e) { console.error('Error loading cart:', e); }
+        }
+
+        function renderCart() {
+            const body = document.getElementById('cart-body');
+            const emptyState = document.getElementById('empty-state');
+            const tableSection = document.querySelector('.cart-section');
+
+            if (cartItems.length === 0) {
+                tableSection.style.display = 'none';
+                emptyState.style.display = 'block';
+                return;
+            }
+
+            tableSection.style.display = 'block';
+            emptyState.style.display = 'none';
+
+            body.innerHTML = cartItems.map(item => {
+                const icon = item.icon
+                    ? '<img class="item-thumb" src="' + escapeHtml(item.icon) + '" loading="lazy" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'">' +
+                      '<div class="item-thumb-placeholder" style="display:none">🎬</div>'
+                    : '<div class="item-thumb-placeholder">🎬</div>';
+
+                let displayName = escapeHtml(item.name || '');
+                let metaInfo = '';
+                if (item.content_type === 'series' && item.series_name) {
+                    displayName = escapeHtml(item.series_name);
+                    let epLabel = 'S' + String(item.season || 1).padStart(2, '0') + 'E' + String(item.episode_num || 0).padStart(2, '0');
+                    if (item.episode_title) epLabel += ' - ' + escapeHtml(item.episode_title);
+                    metaInfo = '<div class="item-meta">' + epLabel + '</div>';
+                }
+                if (item.group) {
+                    metaInfo += '<div class="item-meta">' + escapeHtml(item.group) + '</div>';
+                }
+
+                const typeBadge = '<span class="type-badge ' + item.content_type + '">' +
+                    (item.content_type === 'vod' ? 'Film' : 'Series') + '</span>';
+
+                const statusBadge = '<span class="status-badge ' + item.status + '">' + item.status + '</span>' +
+                    (item.error ? '<div class="item-error">' + escapeHtml(item.error) + '</div>' : '');
+
+                let progressHtml = '';
+                if (item.status === 'downloading') {
+                    progressHtml = '<div class="item-progress"><div class="item-progress-bar"><div class="item-progress-fill" style="width:' + (item.progress || 0) + '%"></div></div>' +
+                        '<div class="item-progress-text">' + (item.progress || 0) + '%</div></div>';
+                } else if (item.status === 'completed' && item.file_size) {
+                    progressHtml = '<span style="font-size:0.8em;color:#888">' + formatBytes(item.file_size) + '</span>';
+                }
+
+                const canRemove = item.status !== 'downloading';
+                const retryBtn = (item.status === 'failed' || item.status === 'cancelled')
+                    ? '<button class="remove-btn" onclick="retryItem(\'' + item.id + '\')" title="Retry" style="color:#ffa502;">🔄</button>'
+                    : '';
+                const removeBtn = canRemove
+                    ? '<button class="remove-btn" onclick="removeItem(\'' + item.id + '\')" title="Remove">✕</button>'
+                    : '';
+
+                return '<tr>' +
+                    '<td><div class="item-info">' + icon +
+                    '<div class="item-details"><div class="item-name">' + displayName + '</div>' + metaInfo + '</div></div></td>' +
+                    '<td>' + typeBadge + '</td>' +
+                    '<td>' + statusBadge + '</td>' +
+                    '<td>' + progressHtml + '</td>' +
+                    '<td>' + retryBtn + removeBtn + '</td>' +
+                    '</tr>';
+            }).join('');
+        }
+
+        async function updateStatus() {
+            try {
+                const resp = await fetch('/api/cart/status');
+                const data = await resp.json();
+
+                document.getElementById('stat-total').textContent = data.total;
+                document.getElementById('stat-queued').textContent = data.queued;
+                document.getElementById('stat-downloading').textContent = data.downloading;
+                document.getElementById('stat-completed').textContent = data.completed;
+                document.getElementById('stat-failed').textContent = data.failed;
+
+                isRunning = data.is_running;
+                document.getElementById('start-btn').style.display = isRunning ? 'none' : '';
+                document.getElementById('cancel-btn').style.display = isRunning ? '' : 'none';
+                document.getElementById('start-btn').disabled = data.queued === 0;
+                document.getElementById('retry-all-btn').style.display = data.failed > 0 ? '' : 'none';
+
+                const currentEl = document.getElementById('current-download');
+                if (data.current && data.is_running) {
+                    currentEl.classList.add('show');
+                    let name = data.current.name || '';
+                    if (data.current.series_name) {
+                        name = data.current.series_name + ' S' +
+                            String(data.current.season || 1).padStart(2, '0') + 'E' +
+                            String(data.current.episode_num || 0).padStart(2, '0');
+                        if (data.current.name) name += ' - ' + data.current.name;
+                    }
+                    document.getElementById('current-name').textContent = name;
+                    document.getElementById('current-speed').textContent = formatBytes(data.current.speed) + '/s';
+                    document.getElementById('current-size').textContent =
+                        formatBytes(data.current.bytes_downloaded) +
+                        (data.current.total_bytes ? ' / ' + formatBytes(data.current.total_bytes) : '');
+                    document.getElementById('current-percent').textContent = data.current.progress + '%';
+                    document.getElementById('current-progress-bar').style.width = data.current.progress + '%';
+
+                    // Show pause indicator
+                    const pauseEl = document.getElementById('pause-indicator');
+                    if (data.current.paused) {
+                        pauseEl.classList.add('show');
+                        document.getElementById('pause-remaining').textContent = Math.ceil(data.current.pause_remaining || 0);
+                    } else {
+                        pauseEl.classList.remove('show');
+                    }
+                } else {
+                    currentEl.classList.remove('show');
+                    document.getElementById('pause-indicator').classList.remove('show');
+                }
+            } catch (e) { console.error('Error updating status:', e); }
+        }
+
+        function startPolling() {
+            // Poll every 2 seconds
+            pollInterval = setInterval(async () => {
+                await loadCart();
+            }, 2000);
+        }
+
+        async function startDownloads() {
+            try {
+                const resp = await fetch('/api/cart/start', { method: 'POST' });
+                const data = await resp.json();
+                if (resp.ok) {
+                    showToast(data.message, 'success');
+                    await loadCart();
+                } else {
+                    showToast(data.error || 'Failed to start', 'error');
+                }
+            } catch (e) { showToast('Error starting downloads', 'error'); }
+        }
+
+        async function cancelDownload() {
+            try {
+                const resp = await fetch('/api/cart/cancel', { method: 'POST' });
+                const data = await resp.json();
+                showToast(data.message || 'Cancelled', 'info');
+                await loadCart();
+            } catch (e) { showToast('Error cancelling', 'error'); }
+        }
+
+        async function removeItem(itemId) {
+            try {
+                await fetch('/api/cart/' + itemId, { method: 'DELETE' });
+                await loadCart();
+            } catch (e) { showToast('Error removing item', 'error'); }
+        }
+
+        async function retryItem(itemId) {
+            try {
+                const resp = await fetch('/api/cart/' + itemId + '/retry', { method: 'POST' });
+                const data = await resp.json();
+                if (resp.ok) {
+                    showToast(data.message || 'Item re-queued', 'success');
+                } else {
+                    showToast(data.error || 'Failed to retry', 'error');
+                }
+                await loadCart();
+            } catch (e) { showToast('Error retrying item', 'error'); }
+        }
+
+        async function retryAllFailed() {
+            try {
+                const resp = await fetch('/api/cart/retry-all', { method: 'POST' });
+                const data = await resp.json();
+                if (resp.ok) {
+                    showToast('Re-queued ' + data.retried + ' items', 'success');
+                } else {
+                    showToast(data.error || 'Failed to retry', 'error');
+                }
+                await loadCart();
+            } catch (e) { showToast('Error retrying items', 'error'); }
+        }
+
+        async function clearCart(mode) {
+            const label = mode === 'all' ? 'all items' : 'finished items';
+            if (!confirm('Clear ' + label + ' from the cart?')) return;
+            try {
+                await fetch('/api/cart/clear', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode: mode })
+                });
+                await loadCart();
+                showToast('Cart cleared', 'info');
+            } catch (e) { showToast('Error clearing cart', 'error'); }
+        }
+
+        function formatBytes(bytes) {
+            if (!bytes || bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function showToast(message, type) {
+            const toast = document.createElement('div');
+            toast.className = 'toast toast-' + type;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.classList.add('show'), 10);
+            setTimeout(() => {
+                toast.classList.remove('show');
+                setTimeout(() => toast.remove(), 300);
+            }, 2000);
+        }
+    </script>
+</body>
+</html>

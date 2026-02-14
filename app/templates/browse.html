@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Browse - XtreamFilter</title>
+    <title>Custom categories & Downloads - XtreamFilter</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); min-height: 100vh; color: #e0e0e0; padding: 20px; }
@@ -154,6 +154,31 @@
         .source-row .source-row-cat-btn { width: 24px; height: 24px; border-radius: 50%; background: rgba(0, 0, 0, 0.4); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.9em; color: rgba(255, 255, 255, 0.5); transition: all 0.2s; }
         .source-row .source-row-cat-btn:hover { color: #00d4ff; background: rgba(0, 0, 0, 0.6); }
         .source-row .source-row-cat-btn.has-categories { color: #2ed573; }
+        /* Cart button styles */
+        .add-cart-btn { position: absolute; top: 10px; right: 52px; width: 36px; height: 36px; border-radius: 50%; background: rgba(0, 0, 0, 0.6); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.1em; transition: all 0.2s; color: rgba(255, 255, 255, 0.7); }
+        .add-cart-btn:hover { transform: scale(1.1); background: rgba(0, 0, 0, 0.8); color: #2ed573; }
+        .cart-link { position: relative; display: inline-flex; align-items: center; gap: 6px; }
+        .cart-badge { position: absolute; top: -5px; right: -8px; background: #ff4757; color: #fff; font-size: 0.65em; font-weight: 700; min-width: 18px; height: 18px; border-radius: 9px; display: flex; align-items: center; justify-content: center; padding: 0 4px; }
+        .source-row .source-row-cart-btn { width: 24px; height: 24px; border-radius: 50%; background: rgba(0, 0, 0, 0.4); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.85em; color: rgba(255, 255, 255, 0.5); transition: all 0.2s; }
+        .source-row .source-row-cart-btn:hover { color: #2ed573; background: rgba(0, 0, 0, 0.6); }
+        /* Episode selector modal */
+        .episode-list { max-height: 400px; overflow-y: auto; }
+        .season-group { margin-bottom: 15px; }
+        .season-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: rgba(0, 0, 0, 0.2); border-radius: 8px; margin-bottom: 8px; cursor: pointer; }
+        .season-header h4 { color: #00d4ff; font-size: 0.95em; }
+        .season-header button { padding: 4px 12px; border: 1px solid rgba(0, 212, 255, 0.3); border-radius: 6px; background: transparent; color: #00d4ff; cursor: pointer; font-size: 0.8em; }
+        .season-header button:hover { background: rgba(0, 212, 255, 0.15); }
+        .episode-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); font-size: 0.9em; }
+        .episode-row:hover { background: rgba(255, 255, 255, 0.03); }
+        .episode-row input[type="checkbox"] { width: 18px; height: 18px; flex-shrink: 0; }
+        .episode-row .ep-num { color: #888; min-width: 40px; }
+        .episode-row .ep-title { flex: 1; }
+        .episode-row .ep-ext { color: #666; font-size: 0.85em; }
+        .episode-actions { display: flex; gap: 10px; margin-bottom: 15px; }
+        .episode-source-selector { display: flex; align-items: center; gap: 10px; margin-bottom: 15px; padding: 10px 12px; background: rgba(0, 0, 0, 0.2); border-radius: 8px; }
+        .episode-source-selector label { color: #888; font-size: 0.9em; white-space: nowrap; }
+        .episode-source-selector select { flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.1); background: rgba(0, 0, 0, 0.3); color: #e0e0e0; font-size: 0.9em; }
+        .episode-source-selector select:focus { border-color: #00d4ff; outline: none; }
         @media (max-width: 768px) { .controls-row { flex-direction: column; } .control-group { width: 100%; } .content-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; } .form-row { flex-direction: column; } }
     </style>
 </head>
@@ -161,10 +186,13 @@
     <div class="container">
         <div class="header">
             <div style="display: flex; align-items: center; gap: 12px;">
-                <h1>Browse Content</h1>
+                <h1>Custom categories & Downloads</h1>
                 <span id="version-badge" style="display: none; font-size: 0.65em; padding: 3px 10px; border-radius: 12px; background: rgba(255,255,255,0.08); color: #888; cursor: default;"></span>
             </div>
-            <div class="header-nav"><a href="/" class="btn btn-secondary">Settings</a></div>
+            <div class="header-nav">
+                <a href="/cart" class="btn btn-secondary cart-link">🛒 Cart<span class="cart-badge" id="cart-badge" style="display:none">0</span></a>
+                <a href="/" class="btn btn-secondary">Settings</a>
+            </div>
         </div>
         <div class="main-tabs">
             <div class="main-tab active" data-view="all" onclick="switchView('all')">All Content</div>
@@ -357,6 +385,48 @@
             </div>
         </div>
     </div>
+    <!-- Episode Selector Modal -->
+    <div class="modal-overlay" id="episode-modal">
+        <div class="modal" style="max-width: 700px;">
+            <div class="modal-header">
+                <h2 id="episode-modal-title">Select Episodes</h2>
+                <button class="modal-close" onclick="closeEpisodeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="episode-source-selector" id="episode-source-selector" style="display:none">
+                    <label>Source:</label>
+                    <select id="episode-source-select" onchange="onEpisodeSourceChange()"></select>
+                </div>
+                <div class="episode-actions">
+                    <button class="btn btn-primary btn-small" onclick="addAllEpisodesToCart()">Add All Episodes</button>
+                    <button class="btn btn-secondary btn-small" onclick="addSelectedEpisodesToCart()">Add Selected</button>
+                </div>
+                <div class="episode-list" id="episode-list">
+                    <div class="loading"><div class="loading-spinner"></div><p>Loading episodes...</p></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeEpisodeModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- VOD Source Selector Modal -->
+    <div class="modal-overlay" id="vod-source-modal">
+        <div class="modal" style="max-width: 500px;">
+            <div class="modal-header">
+                <h2 id="vod-source-modal-title">Select Source</h2>
+                <button class="modal-close" onclick="closeVodSourceModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="color:#888; margin-bottom:15px; font-size:0.9em;">This film is available from multiple sources. Choose which one to download:</p>
+                <div id="vod-source-list"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeVodSourceModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
 
     <script>
         let currentView = 'all';
@@ -379,7 +449,7 @@
             loadCategories();
             // Show initial state without auto-loading results
             document.getElementById('loading-state').style.display = 'none';
-            document.getElementById('empty-state').innerHTML = '<p>Use the filters above and click <strong>Search</strong> to browse content.</p>';
+            document.getElementById('empty-state').innerHTML = '<p>Use the filters above and click <strong>Search</strong> to find content.</p>';
             document.getElementById('empty-state').style.display = 'block';
             document.querySelectorAll('.icon-option').forEach(opt => {
                 opt.addEventListener('click', function() {
@@ -604,8 +674,13 @@
                 catBadges = '<div class="card-categories">' + itemCategories.slice(0, 3).map(c => '<span class="card-cat-badge">' + (iconMap[c.icon] || c.icon) + ' ' + c.name + '</span>').join('') + '</div>';
             }
 
+            const cartBtn = (contentType === 'vod' || contentType === 'series')
+                ? '<button class="add-cart-btn" data-source-id="' + escapeAttr(item.source_id) + '" data-item-id="' + escapeAttr(item.id) + '" data-content-type="' + escapeAttr(contentType) + '" data-name="' + escapeAttr(item.name) + '" data-icon="' + escapeAttr(item.icon || '') + '" data-group="' + escapeAttr(item.group || '') + '" data-ext="' + escapeAttr(item.container_extension || 'mp4') + '" title="Add to download cart">🛒</button>'
+                : '';
+
             return '<div class="content-card">' +
                 (isNew ? '<div class="new-badge">NEW</div>' : '') +
+                cartBtn +
                 '<button class="add-category-btn' + (hasCats ? ' has-categories' : '') + '" onclick="toggleCategoryDropdown(event, \'' + item.source_id + '\', \'' + item.id + '\', \'' + contentType + '\')">+</button>' +
                 '<div class="category-dropdown" id="cat-dropdown-' + item.source_id + '-' + item.id + '"></div>' +
                 posterHtml +
@@ -645,6 +720,21 @@
             // Check if any sub-item is new
             const isNew = group.items.some(sub => sub.added && isRecent(sub.added, 7));
 
+            // Build top-level cart button for grouped series cards with all sources encoded
+            let groupCartBtn = '';
+            if (contentType === 'series' || contentType === 'vod') {
+                const allSourcesData = group.items.map(sub => ({
+                    source_id: sub.source_id,
+                    source_name: sub.source_name || 'Unknown',
+                    item_id: sub.id,
+                    name: sub.name,
+                    icon: sub.icon || sub.cover || '',
+                    group: sub.group || '',
+                    container_extension: sub.container_extension || 'mp4'
+                }));
+                groupCartBtn = '<button class="add-cart-btn" data-source-id="' + escapeAttr(group.items[0].source_id) + '" data-item-id="' + escapeAttr(group.items[0].id) + '" data-content-type="' + escapeAttr(contentType) + '" data-name="' + escapeAttr(group.name) + '" data-icon="' + escapeAttr(group.icon || '') + '" data-group="' + escapeAttr(group.items[0].group || '') + '" data-ext="' + escapeAttr(group.items[0].container_extension || 'mp4') + '" data-all-sources="' + escapeAttr(JSON.stringify(allSourcesData)) + '" title="Add to download cart">🛒</button>';
+            }
+
             // Build source rows for expand area
             const sourceRows = group.items.map(sub => {
                 const si = sources.findIndex(s => s.id === sub.source_id) + 1;
@@ -668,6 +758,7 @@
 
             return '<div class="content-card">' +
                 (isNew ? '<div class="new-badge">NEW</div>' : '') +
+                groupCartBtn +
                 posterHtml +
                 '<div class="card-info">' +
                 '<div class="card-title">' + escapeHtml(group.name) +
@@ -967,7 +1058,304 @@
             return div.innerHTML;
         }
 
+        function jsEscape(str) {
+            return String(str || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '');
+        }
+
+        function escapeAttr(str) {
+            return String(str || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
         loadGroups();
+
+        // ============================================
+        // DOWNLOAD CART FUNCTIONS
+        // ============================================
+        let _episodeModalData = {};  // { sourceId, seriesId, seriesName, icon, group, episodes }
+
+        async function updateCartBadge() {
+            try {
+                const resp = await fetch('/api/cart/status');
+                const data = await resp.json();
+                const badge = document.getElementById('cart-badge');
+                const count = data.queued + data.downloading;
+                if (count > 0) {
+                    badge.textContent = count;
+                    badge.style.display = 'flex';
+                } else {
+                    badge.style.display = 'none';
+                }
+            } catch (e) {}
+        }
+
+        // Delegated click handler for all cart buttons
+        document.addEventListener('click', function(event) {
+            const btn = event.target.closest('.add-cart-btn');
+            if (!btn) return;
+            event.stopPropagation();
+            event.preventDefault();
+            const sourceId = btn.dataset.sourceId;
+            const itemId = btn.dataset.itemId;
+            const cType = btn.dataset.contentType;
+            const name = btn.dataset.name;
+            const icon = btn.dataset.icon;
+            const group = btn.dataset.group;
+            const ext = btn.dataset.ext || 'mp4';
+            const allSourcesRaw = btn.dataset.allSources;
+            let allSources = null;
+            if (allSourcesRaw) {
+                try { allSources = JSON.parse(allSourcesRaw); } catch(e) {}
+            }
+            _handleCartAdd(sourceId, itemId, cType, name, icon, group, allSources, ext);
+        });
+
+        async function _handleCartAdd(sourceId, itemId, cType, name, icon, group, allSources, ext) {
+            if (cType === 'series') {
+                // Open episode selector modal
+                openEpisodeModal(sourceId, itemId, name, icon, group, allSources);
+                return;
+            }
+            // VOD: if multiple sources, show source selector modal
+            if (cType === 'vod' && allSources && allSources.length > 1) {
+                openVodSourceModal(allSources, name);
+                return;
+            }
+            // VOD single source: add directly
+            await _addVodToCart(sourceId, itemId, name, icon, group, ext);
+        }
+
+        async function _addVodToCart(sourceId, itemId, name, icon, group, ext) {
+            try {
+                const resp = await fetch('/api/cart', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        source_id: sourceId,
+                        stream_id: itemId,
+                        content_type: 'vod',
+                        name: name,
+                        icon: icon,
+                        group: group,
+                        container_extension: ext || 'mp4'
+                    })
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    showToast('Added to cart: ' + name, 'success');
+                    updateCartBadge();
+                } else {
+                    showToast(data.error || 'Failed to add', 'error');
+                }
+            } catch (e) { showToast('Error adding to cart', 'error'); }
+        }
+
+        function openVodSourceModal(allSources, name) {
+            const modal = document.getElementById('vod-source-modal');
+            document.getElementById('vod-source-modal-title').textContent = 'Select Source: ' + name;
+            const listEl = document.getElementById('vod-source-list');
+            listEl.innerHTML = allSources.map((s, idx) => {
+                const si = sources.findIndex(src => src.id === s.source_id) + 1;
+                return '<div style="display:flex; justify-content:space-between; align-items:center; padding:12px; border-radius:8px; margin-bottom:8px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); cursor:pointer; transition:all 0.2s;" ' +
+                    'onmouseenter="this.style.borderColor=\'#00d4ff\'" onmouseleave="this.style.borderColor=\'rgba(255,255,255,0.1)\'" ' +
+                    'onclick="selectVodSource(' + idx + ')">' +
+                    '<div>' +
+                    '<div style="font-weight:500;">' + escapeHtml(s.name) + '</div>' +
+                    '<span class="source-badge" data-color="' + (si % 5 || 5) + '">' + escapeHtml(s.source_name) + '</span>' +
+                    (s.group ? ' <span style="font-size:0.8em;color:#888;">' + escapeHtml(s.group) + '</span>' : '') +
+                    '</div>' +
+                    '<span style="font-size:1.2em;">🛒</span>' +
+                    '</div>';
+            }).join('');
+            modal.classList.add('show');
+            modal._allSources = allSources;
+        }
+
+        function closeVodSourceModal() {
+            document.getElementById('vod-source-modal').classList.remove('show');
+        }
+
+        async function selectVodSource(idx) {
+            const modal = document.getElementById('vod-source-modal');
+            const s = modal._allSources[idx];
+            closeVodSourceModal();
+            await _addVodToCart(s.source_id, s.item_id, s.name, s.icon || '', s.group || '', s.container_extension || 'mp4');
+        }
+
+        async function openEpisodeModal(sourceId, seriesId, seriesName, icon, group, allSources) {
+            const modal = document.getElementById('episode-modal');
+            document.getElementById('episode-modal-title').textContent = 'Select Episodes: ' + seriesName;
+            document.getElementById('episode-list').innerHTML = '<div class="loading"><div class="loading-spinner"></div><p>Loading episodes...</p></div>';
+            modal.classList.add('show');
+
+            _episodeModalData = { sourceId, seriesId, seriesName, icon, group, allSources: allSources || null };
+
+            // Show/build source selector if multiple sources available
+            const selectorDiv = document.getElementById('episode-source-selector');
+            const selectEl = document.getElementById('episode-source-select');
+            if (allSources && allSources.length > 1) {
+                selectEl.innerHTML = allSources.map(s =>
+                    '<option value="' + escapeAttr(s.source_id) + '|' + escapeAttr(s.item_id) + '|' + escapeAttr(s.name) + '|' + escapeAttr(s.icon) + '|' + escapeAttr(s.group) + '"' + (s.source_id === sourceId ? ' selected' : '') + '>' + escapeHtml(s.source_name) + ' — ' + escapeHtml(s.name) + '</option>'
+                ).join('');
+                selectorDiv.style.display = 'flex';
+            } else {
+                selectorDiv.style.display = 'none';
+            }
+
+            await _loadEpisodesForSource(sourceId, seriesId);
+        }
+
+        async function _loadEpisodesForSource(sourceId, seriesId) {
+            document.getElementById('episode-list').innerHTML = '<div class="loading"><div class="loading-spinner"></div><p>Loading episodes...</p></div>';
+            _episodeModalData.sourceId = sourceId;
+            _episodeModalData.seriesId = seriesId;
+
+            try {
+                const resp = await fetch('/api/cart/series-episodes/' + sourceId + '/' + seriesId);
+                const data = await resp.json();
+                if (!resp.ok || !data.seasons) {
+                    document.getElementById('episode-list').innerHTML = '<p style="color:#ff4757">Failed to load episodes: ' + (data.error || 'Unknown error') + '</p>';
+                    return;
+                }
+                _episodeModalData.episodes = data;
+                renderEpisodeList(data);
+            } catch (e) {
+                document.getElementById('episode-list').innerHTML = '<p style="color:#ff4757">Error loading episodes</p>';
+            }
+        }
+
+        function onEpisodeSourceChange() {
+            const val = document.getElementById('episode-source-select').value;
+            const parts = val.split('|');
+            const sourceId = parts[0];
+            const seriesId = parts[1];
+            const name = parts[2] || _episodeModalData.seriesName;
+            const icon = parts[3] || _episodeModalData.icon;
+            const grp = parts[4] || _episodeModalData.group;
+            _episodeModalData.icon = icon;
+            _episodeModalData.group = grp;
+            _loadEpisodesForSource(sourceId, seriesId);
+        }
+
+        function renderEpisodeList(data) {
+            const container = document.getElementById('episode-list');
+            const seasons = data.seasons;
+            let html = '';
+
+            for (const [seasonNum, episodes] of Object.entries(seasons)) {
+                html += '<div class="season-group">';
+                html += '<div class="season-header"><h4>Season ' + seasonNum + ' (' + episodes.length + ' episodes)</h4>';
+                html += '<button onclick="addSeasonToCart(\'' + seasonNum + '\')">Add Season</button></div>';
+
+                for (const ep of episodes) {
+                    html += '<div class="episode-row">' +
+                        '<input type="checkbox" data-season="' + seasonNum + '" data-stream-id="' + ep.stream_id + '" data-ep-num="' + ep.episode_num + '" data-title="' + escapeHtml(ep.title || '') + '" data-ext="' + (ep.container_extension || 'mp4') + '">' +
+                        '<span class="ep-num">E' + String(ep.episode_num).padStart(2, '0') + '</span>' +
+                        '<span class="ep-title">' + escapeHtml(ep.title || 'Episode ' + ep.episode_num) + '</span>' +
+                        '<span class="ep-ext">' + (ep.container_extension || 'mp4') + '</span>' +
+                        '</div>';
+                }
+                html += '</div>';
+            }
+            container.innerHTML = html;
+        }
+
+        function closeEpisodeModal() {
+            document.getElementById('episode-modal').classList.remove('show');
+            _episodeModalData = {};
+        }
+
+        async function addAllEpisodesToCart() {
+            const d = _episodeModalData;
+            try {
+                const resp = await fetch('/api/cart', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        source_id: d.sourceId,
+                        series_id: d.seriesId,
+                        content_type: 'series',
+                        add_mode: 'series',
+                        name: d.seriesName,
+                        series_name: d.seriesName,
+                        icon: d.icon,
+                        group: d.group
+                    })
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    showToast('Added ' + data.added + ' episodes to cart', 'success');
+                    updateCartBadge();
+                    closeEpisodeModal();
+                } else {
+                    showToast(data.error || 'Failed to add episodes', 'error');
+                }
+            } catch (e) { showToast('Error adding episodes', 'error'); }
+        }
+
+        async function addSeasonToCart(seasonNum) {
+            const d = _episodeModalData;
+            try {
+                const resp = await fetch('/api/cart', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        source_id: d.sourceId,
+                        series_id: d.seriesId,
+                        content_type: 'series',
+                        add_mode: 'season',
+                        season_num: seasonNum,
+                        name: d.seriesName,
+                        series_name: d.seriesName,
+                        icon: d.icon,
+                        group: d.group
+                    })
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    showToast('Added ' + data.added + ' episodes (Season ' + seasonNum + ') to cart', 'success');
+                    updateCartBadge();
+                } else {
+                    showToast(data.error || 'Failed to add season', 'error');
+                }
+            } catch (e) { showToast('Error adding season', 'error'); }
+        }
+
+        async function addSelectedEpisodesToCart() {
+            const d = _episodeModalData;
+            const checked = document.querySelectorAll('#episode-list input[type="checkbox"]:checked');
+            if (checked.length === 0) { showToast('No episodes selected', 'info'); return; }
+
+            let addedCount = 0;
+            for (const cb of checked) {
+                try {
+                    const resp = await fetch('/api/cart', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            source_id: d.sourceId,
+                            stream_id: cb.dataset.streamId,
+                            content_type: 'series',
+                            add_mode: 'episode',
+                            name: cb.dataset.title || 'Episode ' + cb.dataset.epNum,
+                            series_name: d.seriesName,
+                            season: cb.dataset.season,
+                            episode_num: parseInt(cb.dataset.epNum),
+                            episode_title: cb.dataset.title,
+                            icon: d.icon,
+                            group: d.group,
+                            container_extension: cb.dataset.ext || 'mp4'
+                        })
+                    });
+                    if (resp.ok) addedCount++;
+                } catch (e) {}
+            }
+            showToast('Added ' + addedCount + ' episodes to cart', 'success');
+            updateCartBadge();
+            closeEpisodeModal();
+        }
+
+        // Load cart badge on page load
+        updateCartBadge();
 
         function checkVersion() {
             fetch('/api/version').then(r => r.json()).then(data => {

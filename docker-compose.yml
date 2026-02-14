@@ -6,6 +6,7 @@ services:
       - "8080:5000"
     volumes:
       - ./data:/data
+      - ./downloads:/data/downloads
     restart: unless-stopped
     environment:
       - TZ=Europe/Paris

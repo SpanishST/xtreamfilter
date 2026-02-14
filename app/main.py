@@ -1822,6 +1822,8 @@ async def download_worker():
                             item["status"] = "failed"
                             item["error"] = error_msg
                             save_cart()
+                            # Send per-file Telegram notification for HTTP failure
+                            await _send_download_file_notification(item)
                             # Clean up partial temp file
                             try:
                                 if os.path.exists(temp_path):
@@ -1956,6 +1958,8 @@ async def download_worker():
                 item["file_size"] = file_size
                 save_cart()
                 logger.info(f"Download completed: {item.get('name')} -> {file_path} ({file_size / 1024 / 1024:.1f} MB)")
+                # Send per-file Telegram notification
+                await _send_download_file_notification(item)
 
             # Pause between files if throttle is active
             if pause_interval > 0 and pause_duration > 0:
@@ -1978,6 +1982,8 @@ async def download_worker():
             item["status"] = "failed"
             item["error"] = str(e)
             save_cart()
+            # Send per-file Telegram notification for failure
+            await _send_download_file_notification(item)
             # Clean up partial temp file on error
             try:
                 if os.path.exists(temp_path):
@@ -1987,6 +1993,127 @@ async def download_worker():
 
     _download_current_item = None
     _download_progress = {"bytes_downloaded": 0, "total_bytes": 0, "speed": 0, "paused": False, "pause_remaining": 0}
+
+    # --- Send queue-complete Telegram notification ---
+    await _send_download_queue_complete_notification()
+
+
+def _get_download_item_display_name(item: dict) -> str:
+    """Build a human-readable display name for a download cart item."""
+    if item.get("content_type") == "series" and item.get("series_name"):
+        name = item["series_name"]
+        name += f" S{str(item.get('season', 1)).zfill(2)}E{str(item.get('episode_num', 0)).zfill(2)}"
+        if item.get("episode_title"):
+            name += f" - {item['episode_title']}"
+        return name
+    return item.get("name", "Unknown")
+
+
+def _format_bytes(b: int) -> str:
+    """Format bytes to human-readable string."""
+    if not b or b == 0:
+        return "0 B"
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if abs(b) < 1024:
+            return f"{b:.1f} {unit}"
+        b /= 1024
+    return f"{b:.1f} PB"
+
+
+async def _send_download_file_notification(item: dict):
+    """Send a Telegram notification when a single file finishes downloading."""
+    config = load_config()
+    opts = config.get("options", {})
+    telegram_config = opts.get("telegram", {})
+
+    if not telegram_config.get("enabled"):
+        return
+    if not opts.get("download_notify_file", False):
+        return
+
+    bot_token = telegram_config.get("bot_token", "")
+    chat_id = telegram_config.get("chat_id", "")
+    if not bot_token or not chat_id:
+        return
+
+    name = _get_download_item_display_name(item)
+    status = item.get("status", "unknown")
+    icon = "\u2705" if status == "completed" else "\u274c"  # ✅ or ❌
+    file_size = _format_bytes(item.get("file_size", 0)) if status == "completed" else ""
+    error_msg = f"\n\u26a0\ufe0f Error: {item.get('error', '')}" if item.get("error") else ""
+    size_line = f"\n\U0001f4be Size: {file_size}" if file_size else ""
+
+    text = f"{icon} <b>Download {status}</b>\n\n\U0001f3ac {name}{size_line}{error_msg}"
+
+    try:
+        client = await get_http_client()
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+        logger.info(f"Telegram download notification sent for: {name}")
+    except Exception as e:
+        logger.error(f"Failed to send Telegram download notification: {e}")
+
+
+async def _send_download_queue_complete_notification():
+    """Send a Telegram notification when the entire download queue has finished processing."""
+    config = load_config()
+    opts = config.get("options", {})
+    telegram_config = opts.get("telegram", {})
+
+    if not telegram_config.get("enabled"):
+        return
+    if not opts.get("download_notify_queue", False):
+        return
+
+    bot_token = telegram_config.get("bot_token", "")
+    chat_id = telegram_config.get("chat_id", "")
+    if not bot_token or not chat_id:
+        return
+
+    completed = [i for i in _download_cart if i.get("status") == "completed"]
+    failed = [i for i in _download_cart if i.get("status") in ("failed", "cancelled")]
+    total = len(completed) + len(failed)
+
+    if total == 0:
+        return
+
+    text = "\U0001f3c1 <b>Download queue finished</b>\n\n"
+    text += f"\u2705 Completed: {len(completed)}\n"
+    if failed:
+        text += f"\u274c Failed: {len(failed)}\n"
+    text += "\n"
+
+    # Recap completed items (limit to keep message short)
+    if completed:
+        text += "<b>Completed:</b>\n"
+        for item in completed[:20]:
+            name = _get_download_item_display_name(item)
+            size = _format_bytes(item.get("file_size", 0))
+            text += f"  \u2022 {name} ({size})\n"
+        if len(completed) > 20:
+            text += f"  ... and {len(completed) - 20} more\n"
+
+    # Recap failed items
+    if failed:
+        text += "\n<b>Failed:</b>\n"
+        for item in failed[:10]:
+            name = _get_download_item_display_name(item)
+            err = item.get("error", "Unknown error")
+            text += f"  \u2022 {name} — {err}\n"
+        if len(failed) > 10:
+            text += f"  ... and {len(failed) - 10} more\n"
+
+    # Telegram message limit
+    if len(text) > 4000:
+        text = text[:3990] + "\n..."
+
+    try:
+        client = await get_http_client()
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+        logger.info("Telegram queue-complete notification sent")
+    except Exception as e:
+        logger.error(f"Failed to send Telegram queue-complete notification: {e}")
 
 
 async def fetch_series_episodes(source_id: str, series_id: str) -> list:
@@ -5866,6 +5993,38 @@ async def get_series_episodes_api(source_id: str, series_id: str):
         "series_name": episodes[0].get("series_name", "") if episodes else "",
         "seasons": sorted_seasons,
         "total_episodes": len(episodes),
+    }
+
+
+@app.get("/api/options/download_notifications")
+async def get_download_notifications_api():
+    """Get download Telegram notification preferences"""
+    config = load_config()
+    opts = config.get("options", {})
+    telegram_config = opts.get("telegram", {})
+    return {
+        "telegram_configured": bool(telegram_config.get("enabled") and telegram_config.get("bot_token") and telegram_config.get("chat_id")),
+        "notify_file": opts.get("download_notify_file", False),
+        "notify_queue": opts.get("download_notify_queue", False),
+    }
+
+
+@app.post("/api/options/download_notifications")
+async def set_download_notifications_api(request: Request):
+    """Set download Telegram notification preferences"""
+    config = load_config()
+    data = await request.json()
+
+    if "options" not in config:
+        config["options"] = {}
+    config["options"]["download_notify_file"] = bool(data.get("notify_file", False))
+    config["options"]["download_notify_queue"] = bool(data.get("notify_queue", False))
+    save_config(config)
+
+    return {
+        "status": "ok",
+        "notify_file": config["options"]["download_notify_file"],
+        "notify_queue": config["options"]["download_notify_queue"],
     }
 
 

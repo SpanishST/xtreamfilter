@@ -173,6 +173,19 @@
                 <button class="btn btn-primary btn-small" onclick="saveThrottle()" style="align-self:flex-end; white-space:nowrap;">Save Throttle</button>
             </div>
             <div id="player-ua-preview" style="font-size:0.75em; color:#666; margin-top:8px; font-family:monospace;"></div>
+            <div id="telegram-notify-section" style="display:none; margin-top:16px;">
+                <div class="settings-section-title">📨 Telegram Notifications</div>
+                <div class="settings-row" style="gap:20px;">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:0.9em;">
+                        <input type="checkbox" id="notify-file" onchange="saveNotifySettings()" style="width:16px; height:16px; accent-color:#00d4ff;">
+                        Notify when each file finishes downloading
+                    </label>
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:0.9em;">
+                        <input type="checkbox" id="notify-queue" onchange="saveNotifySettings()" style="width:16px; height:16px; accent-color:#00d4ff;">
+                        Notify when the entire queue finishes (with recap)
+                    </label>
+                </div>
+            </div>
         </div>
 
         <!-- Summary -->
@@ -217,6 +230,7 @@
                     <span id="current-speed"></span>
                     <span id="current-size"></span>
                     <span id="current-percent"></span>
+                    <span id="current-eta" style="color:#00d4ff;"></span>
                 </div>
             </div>
             <div class="progress-bar-container">
@@ -260,6 +274,7 @@
         document.addEventListener('DOMContentLoaded', function() {
             loadDownloadPath();
             loadThrottleSettings();
+            loadNotifySettings();
             loadCart();
             startPolling();
         });
@@ -368,6 +383,35 @@
                     showToast(data.error || 'Failed to save', 'error');
                 }
             } catch (e) { showToast('Error saving throttle settings', 'error'); }
+        }
+
+        async function loadNotifySettings() {
+            try {
+                const resp = await fetch('/api/options/download_notifications');
+                const data = await resp.json();
+                if (data.telegram_configured) {
+                    document.getElementById('telegram-notify-section').style.display = '';
+                    document.getElementById('notify-file').checked = !!data.notify_file;
+                    document.getElementById('notify-queue').checked = !!data.notify_queue;
+                }
+            } catch (e) { console.error('Error loading notification settings:', e); }
+        }
+
+        async function saveNotifySettings() {
+            const notifyFile = document.getElementById('notify-file').checked;
+            const notifyQueue = document.getElementById('notify-queue').checked;
+            try {
+                const resp = await fetch('/api/options/download_notifications', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ notify_file: notifyFile, notify_queue: notifyQueue })
+                });
+                if (resp.ok) {
+                    showToast('Notification settings saved', 'success');
+                } else {
+                    showToast('Failed to save notification settings', 'error');
+                }
+            } catch (e) { showToast('Error saving notification settings', 'error'); }
         }
 
         async function loadCart() {
@@ -480,6 +524,18 @@
                     document.getElementById('current-percent').textContent = data.current.progress + '%';
                     document.getElementById('current-progress-bar').style.width = data.current.progress + '%';
 
+                    // Compute ETA
+                    const etaEl = document.getElementById('current-eta');
+                    if (data.current.speed > 0 && data.current.total_bytes > 0) {
+                        const remaining = data.current.total_bytes - data.current.bytes_downloaded;
+                        const etaSec = Math.max(0, Math.round(remaining / data.current.speed));
+                        etaEl.textContent = 'ETA ' + formatDuration(etaSec);
+                    } else if (data.current.total_bytes > 0) {
+                        etaEl.textContent = 'ETA --:--';
+                    } else {
+                        etaEl.textContent = '';
+                    }
+
                     // Show pause indicator
                     const pauseEl = document.getElementById('pause-indicator');
                     if (data.current.paused) {
@@ -577,6 +633,15 @@
             const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
             const i = Math.floor(Math.log(bytes) / Math.log(k));
             return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+
+        function formatDuration(totalSeconds) {
+            if (totalSeconds < 60) return totalSeconds + 's';
+            const h = Math.floor(totalSeconds / 3600);
+            const m = Math.floor((totalSeconds % 3600) / 60);
+            const s = totalSeconds % 60;
+            if (h > 0) return h + 'h ' + String(m).padStart(2, '0') + 'm';
+            return m + 'm ' + String(s).padStart(2, '0') + 's';
         }
 
         function escapeHtml(text) {

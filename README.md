@@ -28,6 +28,7 @@ A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Se
 - � **Content Browser** - Browse and search all your content with cover art and details
 - 📂 **Custom Categories** - Create manual or automatic categories with pattern matching
 - 📱 **Telegram Notifications** - Get notified when new content matches your categories
+- ⬇️ **VOD & Series Downloads** - Download movies and series episodes locally with a cart-based queue
 - �🐳 **Docker Ready** - Easy deployment with docker-compose
 
 ## Quick Start
@@ -403,6 +404,86 @@ Get notified on Telegram when automatic categories find new content:
 | `/api/config/telegram` | POST | Update Telegram settings |
 | `/api/config/telegram/test` | POST | Send a test notification |
 | `/api/config/telegram/test-diff` | POST | Send a test category update notification |
+
+## Download Manager
+
+Download VOD movies and series episodes locally with a built-in cart-based queue system, accessible from the Browse and Cart pages.
+
+### What Can Be Downloaded
+
+- **Movies (VOD)** — Add films directly from the Browse page. If a movie exists in multiple sources, a modal lets you choose which provider to download from.
+- **Series Episodes** — Three granularity levels via an episode selector:
+  - Individual episodes (checkbox selection)
+  - Full season ("Add Season" button)
+  - Entire series ("Add All Episodes" button)
+
+### Cart & Queue
+
+Items are queued through a persistent cart (`data/cart.json`) that survives container restarts. The background download worker processes items **sequentially** (one at a time) to respect provider connection limits.
+
+**Item lifecycle:** `queued` → `downloading` → `completed` / `failed` / `cancelled`
+
+- **Duplicate prevention** — Adding an already-queued item returns HTTP 409
+- **Crash recovery** — Items stuck in `downloading` after a restart are automatically re-queued
+- **Live progress** — The Cart page polls every 2 seconds for real-time speed, progress, and pause status
+
+### Anti-Ban & Throttling
+
+All settings are configurable from the Cart page UI and persisted in `config.json`:
+
+| Feature | Description |
+|---------|-------------|
+| **Bandwidth Limit** | Throttle download speed in KB/s (0 = unlimited) |
+| **Periodic Pauses** | Download for N seconds, then pause for M seconds (simulates player buffering) |
+| **Player Profile** | Emulate real IPTV player HTTP headers to avoid provider blocks |
+| **Auto-Retry** | Up to 5 retries with 30s×N backoff on errors (429, 458, 503, 551) |
+
+**Available Player Profiles:**
+
+| Profile | Player |
+|---------|--------|
+| `tivimate` | TiviMate 4.7.0 |
+| `smarters` | IPTV Smarters Pro |
+| `vlc` | VLC 3.0.20 |
+| `kodi` | Kodi 21.0 |
+| `xciptv` | XCIPTV 6.0.0 |
+| `ott_navigator` | OTT Navigator 1.7.1 |
+| `ffmpeg` | FFmpeg/Lavf |
+
+### File Organization
+
+Downloads are organized automatically:
+
+```
+<download_path>/
+├── Films/
+│   └── Movie Name.mp4
+└── Series/
+    └── Show Name/
+        ├── S01/
+        │   ├── Show Name S01E01 - Episode Title.mkv
+        │   └── Show Name S01E02.mkv
+        └── S02/
+            └── Show Name S02E01 - Pilot.mp4
+```
+
+### Download API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/cart` | GET | List all cart items |
+| `/api/cart` | POST | Add item(s) to cart |
+| `/api/cart/{id}` | DELETE | Remove a single item |
+| `/api/cart/{id}/retry` | POST | Re-queue a failed/cancelled item |
+| `/api/cart/retry-all` | POST | Re-queue all failed/cancelled items |
+| `/api/cart/clear` | POST | Clear items by mode: `completed`, `failed`, `finished`, `all` |
+| `/api/cart/start` | POST | Launch the background download worker |
+| `/api/cart/cancel` | POST | Cancel the current download gracefully |
+| `/api/cart/status` | GET | Queue stats, progress, speed, pause state |
+| `/api/options/download_path` | GET/POST | Get or set download directory |
+| `/api/options/download_temp_path` | GET/POST | Get or set temp directory |
+| `/api/options/download_throttle` | GET/POST | Get or set throttle settings |
+| `/api/options/player_profiles` | GET | List available player profiles |
 
 ## API Endpoints
 

@@ -46,6 +46,7 @@ API_CACHE_FILE = os.path.join(DATA_DIR, "api_cache.json")
 PROGRESS_FILE = os.path.join(DATA_DIR, "refresh_progress.json")
 CATEGORIES_FILE = os.path.join(DATA_DIR, "categories.json")
 CART_FILE = os.path.join(DATA_DIR, "cart.json")
+MONITORED_FILE = os.path.join(DATA_DIR, "monitored_series.json")
 EPG_CACHE_FILE = os.path.join(DATA_DIR, "epg_cache.xml")
 
 # Templates
@@ -1224,6 +1225,12 @@ async def background_refresh_loop():
                 last_refresh = _api_cache.get("last_refresh", "Never")
                 logger.info(f"Cache still valid. Last refresh: {last_refresh}")
 
+            # Run series monitoring check after cache refresh
+            try:
+                await check_monitored_series()
+            except Exception as e:
+                logger.error(f"Series monitoring error in background loop: {e}")
+
             logger.debug(f"Next cache check in {refresh_interval} seconds")
             await asyncio.sleep(refresh_interval)
 
@@ -1421,6 +1428,9 @@ _download_cancel_event: Optional[asyncio.Event] = None
 _download_current_item: Optional[dict] = None
 _download_progress: dict = {"bytes_downloaded": 0, "total_bytes": 0, "speed": 0, "paused": False, "pause_remaining": 0}
 
+# In-memory monitored series state
+_monitored_series: list = []
+
 
 def load_cart() -> list:
     """Load download cart from file"""
@@ -1445,6 +1455,320 @@ def save_cart(items: list = None):
     os.makedirs(os.path.dirname(CART_FILE), exist_ok=True)
     with open(CART_FILE, "w") as f:
         json.dump({"items": _download_cart}, f, indent=2)
+
+
+def load_monitored() -> list:
+    """Load monitored series from file"""
+    global _monitored_series
+    if os.path.exists(MONITORED_FILE):
+        try:
+            with open(MONITORED_FILE) as f:
+                data = json.load(f)
+                _monitored_series = data.get("series", [])
+                return _monitored_series
+        except (OSError, json.JSONDecodeError) as e:
+            logger.error(f"Error loading monitored series: {e}")
+    _monitored_series = []
+    return _monitored_series
+
+
+def save_monitored(items: list = None):
+    """Save monitored series to file"""
+    global _monitored_series
+    if items is not None:
+        _monitored_series = items
+    os.makedirs(os.path.dirname(MONITORED_FILE), exist_ok=True)
+    with open(MONITORED_FILE, "w") as f:
+        json.dump({"series": _monitored_series}, f, indent=2)
+
+
+def _find_series_across_sources(series_name: str, exclude_source_id: str = None) -> list:
+    """Find a series across all enabled sources by fuzzy name matching.
+    
+    Returns list of dicts: [{"source_id", "series_id", "name", "cover"}]
+    """
+    config = load_config()
+    enabled_sources = {s["id"]: s for s in config.get("sources", []) if s.get("enabled", True)}
+    
+    target_normalized = normalize_name(series_name)
+    if not target_normalized:
+        return []
+    
+    matches = []
+    series_list, _ = get_cached_with_source_info("series", "series_categories")
+    
+    for s in series_list:
+        src_id = s.get("_source_id", "")
+        if src_id not in enabled_sources:
+            continue
+        if exclude_source_id and src_id == exclude_source_id:
+            continue
+        s_name = s.get("name", "")
+        s_normalized = normalize_name(s_name)
+        if not s_normalized:
+            continue
+        score = fuzz.token_sort_ratio(target_normalized, s_normalized)
+        if score >= 90:
+            matches.append({
+                "source_id": src_id,
+                "series_id": str(s.get("series_id", "")),
+                "name": s_name,
+                "cover": s.get("cover", "") or s.get("stream_icon", ""),
+                "score": score,
+            })
+    
+    # Sort by score descending, then by source order in config
+    source_order = {s["id"]: i for i, s in enumerate(config.get("sources", []))}
+    matches.sort(key=lambda m: (-m["score"], source_order.get(m["source_id"], 999)))
+    return matches
+
+
+async def check_monitored_series():
+    """Check all enabled monitored series for new episodes.
+    
+    Called after each cache refresh. For each monitored entry:
+    1. Fetch current episodes from the source (or find across sources)
+    2. Diff against known + downloaded episodes
+    3. Auto-queue new episodes for download
+    4. Send Telegram notification
+    """
+    global _download_task
+    
+    if not _monitored_series:
+        return
+    
+    enabled = [m for m in _monitored_series if m.get("enabled", True)]
+    if not enabled:
+        return
+    
+    logger.info(f"Series monitoring: checking {len(enabled)} monitored series...")
+    
+    all_notifications = []  # [(series_name, new_episodes, cover, action)]
+    any_queued = False
+    
+    for entry in enabled:
+        try:
+            new_eps = await _check_single_monitored(entry)
+            if new_eps:
+                action = entry.get("action", "both")
+                all_notifications.append((
+                    entry.get("series_name", "Unknown"),
+                    new_eps,
+                    entry.get("cover", ""),
+                    action,
+                ))
+                if action in ("download", "both"):
+                    any_queued = True
+        except Exception as e:
+            logger.error(f"Error checking monitored series '{entry.get('series_name', '?')}': {e}")
+        
+        # Throttle between series to avoid hammering providers
+        await asyncio.sleep(1)
+    
+    save_monitored()
+    
+    # Send Telegram notifications (only for notify or both)
+    for series_name, new_eps, cover, action in all_notifications:
+        if action in ("notify", "both"):
+            await _send_monitor_notification(series_name, new_eps, cover)
+    
+    # Auto-start download worker if we queued anything
+    if any_queued:
+        queued = [i for i in _download_cart if i.get("status") == "queued"]
+        if queued and (_download_task is None or _download_task.done()):
+            download_path = get_download_path()
+            os.makedirs(download_path, exist_ok=True)
+            _download_task = asyncio.create_task(download_worker())
+            logger.info(f"Series monitoring: auto-started download worker for {len(queued)} queued items")
+    
+    logger.info(f"Series monitoring: check complete. {sum(len(eps) for _, eps, _, _ in all_notifications)} new episodes found.")
+
+
+async def _check_single_monitored(entry: dict) -> list:
+    """Check a single monitored series entry for new episodes.
+    
+    Returns list of new episode dicts that were added to cart.
+    """
+    series_name = entry.get("series_name", "")
+    source_id = entry.get("source_id")  # None means any source
+    series_id = entry.get("series_id", "")
+    scope = entry.get("scope", "new_only")
+    season_filter = entry.get("season_filter")
+    
+    # Determine which source(s) to try
+    sources_to_try = []
+    if source_id:
+        # Single source mode
+        sources_to_try = [{"source_id": source_id, "series_id": series_id}]
+    else:
+        # Any source mode — find across all sources
+        matches = _find_series_across_sources(series_name)
+        if matches:
+            sources_to_try = [{"source_id": m["source_id"], "series_id": m["series_id"]} for m in matches]
+        else:
+            logger.warning(f"Series monitoring: '{series_name}' not found in any source")
+            entry["last_checked"] = datetime.now().isoformat()
+            entry["last_new_count"] = 0
+            return []
+    
+    # Fetch episodes from the first source that returns results (first found wins)
+    episodes = []
+    used_source_id = None
+    for src in sources_to_try:
+        eps = await fetch_series_episodes(src["source_id"], src["series_id"])
+        if eps:
+            episodes = eps
+            used_source_id = src["source_id"]
+            break
+        await asyncio.sleep(0.5)
+    
+    if not episodes:
+        logger.info(f"Series monitoring: no episodes returned for '{series_name}'")
+        entry["last_checked"] = datetime.now().isoformat()
+        entry["last_new_count"] = 0
+        return []
+    
+    # Apply scope filter
+    if scope == "season" and season_filter:
+        episodes = [ep for ep in episodes if str(ep.get("season")) == str(season_filter)]
+    
+    # Build known episode keys: (season, episode_num) tuples
+    known_keys = {
+        (str(k.get("season")), int(k.get("episode_num", 0)))
+        for k in entry.get("known_episodes", [])
+    }
+    downloaded_keys = {
+        (str(k.get("season")), int(k.get("episode_num", 0)))
+        for k in entry.get("downloaded_episodes", [])
+    }
+    already_seen = known_keys | downloaded_keys
+    
+    # Determine action mode
+    action = entry.get("action", "both")
+    should_download = action in ("download", "both")
+    
+    # Find new episodes
+    new_episodes = []
+    for ep in episodes:
+        ep_key = (str(ep.get("season")), int(ep.get("episode_num", 0)))
+        if ep_key in already_seen:
+            continue
+        
+        # Check if already in cart (prevent duplicates)
+        stream_id = str(ep.get("stream_id", ""))
+        if should_download and any(
+            i.get("source_id") == used_source_id
+            and i.get("stream_id") == stream_id
+            and i.get("status") in ("queued", "downloading")
+            for i in _download_cart
+        ):
+            continue
+        
+        # Build cart item (used for both download and notification info)
+        cart_item = {
+            "id": str(uuid.uuid4()),
+            "stream_id": stream_id,
+            "source_id": used_source_id,
+            "content_type": "series",
+            "name": ep.get("title", "") or f"Episode {ep.get('episode_num', '')}",
+            "series_name": ep.get("series_name", series_name),
+            "season": ep.get("season"),
+            "episode_num": ep.get("episode_num", 0),
+            "episode_title": ep.get("title", ""),
+            "icon": entry.get("cover", ""),
+            "group": "",
+            "container_extension": ep.get("container_extension", "mp4"),
+            "added_at": datetime.now().isoformat(),
+            "status": "queued",
+            "progress": 0,
+            "error": None,
+            "file_path": None,
+            "file_size": None,
+        }
+        
+        if should_download:
+            filepath = build_download_filepath(cart_item)
+            if os.path.exists(filepath):
+                # Already downloaded, track it
+                entry.setdefault("downloaded_episodes", []).append({
+                    "stream_id": stream_id,
+                    "source_id": used_source_id,
+                    "season": ep.get("season"),
+                    "episode_num": ep.get("episode_num", 0),
+                })
+                continue
+            
+            # Add to cart
+            _download_cart.append(cart_item)
+        
+        new_episodes.append(cart_item)
+        
+        # Track as seen
+        entry.setdefault("downloaded_episodes", []).append({
+            "stream_id": stream_id,
+            "source_id": used_source_id,
+            "season": ep.get("season"),
+            "episode_num": ep.get("episode_num", 0),
+        })
+    
+    if new_episodes and should_download:
+        save_cart()
+        logger.info(f"Series monitoring: '{series_name}' — {len(new_episodes)} new episodes queued")
+    elif new_episodes:
+        logger.info(f"Series monitoring: '{series_name}' — {len(new_episodes)} new episodes detected (notify only)")
+    
+    entry["last_checked"] = datetime.now().isoformat()
+    entry["last_new_count"] = len(new_episodes)
+    return new_episodes
+
+
+async def _send_monitor_notification(series_name: str, new_episodes: list, cover: str):
+    """Send a Telegram notification for new monitored episodes."""
+    config = load_config()
+    telegram_config = config.get("options", {}).get("telegram", {})
+    
+    if not telegram_config.get("enabled"):
+        return
+    
+    bot_token = telegram_config.get("bot_token", "")
+    chat_id = telegram_config.get("chat_id", "")
+    
+    if not bot_token or not chat_id:
+        return
+    
+    # Build message
+    count = len(new_episodes)
+    ep_lines = []
+    for ep in new_episodes[:15]:  # Cap at 15 lines
+        season = ep.get("season", "?")
+        ep_num = ep.get("episode_num", "?")
+        title = ep.get("episode_title") or ep.get("name", "")
+        ep_lines.append(f"  • S{int(season):02d}E{int(ep_num):02d} — {title}")
+    
+    text = f"📡 <b>Series Monitor</b> — <b>{series_name}</b>\n"
+    text += f"{count} new episode(s) detected and queued:\n\n"
+    text += "\n".join(ep_lines)
+    if count > 15:
+        text += f"\n  ... and {count - 15} more"
+    
+    try:
+        client = await get_http_client()
+        
+        if cover:
+            url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+            payload = {"chat_id": chat_id, "photo": cover, "caption": text, "parse_mode": "HTML"}
+            response = await client.post(url, json=payload)
+            if response.status_code != 200:
+                # Fallback to text
+                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+        else:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+        
+        logger.info(f"Telegram monitoring notification sent for '{series_name}'")
+    except Exception as e:
+        logger.error(f"Failed to send monitoring notification: {e}")
 
 
 def get_download_path() -> str:
@@ -1852,6 +2176,9 @@ async def download_worker():
                         # Bandwidth throttle: track bytes in the current 1-second window
                         window_start = time.time()
                         window_bytes = 0
+                        # Sliding window for speed calculation (last 3 seconds)
+                        speed_window_duration = 3.0
+                        speed_samples: list[tuple[float, int]] = []  # (timestamp, cumulative_bytes)
                         # Pause timer: track when we last paused
                         last_pause_time = time.time()
 
@@ -1873,8 +2200,21 @@ async def download_worker():
                                 f.write(chunk)
                                 downloaded += len(chunk)
                                 window_bytes += len(chunk)
-                                elapsed = time.time() - start_time
-                                speed = downloaded / elapsed if elapsed > 0 else 0
+
+                                # Sliding-window speed: keep samples from the last N seconds
+                                now_speed = time.time()
+                                speed_samples.append((now_speed, downloaded))
+                                # Trim samples older than the window
+                                cutoff = now_speed - speed_window_duration
+                                while speed_samples and speed_samples[0][0] < cutoff:
+                                    speed_samples.pop(0)
+                                if len(speed_samples) >= 2:
+                                    dt = speed_samples[-1][0] - speed_samples[0][0]
+                                    db = speed_samples[-1][1] - speed_samples[0][1]
+                                    speed = db / dt if dt > 0 else 0
+                                else:
+                                    elapsed = now_speed - start_time
+                                    speed = downloaded / elapsed if elapsed > 0 else 0
 
                                 _download_progress["bytes_downloaded"] = downloaded
                                 _download_progress["speed"] = speed
@@ -1934,30 +2274,10 @@ async def download_worker():
             # Only mark completed if the download actually succeeded
             if item.get("status") == "downloading":
                 # Move from temp to final destination
-                try:
-                    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                    shutil.move(temp_path, file_path)
-                    logger.info(f"Moved completed download: {temp_path} -> {file_path}")
-                except Exception as e:
-                    logger.error(f"Failed to move download to final path: {e}")
-                    # If move fails (e.g. cross-device), try copy+delete
-                    try:
-                        shutil.copy2(temp_path, file_path)
-                        os.remove(temp_path)
-                        logger.info(f"Copied completed download: {temp_path} -> {file_path}")
-                    except Exception as e2:
-                        logger.error(f"Failed to copy download to final path: {e2}")
-                        item["status"] = "failed"
-                        item["error"] = f"Download OK but failed to move file: {e2}"
-                        save_cart()
-                        continue
+                move_ok = await _move_temp_to_destination(item, temp_path, file_path)
+                if not move_ok:
+                    continue
 
-                item["status"] = "completed"
-                item["progress"] = 100
-                file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-                item["file_size"] = file_size
-                save_cart()
-                logger.info(f"Download completed: {item.get('name')} -> {file_path} ({file_size / 1024 / 1024:.1f} MB)")
                 # Send per-file Telegram notification
                 await _send_download_file_notification(item)
 
@@ -1996,6 +2316,114 @@ async def download_worker():
 
     # --- Send queue-complete Telegram notification ---
     await _send_download_queue_complete_notification()
+
+
+async def _move_temp_to_destination(item: dict, temp_path: str, file_path: str) -> bool:
+    """Move a downloaded temp file to its final destination.
+    Returns True on success, False on failure (item status set to 'move_failed').
+    The temp file is NEVER deleted on failure so the user can retry the move."""
+    item_name = item.get('name', 'unknown')
+
+    # Verify temp file exists
+    if not os.path.exists(temp_path):
+        logger.error(f"[MOVE] Temp file does not exist: {temp_path} (item: {item_name})")
+        item["status"] = "move_failed"
+        item["error"] = f"Temp file disappeared: {temp_path}"
+        item["temp_path"] = temp_path
+        save_cart()
+        return False
+
+    temp_size = os.path.getsize(temp_path)
+    logger.info(f"[MOVE] Starting move for '{item_name}': {temp_path} ({temp_size / 1024 / 1024:.1f} MB) -> {file_path}")
+
+    if temp_size == 0:
+        logger.error(f"[MOVE] Temp file is empty (0 bytes): {temp_path} (item: {item_name})")
+        item["status"] = "move_failed"
+        item["error"] = f"Temp file is empty (0 bytes): {temp_path}"
+        item["temp_path"] = temp_path
+        save_cart()
+        return False
+
+    # Ensure destination directory exists
+    dest_dir = os.path.dirname(file_path)
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        logger.info(f"[MOVE] Destination directory ready: {dest_dir}")
+    except Exception as e:
+        logger.error(f"[MOVE] Failed to create destination directory {dest_dir}: {e}")
+        item["status"] = "move_failed"
+        item["error"] = f"Cannot create destination directory: {e}"
+        item["temp_path"] = temp_path
+        save_cart()
+        return False
+
+    # Attempt move (atomic on same filesystem)
+    moved = False
+    try:
+        shutil.move(temp_path, file_path)
+        logger.info(f"[MOVE] shutil.move succeeded: {temp_path} -> {file_path}")
+        moved = True
+    except Exception as e:
+        logger.warning(f"[MOVE] shutil.move failed (will try copy+delete): {e}")
+        # Fallback: copy + verify + delete (handles cross-device)
+        try:
+            shutil.copy2(temp_path, file_path)
+            logger.info(f"[MOVE] shutil.copy2 succeeded: {temp_path} -> {file_path}")
+            moved = True
+        except Exception as e2:
+            logger.error(f"[MOVE] shutil.copy2 also failed: {e2}")
+
+    if not moved:
+        logger.error(f"[MOVE] All move attempts failed for '{item_name}'. Temp file preserved at: {temp_path}")
+        item["status"] = "move_failed"
+        item["error"] = f"Download OK but failed to move file to destination. Temp file preserved."
+        item["temp_path"] = temp_path
+        save_cart()
+        return False
+
+    # Verify destination file exists and size matches
+    if not os.path.exists(file_path):
+        logger.error(f"[MOVE] Destination file does not exist after move: {file_path}")
+        item["status"] = "move_failed"
+        item["error"] = f"Destination file missing after move operation"
+        item["temp_path"] = temp_path
+        save_cart()
+        return False
+
+    dest_size = os.path.getsize(file_path)
+    logger.info(f"[MOVE] Destination file size: {dest_size / 1024 / 1024:.1f} MB (temp was: {temp_size / 1024 / 1024:.1f} MB)")
+
+    if dest_size != temp_size:
+        logger.error(f"[MOVE] SIZE MISMATCH! Temp: {temp_size} bytes, Dest: {dest_size} bytes. Keeping temp file.")
+        # Remove incomplete destination file
+        try:
+            os.remove(file_path)
+        except OSError:
+            pass
+        item["status"] = "move_failed"
+        item["error"] = f"Size mismatch after move (temp={temp_size}, dest={dest_size}). Temp file preserved."
+        item["temp_path"] = temp_path
+        save_cart()
+        return False
+
+    # Move succeeded and verified — now safe to remove temp if it still exists (copy path)
+    if os.path.exists(temp_path):
+        try:
+            os.remove(temp_path)
+            logger.info(f"[MOVE] Cleaned up temp file: {temp_path}")
+        except OSError as e:
+            logger.warning(f"[MOVE] Could not remove temp file (non-critical): {e}")
+
+    # Success
+    item["status"] = "completed"
+    item["progress"] = 100
+    item["file_size"] = dest_size
+    item["file_path"] = file_path
+    if "temp_path" in item:
+        del item["temp_path"]
+    save_cart()
+    logger.info(f"[MOVE] ✅ Completed: '{item_name}' -> {file_path} ({dest_size / 1024 / 1024:.1f} MB)")
+    return True
 
 
 def _get_download_item_display_name(item: dict) -> str:
@@ -3211,6 +3639,7 @@ async def lifespan(app: FastAPI):
     load_cache_from_disk()
     load_epg_cache_from_disk()
     load_cart()
+    load_monitored()
     
     # Recovery: reset any items stuck in "downloading" from a previous run/crash
     recovered = 0
@@ -5745,15 +6174,37 @@ async def retry_cart_item(item_id: str):
     """Retry a failed or cancelled cart item by resetting it to queued"""
     for item in _download_cart:
         if item.get("id") == item_id:
-            if item.get("status") not in ("failed", "cancelled"):
+            if item.get("status") not in ("failed", "cancelled", "move_failed"):
                 return JSONResponse({"error": "Item is not in a retryable state"}, status_code=400)
             item["status"] = "queued"
             item["progress"] = 0
             item["error"] = None
             item["file_path"] = None
             item["file_size"] = None
+            item.pop("temp_path", None)
             save_cart()
             return {"status": "ok", "message": f"Re-queued: {item.get('name', '')}"}
+    return JSONResponse({"error": "Item not found"}, status_code=404)
+
+
+@app.post("/api/cart/{item_id}/move")
+async def move_cart_item(item_id: str):
+    """Retry moving a temp file to its final destination for a move_failed item"""
+    for item in _download_cart:
+        if item.get("id") == item_id:
+            if item.get("status") != "move_failed":
+                return JSONResponse({"error": "Item is not in move_failed state"}, status_code=400)
+            temp_path = item.get("temp_path")
+            if not temp_path or not os.path.exists(temp_path):
+                return JSONResponse({"error": f"Temp file not found: {temp_path}"}, status_code=400)
+            file_path = build_download_filepath(item)
+            item["status"] = "downloading"  # temporarily mark as downloading for the move
+            move_ok = await _move_temp_to_destination(item, temp_path, file_path)
+            if move_ok:
+                await _send_download_file_notification(item)
+                return {"status": "ok", "message": f"Moved successfully: {item.get('name', '')}"}
+            else:
+                return JSONResponse({"error": item.get('error', 'Move failed')}, status_code=500)
     return JSONResponse({"error": "Item not found"}, status_code=404)
 
 
@@ -5762,12 +6213,13 @@ async def retry_all_failed():
     """Retry all failed/cancelled items"""
     count = 0
     for item in _download_cart:
-        if item.get("status") in ("failed", "cancelled"):
+        if item.get("status") in ("failed", "cancelled", "move_failed"):
             item["status"] = "queued"
             item["progress"] = 0
             item["error"] = None
             item["file_path"] = None
             item["file_size"] = None
+            item.pop("temp_path", None)
             count += 1
     save_cart()
     return {"status": "ok", "retried": count}
@@ -5786,9 +6238,9 @@ async def clear_cart(request: Request):
     elif mode == "completed":
         _download_cart = [i for i in _download_cart if i.get("status") != "completed"]
     elif mode == "failed":
-        _download_cart = [i for i in _download_cart if i.get("status") not in ("failed", "cancelled")]
+        _download_cart = [i for i in _download_cart if i.get("status") not in ("failed", "cancelled", "move_failed")]
     elif mode == "finished":
-        _download_cart = [i for i in _download_cart if i.get("status") not in ("completed", "failed", "cancelled")]
+        _download_cart = [i for i in _download_cart if i.get("status") not in ("completed", "failed", "cancelled", "move_failed")]
 
     save_cart()
     return {"status": "ok", "remaining": len(_download_cart)}
@@ -5834,7 +6286,7 @@ async def cart_status():
     queued = len([i for i in _download_cart if i.get("status") == "queued"])
     downloading = len([i for i in _download_cart if i.get("status") == "downloading"])
     completed = len([i for i in _download_cart if i.get("status") == "completed"])
-    failed = len([i for i in _download_cart if i.get("status") in ("failed", "cancelled")])
+    failed = len([i for i in _download_cart if i.get("status") in ("failed", "cancelled", "move_failed")])
 
     current = None
     if _download_current_item:
@@ -5921,6 +6373,52 @@ async def set_download_temp_path_api(request: Request):
     save_config(config)
 
     return {"status": "ok", "download_temp_path": path}
+
+
+@app.post("/api/options/test_path")
+async def test_path_write(request: Request):
+    """Test if a directory path exists and is writable by creating a temp file."""
+    data = await request.json()
+    path = data.get("path", "").strip()
+
+    if not path:
+        return JSONResponse({"error": "Path cannot be empty"}, status_code=400)
+
+    # Check if path exists, try to create it
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as e:
+        return JSONResponse({"error": f"Cannot create directory: {e}", "writable": False}, status_code=400)
+
+    if not os.path.isdir(path):
+        return JSONResponse({"error": f"Path is not a directory: {path}", "writable": False}, status_code=400)
+
+    # Test write by creating and deleting a temp file
+    test_file = os.path.join(path, ".write_test_xtreamfilter")
+    try:
+        with open(test_file, "w") as f:
+            f.write("write test")
+        # Verify we can read it back
+        with open(test_file, "r") as f:
+            content = f.read()
+        if content != "write test":
+            return JSONResponse({"error": "Write verification failed: content mismatch", "writable": False}, status_code=500)
+        os.remove(test_file)
+    except PermissionError as e:
+        return JSONResponse({"error": f"Permission denied: {e}", "writable": False}, status_code=403)
+    except OSError as e:
+        return JSONResponse({"error": f"Write test failed: {e}", "writable": False}, status_code=500)
+
+    # Get disk space info
+    try:
+        stat = os.statvfs(path)
+        free_bytes = stat.f_bavail * stat.f_frsize
+        free_gb = free_bytes / (1024 ** 3)
+        msg = f"Writable, {free_gb:.1f} GB free"
+    except Exception:
+        msg = "Writable"
+
+    return {"writable": True, "message": msg}
 
 
 @app.get("/api/options/download_throttle")
@@ -6025,6 +6523,232 @@ async def set_download_notifications_api(request: Request):
         "status": "ok",
         "notify_file": config["options"]["download_notify_file"],
         "notify_queue": config["options"]["download_notify_queue"],
+    }
+
+
+# ============================================
+# SERIES MONITORING API
+# ============================================
+
+
+@app.get("/monitor", response_class=HTMLResponse)
+async def monitor_page(request: Request):
+    """Series monitoring page"""
+    return templates.TemplateResponse("monitor.html", {"request": request})
+
+
+@app.get("/api/monitor")
+async def get_monitored():
+    """Get all monitored series"""
+    return {"series": _monitored_series}
+
+
+@app.post("/api/monitor")
+async def add_monitored(request: Request):
+    """Add a new monitored series.
+    
+    Body: {
+        series_name, series_id, source_id (null for any source),
+        source_name (null for any source), cover,
+        scope: "all"|"season"|"new_only",
+        season_filter: str|null (only for scope=season)
+    }
+    """
+    data = await request.json()
+    series_name = data.get("series_name", "").strip()
+    series_id = str(data.get("series_id", ""))
+    source_id = data.get("source_id") or None
+    source_name = data.get("source_name") or None
+    source_category = data.get("source_category") or None
+    cover = data.get("cover", "")
+    scope = data.get("scope", "new_only")
+    season_filter = data.get("season_filter")
+    action = data.get("action", "both")
+    
+    if not series_name:
+        return JSONResponse({"error": "Series name is required"}, status_code=400)
+    
+    if scope not in ("all", "season", "new_only"):
+        return JSONResponse({"error": "Invalid scope"}, status_code=400)
+    
+    if action not in ("notify", "download", "both"):
+        return JSONResponse({"error": "Invalid action (must be notify, download or both)"}, status_code=400)
+    
+    if scope == "season" and not season_filter:
+        return JSONResponse({"error": "season_filter required when scope is 'season'"}, status_code=400)
+    
+    # Check for duplicates
+    for m in _monitored_series:
+        if source_id:
+            if m.get("source_id") == source_id and m.get("series_id") == series_id:
+                return JSONResponse({"error": "This series is already being monitored from this source"}, status_code=409)
+        else:
+            if not m.get("source_id") and normalize_name(m.get("series_name", "")) == normalize_name(series_name):
+                return JSONResponse({"error": "This series is already being monitored (any source)"}, status_code=409)
+    
+    # Build known episodes snapshot
+    known_episodes = []
+    if scope in ("new_only", "season"):
+        # Fetch current episodes to snapshot as "known"
+        if source_id:
+            episodes = await fetch_series_episodes(source_id, series_id)
+        else:
+            # Find in any source
+            matches = _find_series_across_sources(series_name)
+            episodes = []
+            for m in matches:
+                eps = await fetch_series_episodes(m["source_id"], m["series_id"])
+                if eps:
+                    episodes = eps
+                    break
+        
+        for ep in episodes:
+            if scope == "season" and str(ep.get("season")) != str(season_filter):
+                continue
+            known_episodes.append({
+                "stream_id": str(ep.get("stream_id", "")),
+                "source_id": source_id or "",
+                "season": str(ep.get("season", "")),
+                "episode_num": int(ep.get("episode_num", 0)),
+            })
+    # scope == "all" → known_episodes stays empty → everything is "new" on first check
+    
+    entry = {
+        "id": str(uuid.uuid4()),
+        "series_name": series_name,
+        "series_id": series_id,
+        "source_id": source_id,
+        "source_name": source_name,
+        "source_category": source_category,
+        "cover": cover,
+        "scope": scope,
+        "season_filter": str(season_filter) if season_filter else None,
+        "action": action,
+        "enabled": True,
+        "known_episodes": known_episodes,
+        "downloaded_episodes": [],
+        "created_at": datetime.now().isoformat(),
+        "last_checked": None,
+        "last_new_count": 0,
+    }
+    
+    _monitored_series.append(entry)
+    save_monitored()
+    
+    logger.info(f"Series monitoring: added '{series_name}' (scope={scope}, source={'any' if not source_id else source_id})")
+    return {"status": "ok", "entry": entry}
+
+
+@app.put("/api/monitor/{monitor_id}")
+async def update_monitored(monitor_id: str, request: Request):
+    """Update a monitored series entry (enabled, scope, season_filter, source)."""
+    data = await request.json()
+    
+    for entry in _monitored_series:
+        if entry.get("id") == monitor_id:
+            if "enabled" in data:
+                entry["enabled"] = bool(data["enabled"])
+            if "scope" in data:
+                new_scope = data["scope"]
+                if new_scope in ("all", "season", "new_only"):
+                    entry["scope"] = new_scope
+            if "season_filter" in data:
+                entry["season_filter"] = str(data["season_filter"]) if data["season_filter"] else None
+            if "source_id" in data:
+                entry["source_id"] = data["source_id"] or None
+                entry["source_name"] = data.get("source_name") or None
+            if "action" in data:
+                new_action = data["action"]
+                if new_action in ("notify", "download", "both"):
+                    entry["action"] = new_action
+            save_monitored()
+            return {"status": "ok", "entry": entry}
+    
+    return JSONResponse({"error": "Monitored entry not found"}, status_code=404)
+
+
+@app.delete("/api/monitor/{monitor_id}")
+async def delete_monitored(monitor_id: str):
+    """Remove a monitored series."""
+    global _monitored_series
+    original_len = len(_monitored_series)
+    _monitored_series = [m for m in _monitored_series if m.get("id") != monitor_id]
+    if len(_monitored_series) == original_len:
+        return JSONResponse({"error": "Monitored entry not found"}, status_code=404)
+    save_monitored()
+    return {"status": "ok"}
+
+
+@app.post("/api/monitor/check")
+async def trigger_monitor_check():
+    """Manually trigger a monitoring check for all enabled series."""
+    asyncio.create_task(check_monitored_series())
+    return {"status": "ok", "message": "Monitoring check started"}
+
+
+@app.get("/api/monitor/{monitor_id}/episodes")
+async def preview_monitored_episodes(monitor_id: str):
+    """Preview current episodes vs known for a monitored entry."""
+    entry = None
+    for m in _monitored_series:
+        if m.get("id") == monitor_id:
+            entry = m
+            break
+    
+    if not entry:
+        return JSONResponse({"error": "Monitored entry not found"}, status_code=404)
+    
+    source_id = entry.get("source_id")
+    series_id = entry.get("series_id")
+    
+    if source_id:
+        episodes = await fetch_series_episodes(source_id, series_id)
+    else:
+        matches = _find_series_across_sources(entry.get("series_name", ""))
+        episodes = []
+        for m in matches:
+            eps = await fetch_series_episodes(m["source_id"], m["series_id"])
+            if eps:
+                episodes = eps
+                break
+    
+    # Build known keys
+    known_keys = {
+        (str(k.get("season")), int(k.get("episode_num", 0)))
+        for k in entry.get("known_episodes", [])
+    }
+    downloaded_keys = {
+        (str(k.get("season")), int(k.get("episode_num", 0)))
+        for k in entry.get("downloaded_episodes", [])
+    }
+    
+    # Apply scope filter
+    scope = entry.get("scope", "new_only")
+    season_filter = entry.get("season_filter")
+    if scope == "season" and season_filter:
+        episodes = [ep for ep in episodes if str(ep.get("season")) == str(season_filter)]
+    
+    # Annotate each episode with status
+    annotated = []
+    for ep in episodes:
+        ep_key = (str(ep.get("season")), int(ep.get("episode_num", 0)))
+        status = "known"
+        if ep_key in downloaded_keys:
+            status = "downloaded"
+        elif ep_key not in known_keys:
+            status = "new"
+        annotated.append({
+            "season": ep.get("season"),
+            "episode_num": ep.get("episode_num"),
+            "title": ep.get("title", ""),
+            "status": status,
+        })
+    
+    return {
+        "series_name": entry.get("series_name"),
+        "total_episodes": len(episodes),
+        "new_count": len([a for a in annotated if a["status"] == "new"]),
+        "episodes": annotated,
     }
 
 

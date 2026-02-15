@@ -79,6 +79,7 @@
         .status-badge.downloading { background: rgba(255, 165, 2, 0.2); color: #ffa502; }
         .status-badge.completed { background: rgba(46, 213, 115, 0.2); color: #2ed573; }
         .status-badge.failed, .status-badge.cancelled { background: rgba(255, 71, 87, 0.2); color: #ff4757; }
+        .status-badge.move_failed { background: rgba(255, 165, 2, 0.2); color: #ffa502; }
         .item-progress { width: 80px; }
         .item-progress-bar { width: 100%; height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; overflow: hidden; }
         .item-progress-fill { height: 100%; background: #00d4ff; border-radius: 2px; transition: width 0.5s ease; }
@@ -118,6 +119,7 @@
             </div>
             <div class="header-nav">
                 <a href="/browse" class="btn btn-secondary">Custom categories & Downloads</a>
+                <a href="/monitor" class="btn btn-secondary">📡 Monitor</a>
                 <a href="/" class="btn btn-secondary">Settings</a>
             </div>
         </div>
@@ -131,6 +133,7 @@
                     <div style="display: flex; gap: 8px;">
                         <input type="text" id="download-path" placeholder="/data/downloads">
                         <button class="btn btn-primary btn-small" onclick="saveDownloadPath()" style="white-space:nowrap;">Save</button>
+                        <button class="btn btn-secondary btn-small" onclick="testPath('download-path')" style="white-space:nowrap;">🧪 Test</button>
                     </div>
                 </div>
                 <div class="setting-group" style="flex:1;">
@@ -138,6 +141,7 @@
                     <div style="display: flex; gap: 8px;">
                         <input type="text" id="download-temp-path" placeholder="/data/downloads/.tmp">
                         <button class="btn btn-primary btn-small" onclick="saveTempPath()" style="white-space:nowrap;">Save</button>
+                        <button class="btn btn-secondary btn-small" onclick="testPath('download-temp-path')" style="white-space:nowrap;">🧪 Test</button>
                     </div>
                 </div>
             </div>
@@ -328,6 +332,24 @@
             } catch (e) { showToast('Error saving temp path', 'error'); }
         }
 
+        async function testPath(inputId) {
+            const path = document.getElementById(inputId).value.trim();
+            if (!path) return showToast('Path cannot be empty', 'error');
+            try {
+                const resp = await fetch('/api/options/test_path', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: path })
+                });
+                const data = await resp.json();
+                if (resp.ok && data.writable) {
+                    showToast('✅ ' + path + ' — ' + data.message, 'success');
+                } else {
+                    showToast('❌ ' + path + ' — ' + (data.error || data.message || 'Not writable'), 'error');
+                }
+            } catch (e) { showToast('Error testing path', 'error'); }
+        }
+
         let playerProfiles = {};
 
         async function loadThrottleSettings() {
@@ -471,7 +493,10 @@
                 }
 
                 const canRemove = item.status !== 'downloading';
-                const retryBtn = (item.status === 'failed' || item.status === 'cancelled')
+                const moveBtn = (item.status === 'move_failed' && item.temp_path)
+                    ? '<button class="remove-btn" onclick="moveItem(\'' + item.id + '\')" title="Move to destination" style="color:#00d4ff;">📂</button>'
+                    : '';
+                const retryBtn = (item.status === 'failed' || item.status === 'cancelled' || item.status === 'move_failed')
                     ? '<button class="remove-btn" onclick="retryItem(\'' + item.id + '\')" title="Retry" style="color:#ffa502;">🔄</button>'
                     : '';
                 const removeBtn = canRemove
@@ -484,7 +509,7 @@
                     '<td>' + typeBadge + '</td>' +
                     '<td>' + statusBadge + '</td>' +
                     '<td>' + progressHtml + '</td>' +
-                    '<td>' + retryBtn + removeBtn + '</td>' +
+                    '<td>' + moveBtn + retryBtn + removeBtn + '</td>' +
                     '</tr>';
             }).join('');
         }
@@ -598,6 +623,19 @@
                 }
                 await loadCart();
             } catch (e) { showToast('Error retrying item', 'error'); }
+        }
+
+        async function moveItem(itemId) {
+            try {
+                const resp = await fetch('/api/cart/' + itemId + '/move', { method: 'POST' });
+                const data = await resp.json();
+                if (resp.ok) {
+                    showToast(data.message || 'File moved successfully', 'success');
+                } else {
+                    showToast(data.error || 'Move failed', 'error');
+                }
+                await loadCart();
+            } catch (e) { showToast('Error moving file', 'error'); }
         }
 
         async function retryAllFailed() {

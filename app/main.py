@@ -1887,6 +1887,7 @@ def get_download_throttle_settings() -> dict:
         "pause_interval": opts.get("download_pause_interval", 0),         # seconds between pauses, 0 = disabled
         "pause_duration": opts.get("download_pause_duration", 0),         # seconds to pause
         "player_profile": opts.get("download_player_profile", "tivimate"),  # IPTV player to emulate
+        "burst_reconnect": opts.get("download_burst_reconnect", 0),       # seconds, 0 = disabled. Reconnect to CDN periodically to exploit initial burst.
     }
 
 
@@ -2058,6 +2059,7 @@ async def download_worker():
             pause_interval = throttle["pause_interval"]
             pause_duration = throttle["pause_duration"]
             player_profile = throttle["player_profile"]
+            burst_reconnect = throttle["burst_reconnect"]  # seconds, 0 = disabled
 
             # Use a smaller chunk size when bandwidth is limited for finer control
             chunk_size = min(64 * 1024, bw_limit) if bw_limit > 0 else 512 * 1024
@@ -2067,6 +2069,8 @@ async def download_worker():
             # Use Connection: close to prevent keepalive from counting as active connection
             player_headers["Connection"] = "close"
             logger.info(f"Downloading with player profile '{player_profile}': {player_headers.get('User-Agent', '')}")
+            if burst_reconnect > 0:
+                logger.info(f"CDN burst reconnect enabled: reconnecting every {burst_reconnect}s")
 
             timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
 
@@ -2075,10 +2079,30 @@ async def download_worker():
             retry_base_delay = 30  # seconds — start with 30s, then 60s, 90s, 120s, 150s
             RETRYABLE_CODES = {429, 458, 503, 551}
 
+            # --- State shared across connections (for burst reconnect) ---
+            downloaded = 0
+            total = 0
+            start_time = time.time()
+            last_save = time.time()
+            # Sliding window for speed calculation (last 3 seconds)
+            speed_window_duration = 3.0
+            speed_samples: list[tuple[float, int]] = []
+            # Bandwidth throttle window
+            window_start = time.time()
+            window_bytes = 0
+            # Pause timer
+            last_pause_time = time.time()
+            # Burst reconnect tracking
+            segment_start_time = time.time()
+            reconnect_count = 0
+            download_failed = False
+            download_complete = False
+
             for attempt in range(1, max_retries + 1):
+                if download_complete or download_failed:
+                    break
+
                 # On retries, just wait with backoff then try again
-                # (Don't pre-check connections — with max_connections=1 providers,
-                #  the check itself counts as an active connection and creates a deadlock)
                 if attempt > 1:
                     delay = retry_base_delay * attempt
                     logger.info(f"Retry {attempt}/{max_retries}: waiting {delay}s before next attempt")
@@ -2103,176 +2127,189 @@ async def download_worker():
                     _download_progress["pause_remaining"] = 0
                     item["error"] = None
 
-                async with httpx.AsyncClient(headers=player_headers, timeout=timeout, follow_redirects=True) as client:
-                    async with client.stream("GET", upstream_url) as response:
-                        if response.status_code in RETRYABLE_CODES and attempt < max_retries:
-                            delay = retry_base_delay * attempt
-                            error_msg = {
-                                458: "Max connections reached",
-                                429: "Rate limited",
-                                503: "Service unavailable",
-                                551: "Access denied by provider",
-                            }.get(response.status_code, f"HTTP {response.status_code}")
-                            logger.warning(f"Download blocked: HTTP {response.status_code} ({error_msg}) — retry {attempt}/{max_retries} in {delay}s")
-                            _download_progress["paused"] = True
-                            _download_progress["pause_remaining"] = delay
-                            item["error"] = f"{error_msg} — retrying in {delay}s ({attempt}/{max_retries})"
-                            save_cart()
-                            remaining = delay
-                            while remaining > 0:
-                                if _download_cancel_event.is_set():
-                                    item["status"] = "cancelled"
-                                    item["error"] = "Cancelled by user"
-                                    save_cart()
-                                    _download_current_item = None
-                                    _download_cancel_event.clear()
-                                    return
-                                sleep_step = min(1.0, remaining)
-                                await asyncio.sleep(sleep_step)
-                                remaining -= sleep_step
-                                _download_progress["pause_remaining"] = round(remaining, 1)
-                            _download_progress["paused"] = False
-                            _download_progress["pause_remaining"] = 0
-                            item["error"] = None
-                            continue  # retry the request
+                # --- Segment loop: reconnect periodically for CDN burst ---
+                while not download_complete and not download_failed:
+                    request_headers = dict(player_headers)
+                    if downloaded > 0:
+                        request_headers["Range"] = f"bytes={downloaded}-"
 
-                        if response.status_code >= 400:
-                            error_msg = {
-                                458: "Max connections reached (all retries exhausted)",
-                                429: "Rate limited (all retries exhausted)",
-                                503: "Service unavailable (all retries exhausted)",
-                                551: "Access denied by provider (possible IP temp-ban from too many attempts)",
-                            }.get(response.status_code, f"HTTP {response.status_code}")
-                            item["status"] = "failed"
-                            item["error"] = error_msg
-                            save_cart()
-                            # Send per-file Telegram notification for HTTP failure
-                            await _send_download_file_notification(item)
-                            # Clean up partial temp file
-                            try:
-                                if os.path.exists(temp_path):
-                                    os.remove(temp_path)
-                            except OSError:
-                                pass
-                            break  # break out of retry loop, continue to next item
+                    async with httpx.AsyncClient(headers=request_headers, timeout=timeout, follow_redirects=True) as client:
+                        async with client.stream("GET", upstream_url) as response:
+                            if response.status_code in RETRYABLE_CODES and attempt < max_retries:
+                                delay = retry_base_delay * attempt
+                                error_msg = {
+                                    458: "Max connections reached",
+                                    429: "Rate limited",
+                                    503: "Service unavailable",
+                                    551: "Access denied by provider",
+                                }.get(response.status_code, f"HTTP {response.status_code}")
+                                logger.warning(f"Download blocked: HTTP {response.status_code} ({error_msg}) — retry {attempt}/{max_retries} in {delay}s")
+                                _download_progress["paused"] = True
+                                _download_progress["pause_remaining"] = delay
+                                item["error"] = f"{error_msg} — retrying in {delay}s ({attempt}/{max_retries})"
+                                save_cart()
+                                remaining = delay
+                                while remaining > 0:
+                                    if _download_cancel_event.is_set():
+                                        item["status"] = "cancelled"
+                                        item["error"] = "Cancelled by user"
+                                        save_cart()
+                                        _download_current_item = None
+                                        _download_cancel_event.clear()
+                                        return
+                                    sleep_step = min(1.0, remaining)
+                                    await asyncio.sleep(sleep_step)
+                                    remaining -= sleep_step
+                                    _download_progress["pause_remaining"] = round(remaining, 1)
+                                _download_progress["paused"] = False
+                                _download_progress["pause_remaining"] = 0
+                                item["error"] = None
+                                break  # break segment loop to go to next retry attempt
 
-                        # Success — proceed with download
-                        item["error"] = None
-
-                        # Content-Range header may contain total size for 206 responses
-                        total = 0
-                        content_range = response.headers.get("content-range", "")
-                        if content_range and "/" in content_range:
-                            try:
-                                total = int(content_range.split("/")[-1])
-                            except (ValueError, IndexError):
-                                pass
-                        if not total:
-                            total = int(response.headers.get("content-length", 0))
-                        _download_progress["total_bytes"] = total
-                        downloaded = 0
-                        start_time = time.time()
-                        last_save = time.time()
-                        # Bandwidth throttle: track bytes in the current 1-second window
-                        window_start = time.time()
-                        window_bytes = 0
-                        # Sliding window for speed calculation (last 3 seconds)
-                        speed_window_duration = 3.0
-                        speed_samples: list[tuple[float, int]] = []  # (timestamp, cumulative_bytes)
-                        # Pause timer: track when we last paused
-                        last_pause_time = time.time()
-
-                        with open(temp_path, "wb") as f:
-                            async for chunk in response.aiter_bytes(chunk_size=chunk_size):
-                                if _download_cancel_event.is_set():
-                                    item["status"] = "cancelled"
-                                    item["error"] = "Cancelled by user"
-                                    save_cart()
-                                    # Clean up partial temp file
-                                    try:
+                            if response.status_code >= 400:
+                                error_msg = {
+                                    458: "Max connections reached (all retries exhausted)",
+                                    429: "Rate limited (all retries exhausted)",
+                                    503: "Service unavailable (all retries exhausted)",
+                                    551: "Access denied by provider (possible IP temp-ban from too many attempts)",
+                                }.get(response.status_code, f"HTTP {response.status_code}")
+                                item["status"] = "failed"
+                                item["error"] = error_msg
+                                save_cart()
+                                await _send_download_file_notification(item)
+                                try:
+                                    if os.path.exists(temp_path):
                                         os.remove(temp_path)
-                                    except OSError:
+                                except OSError:
+                                    pass
+                                download_failed = True
+                                break
+
+                            # Success — proceed with download
+                            item["error"] = None
+
+                            # Get total size from first connection
+                            if total == 0:
+                                content_range = response.headers.get("content-range", "")
+                                if content_range and "/" in content_range:
+                                    try:
+                                        total = int(content_range.split("/")[-1])
+                                    except (ValueError, IndexError):
                                         pass
-                                    _download_current_item = None
-                                    _download_cancel_event.clear()
-                                    return  # Stop the worker entirely
+                                if not total:
+                                    total = int(response.headers.get("content-length", 0))
+                                _download_progress["total_bytes"] = total
 
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                window_bytes += len(chunk)
+                            segment_start_time = time.time()
+                            should_reconnect = False
 
-                                # Sliding-window speed: keep samples from the last N seconds
-                                now_speed = time.time()
-                                speed_samples.append((now_speed, downloaded))
-                                # Trim samples older than the window
-                                cutoff = now_speed - speed_window_duration
-                                while speed_samples and speed_samples[0][0] < cutoff:
-                                    speed_samples.pop(0)
-                                if len(speed_samples) >= 2:
-                                    dt = speed_samples[-1][0] - speed_samples[0][0]
-                                    db = speed_samples[-1][1] - speed_samples[0][1]
-                                    speed = db / dt if dt > 0 else 0
-                                else:
-                                    elapsed = now_speed - start_time
-                                    speed = downloaded / elapsed if elapsed > 0 else 0
+                            # Open file in append mode (first time creates, subsequent appends)
+                            with open(temp_path, "ab") as f:
+                                async for chunk in response.aiter_bytes(chunk_size=chunk_size):
+                                    if _download_cancel_event.is_set():
+                                        item["status"] = "cancelled"
+                                        item["error"] = "Cancelled by user"
+                                        save_cart()
+                                        try:
+                                            os.remove(temp_path)
+                                        except OSError:
+                                            pass
+                                        _download_current_item = None
+                                        _download_cancel_event.clear()
+                                        return
 
-                                _download_progress["bytes_downloaded"] = downloaded
-                                _download_progress["speed"] = speed
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    window_bytes += len(chunk)
 
-                                if total > 0:
-                                    item["progress"] = round((downloaded / total) * 100, 1)
-                                else:
-                                    item["progress"] = 0
+                                    # Sliding-window speed
+                                    now_speed = time.time()
+                                    speed_samples.append((now_speed, downloaded))
+                                    cutoff = now_speed - speed_window_duration
+                                    while speed_samples and speed_samples[0][0] < cutoff:
+                                        speed_samples.pop(0)
+                                    if len(speed_samples) >= 2:
+                                        dt = speed_samples[-1][0] - speed_samples[0][0]
+                                        db = speed_samples[-1][1] - speed_samples[0][1]
+                                        speed = db / dt if dt > 0 else 0
+                                    else:
+                                        elapsed = now_speed - start_time
+                                        speed = downloaded / elapsed if elapsed > 0 else 0
 
-                                # Persist progress every 5 seconds
-                                if time.time() - last_save > 5:
-                                    save_cart()
-                                    last_save = time.time()
+                                    _download_progress["bytes_downloaded"] = downloaded
+                                    _download_progress["speed"] = speed
 
-                                # --- Bandwidth throttling ---
-                                if bw_limit > 0:
-                                    now = time.time()
-                                    window_elapsed = now - window_start
-                                    if window_bytes >= bw_limit:
-                                        # We've used up this second's budget, sleep the rest
-                                        sleep_time = max(0, 1.0 - window_elapsed)
-                                        if sleep_time > 0:
-                                            await asyncio.sleep(sleep_time)
-                                        window_start = time.time()
-                                        window_bytes = 0
-                                    elif window_elapsed >= 1.0:
-                                        # Window expired, reset
-                                        window_start = now
-                                        window_bytes = 0
+                                    if total > 0:
+                                        item["progress"] = round((downloaded / total) * 100, 1)
+                                    else:
+                                        item["progress"] = 0
 
-                                # --- Periodic pause (simulate player buffering) ---
-                                if pause_interval > 0 and pause_duration > 0:
-                                    now = time.time()
-                                    if now - last_pause_time >= pause_interval:
-                                        _download_progress["paused"] = True
-                                        _download_progress["pause_remaining"] = pause_duration
-                                        logger.info(f"Download throttle: pausing for {pause_duration}s (simulating player buffer)")
-                                        # Sleep in 1-second increments so cancel is responsive
-                                        remaining = pause_duration
-                                        while remaining > 0:
-                                            if _download_cancel_event.is_set():
-                                                break
-                                            sleep_step = min(1.0, remaining)
-                                            await asyncio.sleep(sleep_step)
-                                            remaining -= sleep_step
-                                            _download_progress["pause_remaining"] = round(remaining, 1)
-                                        _download_progress["paused"] = False
-                                        _download_progress["pause_remaining"] = 0
-                                        last_pause_time = time.time()
-                                        # Reset bandwidth window after pause
-                                        window_start = time.time()
-                                        window_bytes = 0
+                                    # Persist progress every 5 seconds
+                                    if time.time() - last_save > 5:
+                                        save_cart()
+                                        last_save = time.time()
 
-                        # Download succeeded, break out of retry loop
-                        break
+                                    # --- Bandwidth throttling ---
+                                    if bw_limit > 0:
+                                        now = time.time()
+                                        window_elapsed = now - window_start
+                                        if window_bytes >= bw_limit:
+                                            sleep_time = max(0, 1.0 - window_elapsed)
+                                            if sleep_time > 0:
+                                                await asyncio.sleep(sleep_time)
+                                            window_start = time.time()
+                                            window_bytes = 0
+                                        elif window_elapsed >= 1.0:
+                                            window_start = now
+                                            window_bytes = 0
+
+                                    # --- Periodic pause (simulate player buffering) ---
+                                    if pause_interval > 0 and pause_duration > 0:
+                                        now = time.time()
+                                        if now - last_pause_time >= pause_interval:
+                                            _download_progress["paused"] = True
+                                            _download_progress["pause_remaining"] = pause_duration
+                                            logger.info(f"Download throttle: pausing for {pause_duration}s (simulating player buffer)")
+                                            remaining = pause_duration
+                                            while remaining > 0:
+                                                if _download_cancel_event.is_set():
+                                                    break
+                                                sleep_step = min(1.0, remaining)
+                                                await asyncio.sleep(sleep_step)
+                                                remaining -= sleep_step
+                                                _download_progress["pause_remaining"] = round(remaining, 1)
+                                            _download_progress["paused"] = False
+                                            _download_progress["pause_remaining"] = 0
+                                            last_pause_time = time.time()
+                                            window_start = time.time()
+                                            window_bytes = 0
+
+                                    # --- CDN burst reconnect ---
+                                    if burst_reconnect > 0 and (time.time() - segment_start_time) >= burst_reconnect:
+                                        # Check if we know the total and haven't finished
+                                        if total == 0 or downloaded < total:
+                                            should_reconnect = True
+                                            break  # break chunk loop to reconnect
+
+                            # After chunk loop ends
+                            if should_reconnect:
+                                reconnect_count += 1
+                                logger.info(f"CDN burst reconnect #{reconnect_count}: downloaded {downloaded}/{total or '?'} bytes, reconnecting...")
+                                # Reset speed window for fresh measurement on new connection
+                                speed_samples.clear()
+                                continue  # next iteration of segment loop
+
+                            # If we get here without reconnect, stream ended naturally
+                            download_complete = True
+
+                # If download_complete, break out of retry loop too
+                if download_complete:
+                    if reconnect_count > 0:
+                        logger.info(f"Download finished with {reconnect_count} CDN burst reconnect(s)")
+                    break
 
             # Only mark completed if the download actually succeeded
-            if item.get("status") == "downloading":
+            if item.get("status") == "downloading" and not download_failed:
                 # Move from temp to final destination
                 move_ok = await _move_temp_to_destination(item, temp_path, file_path)
                 if not move_ok:
@@ -6521,12 +6558,14 @@ async def set_download_throttle_api(request: Request):
     interval = data.get("pause_interval", 0)
     duration = data.get("pause_duration", 0)
     profile = data.get("player_profile", "tivimate")
+    burst = data.get("burst_reconnect", 0)
 
     # Validate
     try:
         bw = max(0, int(bw))
         interval = max(0, int(interval))
         duration = max(0, int(duration))
+        burst = max(0, int(burst))
     except (ValueError, TypeError):
         return JSONResponse({"error": "Invalid numeric values"}, status_code=400)
 
@@ -6539,10 +6578,11 @@ async def set_download_throttle_api(request: Request):
     config["options"]["download_pause_interval"] = interval
     config["options"]["download_pause_duration"] = duration
     config["options"]["download_player_profile"] = profile
+    config["options"]["download_burst_reconnect"] = burst
     save_config(config)
 
-    logger.info(f"Download throttle updated: bandwidth={bw} KB/s, pause every {interval}s for {duration}s, profile={profile}")
-    return {"status": "ok", "bandwidth_limit": bw, "pause_interval": interval, "pause_duration": duration, "player_profile": profile}
+    logger.info(f"Download throttle updated: bandwidth={bw} KB/s, pause every {interval}s for {duration}s, profile={profile}, burst_reconnect={burst}s")
+    return {"status": "ok", "bandwidth_limit": bw, "pause_interval": interval, "pause_duration": duration, "player_profile": profile, "burst_reconnect": burst}
 
 
 @app.get("/api/options/player_profiles")

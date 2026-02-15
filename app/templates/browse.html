@@ -196,6 +196,10 @@
         .episode-source-selector label { color: #888; font-size: 0.9em; white-space: nowrap; }
         .episode-source-selector select { flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.1); background: rgba(0, 0, 0, 0.3); color: #e0e0e0; font-size: 0.9em; }
         .episode-source-selector select:focus { border-color: #00d4ff; outline: none; }
+        .type-badge { display: inline-block; font-size: 0.7em; padding: 1px 7px; border-radius: 8px; font-weight: 600; margin-left: 6px; vertical-align: middle; }
+        .type-badge-vod { background: rgba(255, 107, 107, 0.25); color: #ff6b6b; }
+        .type-badge-series { background: rgba(46, 213, 115, 0.25); color: #2ed573; }
+        .type-badge-live { background: rgba(0, 212, 255, 0.25); color: #00d4ff; }
         @media (max-width: 768px) { .controls-row { flex-direction: column; } .control-group { width: 100%; } .content-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; } .form-row { flex-direction: column; } }
     </style>
 </head>
@@ -570,7 +574,8 @@
         function renderCategoriesList() {
             const container = document.getElementById('categories-list');
             container.innerHTML = categories.map(cat => {
-                const count = cat.mode === 'automatic' ? (cat.cached_items || []).length : (cat.items || []).length;
+                const rawItems = cat.mode === 'automatic' ? (cat.cached_items || []) : (cat.items || []);
+                const count = rawItems.length;
                 const icon = iconMap[cat.icon] || cat.icon || '📁';
                 const isActive = selectedCategoryId === cat.id ? 'active' : '';
                 const modeIndicator = cat.mode === 'automatic' ? ' 🤖' : '';
@@ -585,13 +590,6 @@
                 selectedCategoryId = null;
             } else {
                 selectedCategoryId = categoryId;
-                // Auto-select first content type from the category if current one is not included
-                const cat = categories.find(c => c.id === categoryId);
-                if (cat && cat.content_types && cat.content_types.length > 0) {
-                    if (!cat.content_types.includes(contentType)) {
-                        setContentType(cat.content_types[0]);
-                    }
-                }
             }
             renderCategoriesList();
             currentPage = 1;
@@ -671,15 +669,16 @@
             }
 
             try {
-                let url = '/api/browse?type=' + contentType + '&page=' + currentPage + '&per_page=50';
-                // Only apply search/source/group filters when in "all" view, not in categories view
-                if (currentView === 'all') {
+                let url;
+                if (currentView === 'categories' && selectedCategoryId) {
+                    // Category view: don't send type — API returns all types
+                    url = '/api/browse?page=' + currentPage + '&per_page=50&category_id=' + selectedCategoryId;
+                } else {
+                    url = '/api/browse?type=' + contentType + '&page=' + currentPage + '&per_page=50';
                     if (searchQuery) url += '&search=' + encodeURIComponent(searchQuery);
                     if (sourceId) url += '&source=' + sourceId;
                     if (group) url += '&group=' + encodeURIComponent(group);
                     if (useSourceFilters) url += '&use_source_filters=true';
-                } else if (currentView === 'categories' && selectedCategoryId) {
-                    url += '&category_id=' + selectedCategoryId;
                 }
 
                 const response = await fetch(url, { signal });
@@ -735,11 +734,18 @@
             }).join('');
         }
 
+        const typeLabels = { live: 'Live', vod: 'Film', series: 'Series' };
+        function typeBadgeHtml(ct) {
+            if (!ct) return '';
+            return '<span class="type-badge type-badge-' + ct + '">' + (typeLabels[ct] || ct) + '</span>';
+        }
+
         function renderSingleCard(item) {
-            const posterClass = contentType === 'live' ? 'card-poster-placeholder live' : 'card-poster-placeholder';
+            const itemType = item.content_type || contentType;
+            const posterClass = itemType === 'live' ? 'card-poster-placeholder live' : 'card-poster-placeholder';
             const poster = item.icon;
-            const placeholderIcon = contentType === 'live' ? '📡' : '🎬';
-            const imgClass = 'card-poster' + (contentType === 'live' ? ' card-poster-live' : '');
+            const placeholderIcon = itemType === 'live' ? '📡' : '🎬';
+            const imgClass = 'card-poster' + (itemType === 'live' ? ' card-poster-live' : '');
             const posterHtml = poster
                 ? '<img class="' + imgClass + '" src="' + poster + '" loading="lazy" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'"><div class="' + posterClass + '" style="display:none">' + placeholderIcon + '</div>'
                 : '<div class="' + posterClass + '">' + placeholderIcon + '</div>';
@@ -748,17 +754,18 @@
             const isNew = item.added && isRecent(item.added, 7);
             const itemCategories = getItemCategories(item);
             const hasCats = itemCategories.length > 0;
+            const inCategoryView = currentView === 'categories' && selectedCategoryId;
 
             let catBadges = '';
             if (itemCategories.length > 0) {
                 catBadges = '<div class="card-categories">' + itemCategories.slice(0, 3).map(c => '<span class="card-cat-badge">' + (iconMap[c.icon] || c.icon) + ' ' + c.name + '</span>').join('') + '</div>';
             }
 
-            const cartBtn = (contentType === 'vod' || contentType === 'series')
-                ? '<button class="add-cart-btn" data-source-id="' + escapeAttr(item.source_id) + '" data-item-id="' + escapeAttr(item.id) + '" data-content-type="' + escapeAttr(contentType) + '" data-name="' + escapeAttr(item.name) + '" data-icon="' + escapeAttr(item.icon || '') + '" data-group="' + escapeAttr(item.group || '') + '" data-ext="' + escapeAttr(item.container_extension || 'mp4') + '" title="Add to download cart">🛒</button>'
+            const cartBtn = (itemType === 'vod' || itemType === 'series')
+                ? '<button class="add-cart-btn" data-source-id="' + escapeAttr(item.source_id) + '" data-item-id="' + escapeAttr(item.id) + '" data-content-type="' + escapeAttr(itemType) + '" data-name="' + escapeAttr(item.name) + '" data-icon="' + escapeAttr(item.icon || '') + '" data-group="' + escapeAttr(item.group || '') + '" data-ext="' + escapeAttr(item.container_extension || 'mp4') + '" title="Add to download cart">🛒</button>'
                 : '';
 
-            const monitorBtn = (contentType === 'series')
+            const monitorBtn = (itemType === 'series')
                 ? '<button class="add-monitor-btn" onclick="openMonitorModal(event, \'' + escapeAttr(item.source_id) + '\', \'' + escapeAttr(item.id) + '\', \'' + jsEscape(item.name) + '\', \'' + escapeAttr(item.icon || '') + '\', \'' + escapeAttr(item.source_name || '') + '\')" title="Monitor this series">📡</button>'
                 : '';
 
@@ -766,11 +773,11 @@
                 (isNew ? '<div class="new-badge">NEW</div>' : '') +
                 cartBtn +
                 monitorBtn +
-                '<button class="add-category-btn' + (hasCats ? ' has-categories' : '') + '" onclick="toggleCategoryDropdown(event, \'' + item.source_id + '\', \'' + item.id + '\', \'' + contentType + '\')">+</button>' +
+                '<button class="add-category-btn' + (hasCats ? ' has-categories' : '') + '" onclick="toggleCategoryDropdown(event, \'' + item.source_id + '\', \'' + item.id + '\', \'' + itemType + '\')">+</button>' +
                 '<div class="category-dropdown" id="cat-dropdown-' + item.source_id + '-' + item.id + '"></div>' +
                 posterHtml +
                 '<div class="card-info">' +
-                '<div class="card-title">' + escapeHtml(item.name) + '</div>' +
+                '<div class="card-title">' + escapeHtml(item.name) + (inCategoryView ? typeBadgeHtml(itemType) : '') + '</div>' +
                 '<div class="card-meta">' +
                 '<span class="source-badge" data-color="' + (sourceIndex % 5 || 5) + '">' + escapeHtml(sourceName) + '</span>' +
                 (item.group ? '<span class="card-group">' + escapeHtml(item.group) + '</span>' : '') +
@@ -781,10 +788,13 @@
         }
 
         function renderGroupedCard(group, idx) {
-            const posterClass = contentType === 'live' ? 'card-poster-placeholder live' : 'card-poster-placeholder';
+            // Determine dominant content type from sub-items
+            const groupType = group.items[0]?.content_type || contentType;
+            const inCategoryView = currentView === 'categories' && selectedCategoryId;
+            const posterClass = groupType === 'live' ? 'card-poster-placeholder live' : 'card-poster-placeholder';
             const poster = group.icon;
-            const placeholderIcon = contentType === 'live' ? '📡' : '🎬';
-            const imgClass = 'card-poster' + (contentType === 'live' ? ' card-poster-live' : '');
+            const placeholderIcon = groupType === 'live' ? '📡' : '🎬';
+            const imgClass = 'card-poster' + (groupType === 'live' ? ' card-poster-live' : '');
             const posterHtml = poster
                 ? '<img class="' + imgClass + '" src="' + poster + '" loading="lazy" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'"><div class="' + posterClass + '" style="display:none">' + placeholderIcon + '</div>'
                 : '<div class="' + posterClass + '">' + placeholderIcon + '</div>';
@@ -807,7 +817,7 @@
 
             // Build top-level cart button for grouped series cards with all sources encoded
             let groupCartBtn = '';
-            if (contentType === 'series' || contentType === 'vod') {
+            if (groupType === 'series' || groupType === 'vod') {
                 const allSourcesData = group.items.map(sub => ({
                     source_id: sub.source_id,
                     source_name: sub.source_name || 'Unknown',
@@ -817,12 +827,12 @@
                     group: sub.group || '',
                     container_extension: sub.container_extension || 'mp4'
                 }));
-                groupCartBtn = '<button class="add-cart-btn" data-source-id="' + escapeAttr(group.items[0].source_id) + '" data-item-id="' + escapeAttr(group.items[0].id) + '" data-content-type="' + escapeAttr(contentType) + '" data-name="' + escapeAttr(group.name) + '" data-icon="' + escapeAttr(group.icon || '') + '" data-group="' + escapeAttr(group.items[0].group || '') + '" data-ext="' + escapeAttr(group.items[0].container_extension || 'mp4') + '" data-all-sources="' + escapeAttr(JSON.stringify(allSourcesData)) + '" title="Add to download cart">🛒</button>';
+                groupCartBtn = '<button class="add-cart-btn" data-source-id="' + escapeAttr(group.items[0].source_id) + '" data-item-id="' + escapeAttr(group.items[0].id) + '" data-content-type="' + escapeAttr(groupType) + '" data-name="' + escapeAttr(group.name) + '" data-icon="' + escapeAttr(group.icon || '') + '" data-group="' + escapeAttr(group.items[0].group || '') + '" data-ext="' + escapeAttr(group.items[0].container_extension || 'mp4') + '" data-all-sources="' + escapeAttr(JSON.stringify(allSourcesData)) + '" title="Add to download cart">🛒</button>';
             }
 
             // Monitor button for grouped series cards
             let groupMonitorBtn = '';
-            if (contentType === 'series') {
+            if (groupType === 'series') {
                 // Build all-sources data for monitor modal (deduplicated by source_id+series_id)
                 const seenSourceSeries = new Set();
                 const monitorSourcesData = [];
@@ -853,7 +863,7 @@
                     '<span class="source-badge" data-color="' + (si % 5 || 5) + '">' + escapeHtml(sName) + '</span>' +
                     (sub.group ? '<span class="source-row-group">' + escapeHtml(sub.group) + '</span>' : '') +
                     '<span class="source-row-actions">' +
-                    '<button class="source-row-cat-btn' + (subHasCats ? ' has-categories' : '') + '" onclick="toggleCategoryDropdown(event, \'' + sub.source_id + '\', \'' + sub.id + '\', \'' + contentType + '\')">+</button>' +
+                    '<button class="source-row-cat-btn' + (subHasCats ? ' has-categories' : '') + '" onclick="toggleCategoryDropdown(event, \'' + sub.source_id + '\', \'' + sub.id + '\', \'' + (sub.content_type || groupType) + '\')">+</button>' +
                     '<div class="category-dropdown" id="cat-dropdown-' + sub.source_id + '-' + sub.id + '" style="position:relative;top:0;right:0;"></div>' +
                     '</span>' +
                     '</div>' +
@@ -868,7 +878,7 @@
                 groupMonitorBtn +
                 posterHtml +
                 '<div class="card-info">' +
-                '<div class="card-title">' + escapeHtml(group.name) +
+                '<div class="card-title">' + escapeHtml(group.name) + (inCategoryView ? typeBadgeHtml(groupType) : '') +
                 '<span class="sources-badge">' + group.count + ' sources</span>' +
                 '</div>' +
                 catBadges +
@@ -894,11 +904,12 @@
         }
 
         function getItemCategories(item) {
+            const itemType = item.content_type || contentType;
             return categories.filter(cat => {
                 if (cat.mode === 'manual') {
-                    return (cat.items || []).some(i => i.source_id === item.source_id && String(i.id) === String(item.id) && i.content_type === contentType);
+                    return (cat.items || []).some(i => i.source_id === item.source_id && String(i.id) === String(item.id) && i.content_type === itemType);
                 } else {
-                    return (cat.cached_items || []).some(i => i.source_id === item.source_id && String(i.id) === String(item.id) && i.content_type === contentType);
+                    return (cat.cached_items || []).some(i => i.source_id === item.source_id && String(i.id) === String(item.id) && i.content_type === itemType);
                 }
             });
         }
@@ -1095,15 +1106,41 @@
 
             const data = { name, icon, mode, content_types: contentTypes, patterns, pattern_logic: patternLogic, use_source_filters: useSourceFilters, notify_telegram: notifyTelegram, recently_added_days: recentlyAddedDays };
 
+            // Show spinner on save button
+            const saveBtn = document.querySelector('#category-modal .btn-primary');
+            const originalText = saveBtn.textContent;
+            saveBtn.disabled = true;
+            saveBtn.innerHTML = '<span class="loading-spinner" style="width:16px;height:16px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px;"></span>Saving…';
+
             try {
                 const url = editId ? '/api/categories/' + editId : '/api/categories';
                 const method = editId ? 'PUT' : 'POST';
                 const response = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+                const result = await response.json();
+                const savedCategoryId = result.category ? result.category.id : editId;
+
+                if (mode === 'automatic') {
+                    saveBtn.innerHTML = '<span class="loading-spinner" style="width:16px;height:16px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px;"></span>Refreshing items…';
+                    await fetch('/api/categories/refresh', { method: 'POST' });
+                }
+
                 closeCategoryModal();
                 await loadCategories();
-                if (mode === 'automatic') await fetch('/api/categories/refresh', { method: 'POST' });
-                await loadCategories();
-            } catch (error) { console.error('Error saving category:', error); alert('Failed to save category'); }
+
+                // Auto-select the saved category and refresh the items grid
+                if (savedCategoryId) {
+                    selectedCategoryId = savedCategoryId;
+                    renderCategoriesList();
+                    currentPage = 1;
+                    await applyFilters();
+                }
+            } catch (error) {
+                console.error('Error saving category:', error);
+                alert('Failed to save category');
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.textContent = originalText;
+            }
         }
 
         function openManageCategoriesModal() {

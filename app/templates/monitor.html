@@ -317,7 +317,7 @@
                 const data = await resp.json();
 
                 document.getElementById('preview-summary').innerHTML =
-                    'Total: <strong>' + data.total_episodes + '</strong> episodes — ' +
+                    'Total: <strong>' + data.episodes.length + '</strong> episodes — ' +
                     '<strong>' + data.new_count + '</strong> new (would be downloaded on next check)';
 
                 // Group by season

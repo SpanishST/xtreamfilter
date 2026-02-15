@@ -29,6 +29,7 @@ A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Se
 - 📂 **Custom Categories** - Create manual or automatic categories with pattern matching
 - 📱 **Telegram Notifications** - Get notified when new content matches your categories
 - ⬇️ **VOD & Series Downloads** - Download movies and series episodes locally with a cart-based queue
+- 📡 **Series Monitoring** - Automatically track series for new episodes with auto-download and Telegram alerts
 - �🐳 **Docker Ready** - Easy deployment with docker-compose
 
 ## Quick Start
@@ -435,6 +436,7 @@ All settings are configurable from the Cart page UI and persisted in `config.jso
 |---------|-------------|
 | **Bandwidth Limit** | Throttle download speed in KB/s (0 = unlimited) |
 | **Periodic Pauses** | Download for N seconds, then pause for M seconds (simulates player buffering) |
+| **CDN Burst Reconnect** | Periodically close and reopen the connection (with Range resume) to exploit initial TCP/CDN burst speeds (0 = off) |
 | **Player Profile** | Emulate real IPTV player HTTP headers to avoid provider blocks |
 | **Auto-Retry** | Up to 5 retries with 30s×N backoff on errors (429, 458, 503, 551) |
 
@@ -484,6 +486,46 @@ Downloads are organized automatically:
 | `/api/options/download_temp_path` | GET/POST | Get or set temp directory |
 | `/api/options/download_throttle` | GET/POST | Get or set throttle settings |
 | `/api/options/player_profiles` | GET | List available player profiles |
+
+## Series Monitoring
+
+Automatically track your favorite series for new episodes. When new episodes are detected, they can be auto-queued for download, sent as Telegram notifications, or both.
+
+### How It Works
+
+1. **Add a series to monitor** from the Browse page by clicking the 📡 **Monitor** button on any series
+2. **Choose monitoring scope:**
+   - **New episodes only** — Snapshots current episodes as "known"; only future additions trigger
+   - **Specific season** — Watch only a single season for new episodes
+   - **All episodes** — Treat every episode as new on first check (useful to download an entire series)
+3. **Choose an action:**
+   - **Download** — Auto-queue new episodes to the download cart
+   - **Notify** — Send a Telegram notification only
+   - **Both** — Download and notify
+4. **Automatic checks** — The monitor runs after each cache refresh, scanning all enabled series
+5. **Preview** — Click 👁 **Preview** on any monitored series to see all episodes with their status (new, known, downloaded)
+
+### Monitoring Features
+
+| Feature | Description |
+|---------|-------------|
+| **Multi-source** | Monitor a series across all sources or pin to a specific one |
+| **Fuzzy matching** | Finds the same series across different providers by name |
+| **Duplicate prevention** | Won't re-queue episodes already in the download cart |
+| **File detection** | Skips episodes that already exist on disk |
+| **Enable/Disable** | Toggle monitoring per series without removing it |
+| **Episode preview** | Modal showing all episodes grouped by season with status badges |
+
+### Monitoring API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/monitor` | GET | List all monitored series |
+| `/api/monitor` | POST | Add a series to monitor |
+| `/api/monitor/{id}` | PUT | Update monitoring settings (enable/disable, scope, etc.) |
+| `/api/monitor/{id}` | DELETE | Remove a monitored series |
+| `/api/monitor/{id}/episodes` | GET | Preview episodes with status (new/known/downloaded) |
+| `/api/monitor/check` | POST | Manually trigger a monitoring check |
 
 ## API Endpoints
 

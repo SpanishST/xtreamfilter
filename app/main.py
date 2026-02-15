@@ -1634,11 +1634,11 @@ async def _check_single_monitored(entry: dict) -> list:
     
     # Build known episode keys: (season, episode_num) tuples
     known_keys = {
-        (str(k.get("season")), int(k.get("episode_num", 0)))
+        (str(k.get("season", "")), _safe_episode_num(k.get("episode_num")))
         for k in entry.get("known_episodes", [])
     }
     downloaded_keys = {
-        (str(k.get("season")), int(k.get("episode_num", 0)))
+        (str(k.get("season", "")), _safe_episode_num(k.get("episode_num")))
         for k in entry.get("downloaded_episodes", [])
     }
     already_seen = known_keys | downloaded_keys
@@ -1650,7 +1650,7 @@ async def _check_single_monitored(entry: dict) -> list:
     # Find new episodes
     new_episodes = []
     for ep in episodes:
-        ep_key = (str(ep.get("season")), int(ep.get("episode_num", 0)))
+        ep_key = (str(ep.get("season", "")), _safe_episode_num(ep.get("episode_num")))
         if ep_key in already_seen:
             continue
         
@@ -5104,6 +5104,90 @@ async def proxy_series_stream_merged(request: Request, username: str, password: 
 
 
 # ============================================
+# MONITOR PREVIEW (must be before catch-all /{source_route} routes)
+# ============================================
+
+def _safe_episode_num(val) -> int:
+    """Safely convert episode_num to int, handling None/empty/non-numeric values."""
+    if val is None:
+        return 0
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return 0
+
+
+@app.get("/api/monitor/{monitor_id}/episodes")
+async def preview_monitored_episodes(monitor_id: str):
+    """Preview current episodes vs known for a monitored entry."""
+    entry = None
+    for m in _monitored_series:
+        if m.get("id") == monitor_id:
+            entry = m
+            break
+    
+    if not entry:
+        return JSONResponse({"error": "Monitored entry not found"}, status_code=404)
+    
+    try:
+        source_id = entry.get("source_id")
+        series_id = entry.get("series_id")
+        
+        if source_id:
+            episodes = await fetch_series_episodes(source_id, series_id)
+        else:
+            matches = _find_series_across_sources(entry.get("series_name", ""))
+            episodes = []
+            for m in matches:
+                eps = await fetch_series_episodes(m["source_id"], m["series_id"])
+                if eps:
+                    episodes = eps
+                    break
+        
+        # Build known keys
+        known_keys = {
+            (str(k.get("season", "")), _safe_episode_num(k.get("episode_num")))
+            for k in entry.get("known_episodes", [])
+        }
+        downloaded_keys = {
+            (str(k.get("season", "")), _safe_episode_num(k.get("episode_num")))
+            for k in entry.get("downloaded_episodes", [])
+        }
+        
+        # Apply scope filter
+        scope = entry.get("scope", "new_only")
+        season_filter = entry.get("season_filter")
+        if scope == "season" and season_filter:
+            episodes = [ep for ep in episodes if str(ep.get("season")) == str(season_filter)]
+        
+        # Annotate each episode with status
+        annotated = []
+        for ep in episodes:
+            ep_key = (str(ep.get("season", "")), _safe_episode_num(ep.get("episode_num")))
+            status = "known"
+            if ep_key in downloaded_keys:
+                status = "downloaded"
+            elif ep_key not in known_keys:
+                status = "new"
+            annotated.append({
+                "season": ep.get("season"),
+                "episode_num": ep.get("episode_num"),
+                "title": ep.get("title", ""),
+                "status": status,
+            })
+        
+        return {
+            "series_name": entry.get("series_name"),
+            "total_episodes": len(episodes),
+            "new_count": len([a for a in annotated if a["status"] == "new"]),
+            "episodes": annotated,
+        }
+    except Exception as e:
+        logger.error(f"Error previewing episodes for monitor {monitor_id}: {e}")
+        return JSONResponse({"error": f"Failed to fetch episodes: {str(e)}"}, status_code=500)
+
+
+# ============================================
 # PER-SOURCE DEDICATED ROUTES
 # ============================================
 
@@ -6609,7 +6693,7 @@ async def add_monitored(request: Request):
                 "stream_id": str(ep.get("stream_id", "")),
                 "source_id": source_id or "",
                 "season": str(ep.get("season", "")),
-                "episode_num": int(ep.get("episode_num", 0)),
+                "episode_num": _safe_episode_num(ep.get("episode_num")),
             })
     # scope == "all" → known_episodes stays empty → everything is "new" on first check
     
@@ -6684,72 +6768,6 @@ async def trigger_monitor_check():
     """Manually trigger a monitoring check for all enabled series."""
     asyncio.create_task(check_monitored_series())
     return {"status": "ok", "message": "Monitoring check started"}
-
-
-@app.get("/api/monitor/{monitor_id}/episodes")
-async def preview_monitored_episodes(monitor_id: str):
-    """Preview current episodes vs known for a monitored entry."""
-    entry = None
-    for m in _monitored_series:
-        if m.get("id") == monitor_id:
-            entry = m
-            break
-    
-    if not entry:
-        return JSONResponse({"error": "Monitored entry not found"}, status_code=404)
-    
-    source_id = entry.get("source_id")
-    series_id = entry.get("series_id")
-    
-    if source_id:
-        episodes = await fetch_series_episodes(source_id, series_id)
-    else:
-        matches = _find_series_across_sources(entry.get("series_name", ""))
-        episodes = []
-        for m in matches:
-            eps = await fetch_series_episodes(m["source_id"], m["series_id"])
-            if eps:
-                episodes = eps
-                break
-    
-    # Build known keys
-    known_keys = {
-        (str(k.get("season")), int(k.get("episode_num", 0)))
-        for k in entry.get("known_episodes", [])
-    }
-    downloaded_keys = {
-        (str(k.get("season")), int(k.get("episode_num", 0)))
-        for k in entry.get("downloaded_episodes", [])
-    }
-    
-    # Apply scope filter
-    scope = entry.get("scope", "new_only")
-    season_filter = entry.get("season_filter")
-    if scope == "season" and season_filter:
-        episodes = [ep for ep in episodes if str(ep.get("season")) == str(season_filter)]
-    
-    # Annotate each episode with status
-    annotated = []
-    for ep in episodes:
-        ep_key = (str(ep.get("season")), int(ep.get("episode_num", 0)))
-        status = "known"
-        if ep_key in downloaded_keys:
-            status = "downloaded"
-        elif ep_key not in known_keys:
-            status = "new"
-        annotated.append({
-            "season": ep.get("season"),
-            "episode_num": ep.get("episode_num"),
-            "title": ep.get("title", ""),
-            "status": status,
-        })
-    
-    return {
-        "series_name": entry.get("series_name"),
-        "total_episodes": len(episodes),
-        "new_count": len([a for a in annotated if a["status"] == "new"]),
-        "episodes": annotated,
-    }
 
 
 @app.get("/health")

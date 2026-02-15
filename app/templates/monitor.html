@@ -306,6 +306,14 @@
 
             try {
                 const resp = await fetch('/api/monitor/' + id + '/episodes');
+                if (!resp.ok) {
+                    let errMsg = 'Server error (' + resp.status + ')';
+                    try {
+                        const errData = await resp.json();
+                        errMsg = errData.error || errMsg;
+                    } catch (_) {}
+                    throw new Error(errMsg);
+                }
                 const data = await resp.json();
 
                 document.getElementById('preview-summary').innerHTML =
@@ -338,7 +346,8 @@
                 }
                 document.getElementById('preview-list').innerHTML = html;
             } catch (e) {
-                document.getElementById('preview-list').innerHTML = '<p style="color:#ff4757">Error loading preview</p>';
+                document.getElementById('preview-summary').textContent = '';
+                document.getElementById('preview-list').innerHTML = '<p style="color:#ff4757">Error loading preview: ' + escapeHtml(e.message) + '</p>';
             }
         }
 

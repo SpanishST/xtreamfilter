@@ -35,7 +35,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # Application version
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 GITHUB_REPO = "SpanishST/xtreamfilter"
 
 # Data directory - use environment variable or default to /data (Docker) or ./data (local)

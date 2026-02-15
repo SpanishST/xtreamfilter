@@ -161,6 +161,23 @@
         .cart-badge { position: absolute; top: -5px; right: -8px; background: #ff4757; color: #fff; font-size: 0.65em; font-weight: 700; min-width: 18px; height: 18px; border-radius: 9px; display: flex; align-items: center; justify-content: center; padding: 0 4px; }
         .source-row .source-row-cart-btn { width: 24px; height: 24px; border-radius: 50%; background: rgba(0, 0, 0, 0.4); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.85em; color: rgba(255, 255, 255, 0.5); transition: all 0.2s; }
         .source-row .source-row-cart-btn:hover { color: #2ed573; background: rgba(0, 0, 0, 0.6); }
+        /* Monitor button */
+        .add-monitor-btn { position: absolute; top: 10px; right: 94px; width: 36px; height: 36px; border-radius: 50%; background: rgba(0, 0, 0, 0.6); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.1em; transition: all 0.2s; color: rgba(255, 255, 255, 0.7); }
+        .add-monitor-btn:hover { transform: scale(1.1); background: rgba(0, 0, 0, 0.8); color: #a29bfe; }
+        /* Monitor modal form */
+        .monitor-form .form-group { margin-bottom: 15px; }
+        .monitor-form .form-group label { display: block; margin-bottom: 6px; color: #888; font-size: 0.9em; }
+        .monitor-form .scope-options { display: flex; gap: 8px; flex-wrap: wrap; }
+        .monitor-form .scope-option { padding: 10px 16px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; cursor: pointer; text-align: center; transition: all 0.2s; flex: 1; min-width: 90px; }
+        .monitor-form .scope-option:hover { background: rgba(255, 255, 255, 0.05); }
+        .monitor-form .scope-option.selected { background: rgba(0, 212, 255, 0.15); border-color: #00d4ff; color: #00d4ff; }
+        .monitor-form .scope-option .scope-title { font-weight: 600; font-size: 0.95em; margin-bottom: 3px; }
+        .monitor-form .scope-option .scope-desc { font-size: 0.75em; color: #888; }
+        .monitor-form select { width: 100%; padding: 10px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; background: rgba(0, 0, 0, 0.3); color: #fff; font-size: 0.95em; }
+        .monitor-form .source-options { display: flex; gap: 8px; flex-wrap: wrap; }
+        .monitor-form .source-option { padding: 10px 16px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; cursor: pointer; transition: all 0.2s; flex: 1; min-width: 120px; text-align: center; }
+        .monitor-form .source-option:hover { background: rgba(255, 255, 255, 0.05); }
+        .monitor-form .source-option.selected { background: rgba(162, 155, 254, 0.15); border-color: #a29bfe; color: #a29bfe; }
         /* Episode selector modal */
         .episode-list { max-height: 400px; overflow-y: auto; }
         .season-group { margin-bottom: 15px; }
@@ -190,6 +207,7 @@
                 <span id="version-badge" style="display: none; font-size: 0.65em; padding: 3px 10px; border-radius: 12px; background: rgba(255,255,255,0.08); color: #888; cursor: default;"></span>
             </div>
             <div class="header-nav">
+                <a href="/monitor" class="btn btn-secondary">📡 Monitor</a>
                 <a href="/cart" class="btn btn-secondary cart-link">🛒 Cart<span class="cart-badge" id="cart-badge" style="display:none">0</span></a>
                 <a href="/" class="btn btn-secondary">Settings</a>
             </div>
@@ -407,6 +425,68 @@
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeEpisodeModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Series Monitor Modal -->
+    <div class="modal-overlay" id="monitor-modal">
+        <div class="modal" style="max-width: 500px;">
+            <div class="modal-header">
+                <h2 id="monitor-modal-title">📡 Monitor Series</h2>
+                <button class="modal-close" onclick="closeMonitorModal()">&times;</button>
+            </div>
+            <div class="modal-body monitor-form">
+                <div class="form-group">
+                    <label>What to monitor</label>
+                    <div class="scope-options">
+                        <div class="scope-option selected" data-scope="new_only" onclick="selectMonitorScope('new_only')">
+                            <div class="scope-title">New Only</div>
+                            <div class="scope-desc">Future episodes</div>
+                        </div>
+                        <div class="scope-option" data-scope="all" onclick="selectMonitorScope('all')">
+                            <div class="scope-title">All</div>
+                            <div class="scope-desc">Every episode</div>
+                        </div>
+                        <div class="scope-option" data-scope="season" onclick="selectMonitorScope('season')">
+                            <div class="scope-title">Season</div>
+                            <div class="scope-desc">One season</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group" id="monitor-season-group" style="display:none;">
+                    <label>Season</label>
+                    <select id="monitor-season-select"><option value="">Loading...</option></select>
+                </div>
+                <div class="form-group">
+                    <label>Source</label>
+                    <div class="source-options" id="monitor-source-options">
+                        <div class="source-option selected" data-source="any" onclick="selectMonitorSource('any')">
+                            Any source (first found)
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Action</label>
+                    <div class="scope-options">
+                        <div class="scope-option action-option selected" data-action="both" onclick="selectMonitorAction('both')">
+                            <div class="scope-title">Both</div>
+                            <div class="scope-desc">Download + Notify</div>
+                        </div>
+                        <div class="scope-option action-option" data-action="download" onclick="selectMonitorAction('download')">
+                            <div class="scope-title">Download</div>
+                            <div class="scope-desc">Download only</div>
+                        </div>
+                        <div class="scope-option action-option" data-action="notify" onclick="selectMonitorAction('notify')">
+                            <div class="scope-title">Notify</div>
+                            <div class="scope-desc">Telegram only</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeMonitorModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="confirmMonitor()">📡 Start Monitoring</button>
             </div>
         </div>
     </div>
@@ -678,9 +758,14 @@
                 ? '<button class="add-cart-btn" data-source-id="' + escapeAttr(item.source_id) + '" data-item-id="' + escapeAttr(item.id) + '" data-content-type="' + escapeAttr(contentType) + '" data-name="' + escapeAttr(item.name) + '" data-icon="' + escapeAttr(item.icon || '') + '" data-group="' + escapeAttr(item.group || '') + '" data-ext="' + escapeAttr(item.container_extension || 'mp4') + '" title="Add to download cart">🛒</button>'
                 : '';
 
+            const monitorBtn = (contentType === 'series')
+                ? '<button class="add-monitor-btn" onclick="openMonitorModal(event, \'' + escapeAttr(item.source_id) + '\', \'' + escapeAttr(item.id) + '\', \'' + jsEscape(item.name) + '\', \'' + escapeAttr(item.icon || '') + '\', \'' + escapeAttr(item.source_name || '') + '\')" title="Monitor this series">📡</button>'
+                : '';
+
             return '<div class="content-card">' +
                 (isNew ? '<div class="new-badge">NEW</div>' : '') +
                 cartBtn +
+                monitorBtn +
                 '<button class="add-category-btn' + (hasCats ? ' has-categories' : '') + '" onclick="toggleCategoryDropdown(event, \'' + item.source_id + '\', \'' + item.id + '\', \'' + contentType + '\')">+</button>' +
                 '<div class="category-dropdown" id="cat-dropdown-' + item.source_id + '-' + item.id + '"></div>' +
                 posterHtml +
@@ -735,6 +820,27 @@
                 groupCartBtn = '<button class="add-cart-btn" data-source-id="' + escapeAttr(group.items[0].source_id) + '" data-item-id="' + escapeAttr(group.items[0].id) + '" data-content-type="' + escapeAttr(contentType) + '" data-name="' + escapeAttr(group.name) + '" data-icon="' + escapeAttr(group.icon || '') + '" data-group="' + escapeAttr(group.items[0].group || '') + '" data-ext="' + escapeAttr(group.items[0].container_extension || 'mp4') + '" data-all-sources="' + escapeAttr(JSON.stringify(allSourcesData)) + '" title="Add to download cart">🛒</button>';
             }
 
+            // Monitor button for grouped series cards
+            let groupMonitorBtn = '';
+            if (contentType === 'series') {
+                // Build all-sources data for monitor modal (deduplicated by source_id+series_id)
+                const seenSourceSeries = new Set();
+                const monitorSourcesData = [];
+                for (const sub of group.items) {
+                    const key = sub.source_id + '|' + sub.id;
+                    if (!seenSourceSeries.has(key)) {
+                        seenSourceSeries.add(key);
+                        monitorSourcesData.push({
+                            source_id: sub.source_id,
+                            source_name: sub.source_name || 'Unknown',
+                            series_id: sub.id,
+                            category: sub.group || '',
+                        });
+                    }
+                }
+                groupMonitorBtn = '<button class="add-monitor-btn" onclick="openMonitorModal(event, null, \'' + escapeAttr(group.items[0].id) + '\', \'' + jsEscape(group.name) + '\', \'' + escapeAttr(group.icon || '') + '\', null, ' + escapeAttr(JSON.stringify(monitorSourcesData)) + ')" title="Monitor this series">📡</button>';
+            }
+
             // Build source rows for expand area
             const sourceRows = group.items.map(sub => {
                 const si = sources.findIndex(s => s.id === sub.source_id) + 1;
@@ -759,6 +865,7 @@
             return '<div class="content-card">' +
                 (isNew ? '<div class="new-badge">NEW</div>' : '') +
                 groupCartBtn +
+                groupMonitorBtn +
                 posterHtml +
                 '<div class="card-info">' +
                 '<div class="card-title">' + escapeHtml(group.name) +
@@ -1375,6 +1482,157 @@
             }).catch(() => {});
         }
         checkVersion();
+
+        // ============================================
+        // SERIES MONITOR FUNCTIONS
+        // ============================================
+        let _monitorModalData = {};
+
+        function openMonitorModal(event, sourceId, seriesId, seriesName, icon, sourceName, allSources) {
+            event.stopPropagation();
+            event.preventDefault();
+
+            _monitorModalData = {
+                sourceId: sourceId,
+                seriesId: seriesId,
+                seriesName: seriesName,
+                icon: icon || '',
+                sourceName: sourceName || '',
+                allSources: allSources || null,
+            };
+
+            const modal = document.getElementById('monitor-modal');
+            document.getElementById('monitor-modal-title').textContent = '📡 Monitor: ' + seriesName;
+
+            // Reset scope
+            selectMonitorScope('new_only');
+            document.getElementById('monitor-season-group').style.display = 'none';
+
+            // Reset action
+            selectMonitorAction('both');
+
+            // Build source options
+            const sourceContainer = document.getElementById('monitor-source-options');
+            let sourceHtml = '<div class="source-option selected" data-source="any" onclick="selectMonitorSource(\'any\')">Any source (first found)</div>';
+
+            if (allSources && allSources.length > 0) {
+                for (const s of allSources) {
+                    const sourceKey = s.source_id + '|' + s.series_id;
+                    const catLabel = s.category ? ' <span style="opacity:0.5;font-size:0.85em">(' + escapeHtml(s.category) + ')</span>' : '';
+                    sourceHtml += '<div class="source-option" data-source-key="' + escapeAttr(sourceKey) + '" data-source="' + escapeAttr(s.source_id) + '" data-series-id="' + escapeAttr(s.series_id) + '" data-source-name="' + escapeAttr(s.source_name) + '" data-category="' + escapeAttr(s.category || '') + '" onclick="selectMonitorSource(\'' + escapeAttr(sourceKey) + '\')">' + escapeHtml(s.source_name) + catLabel + '</div>';
+                }
+            } else if (sourceId) {
+                const sourceKey = sourceId + '|' + seriesId;
+                sourceHtml += '<div class="source-option" data-source-key="' + escapeAttr(sourceKey) + '" data-source="' + escapeAttr(sourceId) + '" data-series-id="' + escapeAttr(seriesId) + '" data-source-name="' + escapeAttr(sourceName || '') + '" data-category="" onclick="selectMonitorSource(\'' + escapeAttr(sourceKey) + '\')">' + escapeHtml(sourceName || sourceId) + '</div>';
+            }
+            sourceContainer.innerHTML = sourceHtml;
+
+            // Load season list for season scope
+            _loadSeasonsList(sourceId || (allSources && allSources.length > 0 ? allSources[0].source_id : null),
+                             seriesId || (allSources && allSources.length > 0 ? allSources[0].series_id : null));
+
+            modal.classList.add('show');
+        }
+
+        async function _loadSeasonsList(sourceId, seriesId) {
+            const seasonSelect = document.getElementById('monitor-season-select');
+            seasonSelect.innerHTML = '<option value="">Loading...</option>';
+            if (!sourceId || !seriesId) return;
+
+            try {
+                const resp = await fetch('/api/cart/series-episodes/' + sourceId + '/' + seriesId);
+                const data = await resp.json();
+                if (data.seasons) {
+                    const seasonNums = Object.keys(data.seasons).sort((a, b) => parseInt(a) - parseInt(b));
+                    seasonSelect.innerHTML = seasonNums.map(s => '<option value="' + s + '">Season ' + s + ' (' + data.seasons[s].length + ' episodes)</option>').join('');
+                }
+            } catch (e) {
+                seasonSelect.innerHTML = '<option value="">Error loading seasons</option>';
+            }
+        }
+
+        function selectMonitorScope(scope) {
+            document.querySelectorAll('#monitor-modal .scope-option').forEach(o => {
+                o.classList.toggle('selected', o.dataset.scope === scope);
+            });
+            document.getElementById('monitor-season-group').style.display = scope === 'season' ? 'block' : 'none';
+            _monitorModalData.scope = scope;
+        }
+
+        function selectMonitorSource(sourceKey) {
+            document.querySelectorAll('#monitor-modal .source-option').forEach(o => {
+                const key = o.dataset.sourceKey || o.dataset.source;
+                o.classList.toggle('selected', key === sourceKey);
+            });
+            _monitorModalData.selectedSource = sourceKey;
+        }
+
+        function selectMonitorAction(action) {
+            document.querySelectorAll('#monitor-modal .action-option').forEach(o => {
+                o.classList.toggle('selected', o.dataset.action === action);
+            });
+            _monitorModalData.action = action;
+        }
+
+        function closeMonitorModal() {
+            document.getElementById('monitor-modal').classList.remove('show');
+            _monitorModalData = {};
+        }
+
+        async function confirmMonitor() {
+            const d = _monitorModalData;
+            const scope = d.scope || 'new_only';
+            const selectedSource = d.selectedSource || 'any';
+            const seasonFilter = scope === 'season' ? document.getElementById('monitor-season-select').value : null;
+
+            if (scope === 'season' && !seasonFilter) {
+                showToast('Please select a season', 'error');
+                return;
+            }
+
+            let sourceId = null;
+            let sourceName = null;
+            let sourceCategory = null;
+            let seriesId = d.seriesId;
+
+            if (selectedSource !== 'any') {
+                // selectedSource is a composite key "source_id|series_id" or just a source_id
+                const sourceOption = document.querySelector('#monitor-modal .source-option.selected');
+                if (sourceOption) {
+                    sourceId = sourceOption.dataset.source;
+                    sourceName = sourceOption.dataset.sourceName || sourceOption.textContent.trim();
+                    sourceCategory = sourceOption.dataset.category || null;
+                    if (sourceOption.dataset.seriesId) seriesId = sourceOption.dataset.seriesId;
+                }
+            }
+
+            try {
+                const resp = await fetch('/api/monitor', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        series_name: d.seriesName,
+                        series_id: seriesId,
+                        source_id: sourceId,
+                        source_name: sourceName,
+                        source_category: sourceCategory,
+                        cover: d.icon,
+                        scope: scope,
+                        season_filter: seasonFilter,
+                        action: d.action || 'both',
+                    })
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    showToast('Monitoring started: ' + d.seriesName, 'success');
+                    closeMonitorModal();
+                } else {
+                    showToast(data.error || 'Failed to add monitoring', 'error');
+                }
+            } catch (e) {
+                showToast('Error adding monitoring', 'error');
+            }
+        }
     </script>
 </body>
 </html>

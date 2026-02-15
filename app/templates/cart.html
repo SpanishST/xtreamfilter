@@ -79,6 +79,7 @@
         .status-badge.downloading { background: rgba(255, 165, 2, 0.2); color: #ffa502; }
         .status-badge.completed { background: rgba(46, 213, 115, 0.2); color: #2ed573; }
         .status-badge.failed, .status-badge.cancelled { background: rgba(255, 71, 87, 0.2); color: #ff4757; }
+        .status-badge.move_failed { background: rgba(255, 165, 2, 0.2); color: #ffa502; }
         .item-progress { width: 80px; }
         .item-progress-bar { width: 100%; height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; overflow: hidden; }
         .item-progress-fill { height: 100%; background: #00d4ff; border-radius: 2px; transition: width 0.5s ease; }
@@ -118,6 +119,7 @@
             </div>
             <div class="header-nav">
                 <a href="/browse" class="btn btn-secondary">Custom categories & Downloads</a>
+                <a href="/monitor" class="btn btn-secondary">📡 Monitor</a>
                 <a href="/" class="btn btn-secondary">Settings</a>
             </div>
         </div>
@@ -131,6 +133,7 @@
                     <div style="display: flex; gap: 8px;">
                         <input type="text" id="download-path" placeholder="/data/downloads">
                         <button class="btn btn-primary btn-small" onclick="saveDownloadPath()" style="white-space:nowrap;">Save</button>
+                        <button class="btn btn-secondary btn-small" onclick="testPath('download-path')" style="white-space:nowrap;">🧪 Test</button>
                     </div>
                 </div>
                 <div class="setting-group" style="flex:1;">
@@ -138,6 +141,7 @@
                     <div style="display: flex; gap: 8px;">
                         <input type="text" id="download-temp-path" placeholder="/data/downloads/.tmp">
                         <button class="btn btn-primary btn-small" onclick="saveTempPath()" style="white-space:nowrap;">Save</button>
+                        <button class="btn btn-secondary btn-small" onclick="testPath('download-temp-path')" style="white-space:nowrap;">🧪 Test</button>
                     </div>
                 </div>
             </div>
@@ -170,9 +174,29 @@
                         <span class="input-suffix">seconds</span>
                     </div>
                 </div>
+                <div class="setting-group">
+                    <label>CDN Burst Reconnect</label>
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <input type="number" id="throttle-burst-reconnect" min="0" step="5" placeholder="0">
+                        <span class="input-suffix">seconds (0 = off)</span>
+                    </div>
+                </div>
                 <button class="btn btn-primary btn-small" onclick="saveThrottle()" style="align-self:flex-end; white-space:nowrap;">Save Throttle</button>
             </div>
             <div id="player-ua-preview" style="font-size:0.75em; color:#666; margin-top:8px; font-family:monospace;"></div>
+            <div id="telegram-notify-section" style="display:none; margin-top:16px;">
+                <div class="settings-section-title">📨 Telegram Notifications</div>
+                <div class="settings-row" style="gap:20px;">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:0.9em;">
+                        <input type="checkbox" id="notify-file" onchange="saveNotifySettings()" style="width:16px; height:16px; accent-color:#00d4ff;">
+                        Notify when each file finishes downloading
+                    </label>
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:0.9em;">
+                        <input type="checkbox" id="notify-queue" onchange="saveNotifySettings()" style="width:16px; height:16px; accent-color:#00d4ff;">
+                        Notify when the entire queue finishes (with recap)
+                    </label>
+                </div>
+            </div>
         </div>
 
         <!-- Summary -->
@@ -217,6 +241,7 @@
                     <span id="current-speed"></span>
                     <span id="current-size"></span>
                     <span id="current-percent"></span>
+                    <span id="current-eta" style="color:#00d4ff;"></span>
                 </div>
             </div>
             <div class="progress-bar-container">
@@ -260,6 +285,7 @@
         document.addEventListener('DOMContentLoaded', function() {
             loadDownloadPath();
             loadThrottleSettings();
+            loadNotifySettings();
             loadCart();
             startPolling();
         });
@@ -313,6 +339,24 @@
             } catch (e) { showToast('Error saving temp path', 'error'); }
         }
 
+        async function testPath(inputId) {
+            const path = document.getElementById(inputId).value.trim();
+            if (!path) return showToast('Path cannot be empty', 'error');
+            try {
+                const resp = await fetch('/api/options/test_path', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: path })
+                });
+                const data = await resp.json();
+                if (resp.ok && data.writable) {
+                    showToast('✅ ' + path + ' — ' + data.message, 'success');
+                } else {
+                    showToast('❌ ' + path + ' — ' + (data.error || data.message || 'Not writable'), 'error');
+                }
+            } catch (e) { showToast('Error testing path', 'error'); }
+        }
+
         let playerProfiles = {};
 
         async function loadThrottleSettings() {
@@ -334,6 +378,7 @@
                 document.getElementById('throttle-bandwidth').value = data.bandwidth_limit || 0;
                 document.getElementById('throttle-pause-interval').value = data.pause_interval || 0;
                 document.getElementById('throttle-pause-duration').value = data.pause_duration || 0;
+                document.getElementById('throttle-burst-reconnect').value = data.burst_reconnect || 0;
                 select.value = data.player_profile || 'tivimate';
                 updatePlayerUaPreview();
             } catch (e) { console.error('Error loading throttle settings:', e); }
@@ -354,12 +399,13 @@
             const bw = parseInt(document.getElementById('throttle-bandwidth').value) || 0;
             const interval = parseInt(document.getElementById('throttle-pause-interval').value) || 0;
             const duration = parseInt(document.getElementById('throttle-pause-duration').value) || 0;
+            const burst = parseInt(document.getElementById('throttle-burst-reconnect').value) || 0;
             const profile = document.getElementById('throttle-player-profile').value;
             try {
                 const resp = await fetch('/api/options/download_throttle', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ bandwidth_limit: bw, pause_interval: interval, pause_duration: duration, player_profile: profile })
+                    body: JSON.stringify({ bandwidth_limit: bw, pause_interval: interval, pause_duration: duration, player_profile: profile, burst_reconnect: burst })
                 });
                 const data = await resp.json();
                 if (resp.ok) {
@@ -368,6 +414,35 @@
                     showToast(data.error || 'Failed to save', 'error');
                 }
             } catch (e) { showToast('Error saving throttle settings', 'error'); }
+        }
+
+        async function loadNotifySettings() {
+            try {
+                const resp = await fetch('/api/options/download_notifications');
+                const data = await resp.json();
+                if (data.telegram_configured) {
+                    document.getElementById('telegram-notify-section').style.display = '';
+                    document.getElementById('notify-file').checked = !!data.notify_file;
+                    document.getElementById('notify-queue').checked = !!data.notify_queue;
+                }
+            } catch (e) { console.error('Error loading notification settings:', e); }
+        }
+
+        async function saveNotifySettings() {
+            const notifyFile = document.getElementById('notify-file').checked;
+            const notifyQueue = document.getElementById('notify-queue').checked;
+            try {
+                const resp = await fetch('/api/options/download_notifications', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ notify_file: notifyFile, notify_queue: notifyQueue })
+                });
+                if (resp.ok) {
+                    showToast('Notification settings saved', 'success');
+                } else {
+                    showToast('Failed to save notification settings', 'error');
+                }
+            } catch (e) { showToast('Error saving notification settings', 'error'); }
         }
 
         async function loadCart() {
@@ -427,7 +502,10 @@
                 }
 
                 const canRemove = item.status !== 'downloading';
-                const retryBtn = (item.status === 'failed' || item.status === 'cancelled')
+                const moveBtn = (item.status === 'move_failed' && item.temp_path)
+                    ? '<button class="remove-btn" onclick="moveItem(\'' + item.id + '\')" title="Move to destination" style="color:#00d4ff;">📂</button>'
+                    : '';
+                const retryBtn = (item.status === 'failed' || item.status === 'cancelled' || item.status === 'move_failed')
                     ? '<button class="remove-btn" onclick="retryItem(\'' + item.id + '\')" title="Retry" style="color:#ffa502;">🔄</button>'
                     : '';
                 const removeBtn = canRemove
@@ -440,7 +518,7 @@
                     '<td>' + typeBadge + '</td>' +
                     '<td>' + statusBadge + '</td>' +
                     '<td>' + progressHtml + '</td>' +
-                    '<td>' + retryBtn + removeBtn + '</td>' +
+                    '<td>' + moveBtn + retryBtn + removeBtn + '</td>' +
                     '</tr>';
             }).join('');
         }
@@ -479,6 +557,18 @@
                         (data.current.total_bytes ? ' / ' + formatBytes(data.current.total_bytes) : '');
                     document.getElementById('current-percent').textContent = data.current.progress + '%';
                     document.getElementById('current-progress-bar').style.width = data.current.progress + '%';
+
+                    // Compute ETA
+                    const etaEl = document.getElementById('current-eta');
+                    if (data.current.speed > 0 && data.current.total_bytes > 0) {
+                        const remaining = data.current.total_bytes - data.current.bytes_downloaded;
+                        const etaSec = Math.max(0, Math.round(remaining / data.current.speed));
+                        etaEl.textContent = 'ETA ' + formatDuration(etaSec);
+                    } else if (data.current.total_bytes > 0) {
+                        etaEl.textContent = 'ETA --:--';
+                    } else {
+                        etaEl.textContent = '';
+                    }
 
                     // Show pause indicator
                     const pauseEl = document.getElementById('pause-indicator');
@@ -544,6 +634,19 @@
             } catch (e) { showToast('Error retrying item', 'error'); }
         }
 
+        async function moveItem(itemId) {
+            try {
+                const resp = await fetch('/api/cart/' + itemId + '/move', { method: 'POST' });
+                const data = await resp.json();
+                if (resp.ok) {
+                    showToast(data.message || 'File moved successfully', 'success');
+                } else {
+                    showToast(data.error || 'Move failed', 'error');
+                }
+                await loadCart();
+            } catch (e) { showToast('Error moving file', 'error'); }
+        }
+
         async function retryAllFailed() {
             try {
                 const resp = await fetch('/api/cart/retry-all', { method: 'POST' });
@@ -577,6 +680,15 @@
             const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
             const i = Math.floor(Math.log(bytes) / Math.log(k));
             return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+
+        function formatDuration(totalSeconds) {
+            if (totalSeconds < 60) return totalSeconds + 's';
+            const h = Math.floor(totalSeconds / 3600);
+            const m = Math.floor((totalSeconds % 3600) / 60);
+            const s = totalSeconds % 60;
+            if (h > 0) return h + 'h ' + String(m).padStart(2, '0') + 'm';
+            return m + 'm ' + String(s).padStart(2, '0') + 's';
         }
 
         function escapeHtml(text) {

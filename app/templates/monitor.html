@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Series Monitor - XtreamFilter</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); min-height: 100vh; color: #e0e0e0; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; flex-wrap: wrap; gap: 15px; }
+        .header h1 { color: #00d4ff; font-size: 2em; text-shadow: 0 0 20px rgba(0, 212, 255, 0.3); }
+        .btn { display: inline-block; padding: 10px 20px; border: none; border-radius: 8px; font-size: 0.95em; cursor: pointer; transition: all 0.3s; text-decoration: none; }
+        .btn-secondary { background: rgba(255, 255, 255, 0.1); color: #fff; border: 1px solid rgba(255, 255, 255, 0.2); }
+        .btn-secondary:hover { background: rgba(255, 255, 255, 0.2); }
+        .btn-primary { background: linear-gradient(135deg, #00d4ff, #0099cc); color: #000; font-weight: 600; }
+        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(0, 212, 255, 0.4); }
+        .btn-small { padding: 6px 12px; font-size: 0.85em; }
+        .btn-danger { background: rgba(255, 71, 87, 0.2); color: #ff4757; border: 1px solid rgba(255, 71, 87, 0.3); }
+        .btn-danger:hover { background: rgba(255, 71, 87, 0.35); }
+
+        .header-actions { display: flex; gap: 10px; align-items: center; }
+
+        .series-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; margin-top: 20px; }
+
+        .series-card { background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; overflow: hidden; transition: all 0.3s; display: flex; flex-direction: row; }
+        .series-card:hover { border-color: rgba(0, 212, 255, 0.3); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3); }
+        .series-card.disabled { opacity: 0.5; }
+
+        .series-cover { width: 120px; min-height: 160px; flex-shrink: 0; background: rgba(0, 0, 0, 0.3); display: flex; align-items: center; justify-content: center; }
+        .series-cover img { width: 100%; height: 100%; object-fit: cover; }
+        .series-cover .placeholder { font-size: 3em; opacity: 0.3; }
+
+        .series-details { padding: 15px; flex: 1; display: flex; flex-direction: column; gap: 8px; }
+        .series-name { font-size: 1.1em; font-weight: 600; color: #fff; line-height: 1.3; }
+        .series-meta { display: flex; flex-wrap: wrap; gap: 6px; }
+        .series-badge { font-size: 0.75em; padding: 3px 10px; border-radius: 12px; font-weight: 500; }
+        .badge-scope { background: rgba(0, 212, 255, 0.15); color: #00d4ff; }
+        .badge-source { background: rgba(46, 213, 115, 0.2); color: #2ed573; }
+        .badge-any-source { background: rgba(162, 155, 254, 0.2); color: #a29bfe; }
+        .badge-new { background: rgba(255, 165, 2, 0.2); color: #ffa502; }
+        .badge-action { background: rgba(253, 121, 168, 0.15); color: #fd79a8; }
+
+        .series-stats { font-size: 0.8em; color: #888; display: flex; flex-direction: column; gap: 4px; }
+        .series-stats span { display: block; }
+
+        .series-actions { display: flex; gap: 6px; margin-top: auto; flex-wrap: wrap; }
+
+        .toggle-switch { position: relative; width: 44px; height: 24px; flex-shrink: 0; }
+        .toggle-switch input { opacity: 0; width: 0; height: 0; }
+        .toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: rgba(255, 255, 255, 0.1); border-radius: 24px; transition: 0.3s; }
+        .toggle-slider:before { content: ""; position: absolute; height: 18px; width: 18px; left: 3px; bottom: 3px; background: #888; border-radius: 50%; transition: 0.3s; }
+        .toggle-switch input:checked + .toggle-slider { background: rgba(0, 212, 255, 0.3); }
+        .toggle-switch input:checked + .toggle-slider:before { transform: translateX(20px); background: #00d4ff; }
+
+        .empty-state { text-align: center; padding: 80px 20px; color: #666; }
+        .empty-state-icon { font-size: 4em; margin-bottom: 20px; opacity: 0.3; }
+        .empty-state h3 { color: #888; margin-bottom: 10px; }
+        .empty-state p { color: #666; margin-bottom: 20px; }
+
+        .loading-spinner { display: inline-block; width: 20px; height: 20px; border: 2px solid rgba(0, 212, 255, 0.1); border-radius: 50%; border-top-color: #00d4ff; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(100px); padding: 12px 24px; border-radius: 8px; font-size: 0.95em; z-index: 10000; opacity: 0; transition: all 0.3s ease; }
+        .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+        .toast-success { background: linear-gradient(135deg, #2ed573, #1abc9c); color: #000; font-weight: 500; }
+        .toast-info { background: rgba(0, 212, 255, 0.9); color: #000; font-weight: 500; }
+        .toast-error { background: rgba(255, 71, 87, 0.9); color: #fff; font-weight: 500; }
+
+        /* Preview Modal */
+        .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.8); display: none; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
+        .modal-overlay.show { display: flex; }
+        .modal { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 16px; max-width: 600px; width: 100%; max-height: 90vh; overflow-y: auto; }
+        .modal-header { padding: 20px; border-bottom: 1px solid rgba(255, 255, 255, 0.1); display: flex; justify-content: space-between; align-items: center; }
+        .modal-header h2 { color: #00d4ff; font-size: 1.3em; }
+        .modal-close { background: none; border: none; color: #888; font-size: 1.5em; cursor: pointer; }
+        .modal-close:hover { color: #fff; }
+        .modal-body { padding: 20px; }
+        .modal-footer { padding: 20px; border-top: 1px solid rgba(255, 255, 255, 0.1); display: flex; justify-content: flex-end; gap: 10px; }
+
+        .preview-ep { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); font-size: 0.9em; }
+        .preview-ep .ep-num { color: #888; min-width: 65px; }
+        .preview-ep .ep-title { flex: 1; }
+        .preview-ep .ep-status { font-size: 0.8em; padding: 2px 8px; border-radius: 10px; }
+        .ep-status-new { background: rgba(46, 213, 115, 0.2); color: #2ed573; }
+        .ep-status-known { background: rgba(255, 255, 255, 0.05); color: #888; }
+        .ep-status-downloaded { background: rgba(0, 212, 255, 0.15); color: #00d4ff; }
+
+        .preview-summary { padding: 12px; background: rgba(0, 0, 0, 0.2); border-radius: 8px; margin-bottom: 15px; font-size: 0.9em; }
+        .preview-summary strong { color: #2ed573; }
+
+        .season-group { margin-bottom: 15px; }
+        .season-header { padding: 8px 12px; background: rgba(0, 0, 0, 0.2); border-radius: 6px; margin-bottom: 5px; color: #00d4ff; font-size: 0.9em; font-weight: 600; }
+        .preview-list { max-height: 400px; overflow-y: auto; }
+
+        .check-status { display: flex; align-items: center; gap: 10px; font-size: 0.85em; color: #888; }
+        .check-status .checking { color: #00d4ff; }
+
+        @media (max-width: 768px) {
+            .series-grid { grid-template-columns: 1fr; }
+            .series-card { flex-direction: column; }
+            .series-cover { width: 100%; min-height: 120px; max-height: 180px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <h1>📡 Series Monitor</h1>
+                <span id="version-badge" style="display: none; font-size: 0.65em; padding: 3px 10px; border-radius: 12px; background: rgba(255,255,255,0.08); color: #888;"></span>
+            </div>
+            <div class="header-nav">
+                <a href="/browse" class="btn btn-secondary">Custom categories & Downloads</a>
+                <a href="/cart" class="btn btn-secondary">🛒 Cart</a>
+                <a href="/" class="btn btn-secondary">Settings</a>
+            </div>
+        </div>
+
+        <div class="header-actions">
+            <button class="btn btn-primary" onclick="triggerCheck()" id="check-btn">🔍 Check Now</button>
+            <div class="check-status" id="check-status" style="display:none;">
+                <div class="loading-spinner"></div>
+                <span class="checking">Checking for new episodes...</span>
+            </div>
+        </div>
+
+        <div id="series-list">
+            <div class="empty-state" id="empty-state">
+                <div class="empty-state-icon">📡</div>
+                <h3>No monitored series</h3>
+                <p>Go to the <a href="/browse" style="color: #00d4ff;">Browse page</a>, find a series, and click the 📡 button to start monitoring.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Preview Modal -->
+    <div class="modal-overlay" id="preview-modal">
+        <div class="modal" style="max-width: 650px;">
+            <div class="modal-header">
+                <h2 id="preview-modal-title">Episode Preview</h2>
+                <button class="modal-close" onclick="closePreviewModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="preview-summary" id="preview-summary"></div>
+                <div class="preview-list" id="preview-list">
+                    <div style="text-align:center; padding:30px;"><div class="loading-spinner"></div></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closePreviewModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let monitoredSeries = [];
+        let _checkInterval = null;
+
+        document.addEventListener('DOMContentLoaded', function() {
+            loadMonitored();
+            // Poll for updates every 15 seconds
+            _checkInterval = setInterval(loadMonitored, 15000);
+        });
+
+        async function loadMonitored() {
+            try {
+                const resp = await fetch('/api/monitor');
+                const data = await resp.json();
+                monitoredSeries = data.series || [];
+                renderSeries();
+            } catch (e) {
+                console.error('Error loading monitored series:', e);
+            }
+        }
+
+        function renderSeries() {
+            const container = document.getElementById('series-list');
+            const emptyState = document.getElementById('empty-state');
+
+            if (monitoredSeries.length === 0) {
+                container.innerHTML = '';
+                container.appendChild(emptyState);
+                emptyState.style.display = 'block';
+                return;
+            }
+
+            emptyState.style.display = 'none';
+
+            let html = '<div class="series-grid">';
+            for (const entry of monitoredSeries) {
+                const coverHtml = entry.cover
+                    ? '<img src="' + escapeAttr(entry.cover) + '" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'" loading="lazy"><span class="placeholder" style="display:none">📺</span>'
+                    : '<span class="placeholder">📺</span>';
+
+                const scopeLabel = entry.scope === 'all' ? 'All episodes'
+                    : entry.scope === 'season' ? 'Season ' + (entry.season_filter || '?')
+                    : 'New only';
+
+                const sourceLabel = entry.source_id
+                    ? (entry.source_name || entry.source_id) + (entry.source_category ? ' (' + entry.source_category + ')' : '')
+                    : 'Any source';
+                const sourceBadgeClass = entry.source_id ? 'badge-source' : 'badge-any-source';
+
+                const actionVal = entry.action || 'both';
+                const actionLabel = actionVal === 'notify' ? '🔔 Notify only'
+                    : actionVal === 'download' ? '⬇ Download only'
+                    : '⬇🔔 Both';
+
+                const lastChecked = entry.last_checked
+                    ? formatRelativeTime(entry.last_checked)
+                    : 'Never';
+
+                const disabledClass = entry.enabled ? '' : ' disabled';
+                const newBadge = entry.last_new_count > 0
+                    ? '<span class="series-badge badge-new">' + entry.last_new_count + ' new</span>'
+                    : '';
+
+                html += '<div class="series-card' + disabledClass + '">' +
+                    '<div class="series-cover">' + coverHtml + '</div>' +
+                    '<div class="series-details">' +
+                    '<div class="series-name">' + escapeHtml(entry.series_name) + '</div>' +
+                    '<div class="series-meta">' +
+                    '<span class="series-badge badge-scope">' + scopeLabel + '</span>' +
+                    '<span class="series-badge ' + sourceBadgeClass + '">' + escapeHtml(sourceLabel) + '</span>' +
+                    '<span class="series-badge badge-action">' + actionLabel + '</span>' +
+                    newBadge +
+                    '</div>' +
+                    '<div class="series-stats">' +
+                    '<span>Known: ' + (entry.known_episodes || []).length + ' episodes</span>' +
+                    '<span>Downloaded: ' + (entry.downloaded_episodes || []).length + ' episodes</span>' +
+                    '<span>Last checked: ' + lastChecked + '</span>' +
+                    '</div>' +
+                    '<div class="series-actions">' +
+                    '<label class="toggle-switch" title="' + (entry.enabled ? 'Disable' : 'Enable') + ' monitoring">' +
+                    '<input type="checkbox" ' + (entry.enabled ? 'checked' : '') + ' onchange="toggleEnabled(\'' + entry.id + '\', this.checked)">' +
+                    '<span class="toggle-slider"></span>' +
+                    '</label>' +
+                    '<button class="btn btn-secondary btn-small" onclick="previewEpisodes(\'' + entry.id + '\', \'' + escapeAttr(entry.series_name) + '\')">👁 Preview</button>' +
+                    '<button class="btn btn-danger btn-small" onclick="deleteMonitored(\'' + entry.id + '\', \'' + escapeAttr(entry.series_name) + '\')">🗑</button>' +
+                    '</div>' +
+                    '</div>' +
+                    '</div>';
+            }
+            html += '</div>';
+            container.innerHTML = html;
+        }
+
+        async function toggleEnabled(id, enabled) {
+            try {
+                await fetch('/api/monitor/' + id, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: enabled })
+                });
+                showToast(enabled ? 'Monitoring enabled' : 'Monitoring paused', 'info');
+            } catch (e) {
+                showToast('Error updating', 'error');
+            }
+        }
+
+        async function deleteMonitored(id, name) {
+            if (!confirm('Remove monitoring for "' + name + '"?')) return;
+            try {
+                await fetch('/api/monitor/' + id, { method: 'DELETE' });
+                showToast('Removed: ' + name, 'info');
+                await loadMonitored();
+            } catch (e) {
+                showToast('Error removing', 'error');
+            }
+        }
+
+        async function triggerCheck() {
+            const btn = document.getElementById('check-btn');
+            const status = document.getElementById('check-status');
+            btn.disabled = true;
+            status.style.display = 'flex';
+
+            try {
+                await fetch('/api/monitor/check', { method: 'POST' });
+                showToast('Monitoring check started', 'info');
+                // Poll a few times to pick up results
+                let polls = 0;
+                const pollInt = setInterval(async () => {
+                    await loadMonitored();
+                    polls++;
+                    if (polls >= 10) {
+                        clearInterval(pollInt);
+                        btn.disabled = false;
+                        status.style.display = 'none';
+                    }
+                }, 3000);
+            } catch (e) {
+                showToast('Error triggering check', 'error');
+                btn.disabled = false;
+                status.style.display = 'none';
+            }
+        }
+
+        async function previewEpisodes(id, name) {
+            const modal = document.getElementById('preview-modal');
+            document.getElementById('preview-modal-title').textContent = 'Preview: ' + name;
+            document.getElementById('preview-summary').textContent = 'Loading...';
+            document.getElementById('preview-list').innerHTML = '<div style="text-align:center; padding:30px;"><div class="loading-spinner"></div></div>';
+            modal.classList.add('show');
+
+            try {
+                const resp = await fetch('/api/monitor/' + id + '/episodes');
+                if (!resp.ok) {
+                    let errMsg = 'Server error (' + resp.status + ')';
+                    try {
+                        const errData = await resp.json();
+                        errMsg = errData.error || errMsg;
+                    } catch (_) {}
+                    throw new Error(errMsg);
+                }
+                const data = await resp.json();
+
+                document.getElementById('preview-summary').innerHTML =
+                    'Total: <strong>' + data.total_episodes + '</strong> episodes — ' +
+                    '<strong>' + data.new_count + '</strong> new (would be downloaded on next check)';
+
+                // Group by season
+                const seasons = {};
+                for (const ep of data.episodes) {
+                    const s = ep.season || '?';
+                    if (!seasons[s]) seasons[s] = [];
+                    seasons[s].push(ep);
+                }
+
+                let html = '';
+                const sortedSeasons = Object.keys(seasons).sort((a, b) => parseInt(a) - parseInt(b));
+                for (const sNum of sortedSeasons) {
+                    html += '<div class="season-group">';
+                    html += '<div class="season-header">Season ' + sNum + ' (' + seasons[sNum].length + ' episodes)</div>';
+                    for (const ep of seasons[sNum]) {
+                        const statusClass = 'ep-status-' + ep.status;
+                        const statusLabel = ep.status === 'new' ? '🆕 New' : ep.status === 'downloaded' ? '✅ Downloaded' : '📋 Known';
+                        html += '<div class="preview-ep">' +
+                            '<span class="ep-num">S' + String(ep.season).padStart(2, '0') + 'E' + String(ep.episode_num).padStart(2, '0') + '</span>' +
+                            '<span class="ep-title">' + escapeHtml(ep.title || 'Episode ' + ep.episode_num) + '</span>' +
+                            '<span class="ep-status ' + statusClass + '">' + statusLabel + '</span>' +
+                            '</div>';
+                    }
+                    html += '</div>';
+                }
+                document.getElementById('preview-list').innerHTML = html;
+            } catch (e) {
+                document.getElementById('preview-summary').textContent = '';
+                document.getElementById('preview-list').innerHTML = '<p style="color:#ff4757">Error loading preview: ' + escapeHtml(e.message) + '</p>';
+            }
+        }
+
+        function closePreviewModal() {
+            document.getElementById('preview-modal').classList.remove('show');
+        }
+
+        function formatRelativeTime(isoStr) {
+            const date = new Date(isoStr);
+            const now = new Date();
+            const diffMs = now - date;
+            const diffMin = Math.floor(diffMs / 60000);
+            if (diffMin < 1) return 'Just now';
+            if (diffMin < 60) return diffMin + 'm ago';
+            const diffHrs = Math.floor(diffMin / 60);
+            if (diffHrs < 24) return diffHrs + 'h ago';
+            const diffDays = Math.floor(diffHrs / 24);
+            return diffDays + 'd ago';
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function escapeAttr(str) {
+            return String(str || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function showToast(message, type) {
+            const toast = document.createElement('div');
+            toast.className = 'toast toast-' + type;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.classList.add('show'), 10);
+            setTimeout(() => {
+                toast.classList.remove('show');
+                setTimeout(() => toast.remove(), 300);
+            }, 2000);
+        }
+    </script>
+</body>
+</html>

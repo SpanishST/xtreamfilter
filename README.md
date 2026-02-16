@@ -48,7 +48,6 @@ docker run -d \
 Or with docker-compose, create a `docker-compose.yml`:
 
 ```yaml
-version: '3'
 services:
   xtreamfilter:
     image: spanishst/xtreamfilter:latest
@@ -57,7 +56,10 @@ services:
       - "8080:5000"
     volumes:
       - ./data:/data
+      - ./downloads:/data/downloads
     restart: unless-stopped
+    environment:
+      - TZ=Europe/Paris
 ```
 
 Then run:
@@ -688,7 +690,6 @@ For 4K streams and large catalogs, the application is optimized with:
 ## Docker Compose
 
 ```yaml
-version: '3'
 services:
   xtreamfilter:
     build: .
@@ -697,7 +698,10 @@ services:
       - "8080:5000"
     volumes:
       - ./data:/data
+      - ./downloads:/data/downloads
     restart: unless-stopped
+    environment:
+      - TZ=Europe/Paris
 ```
 
 ## Development
@@ -705,9 +709,8 @@ services:
 Run locally without Docker:
 
 ```bash
-cd app
-pip install fastapi uvicorn httpx jinja2 aiofiles
-uvicorn main:app --host 0.0.0.0 --port 5000 --reload
+pip install fastapi uvicorn[standard] httpx jinja2 python-multipart lxml rapidfuzz packaging
+uvicorn app.main:app --host 0.0.0.0 --port 5000 --reload
 ```
 
 The app will be available at `http://localhost:5000`
@@ -717,10 +720,13 @@ The app will be available at `http://localhost:5000`
 | Package | Version | Purpose |
 |---------|---------|--------|
 | fastapi | ≥0.115.0 | Async web framework |
-| uvicorn | ≥0.34.0 | ASGI server |
+| uvicorn[standard] | ≥0.34.0 | ASGI server |
 | httpx | ≥0.28.0 | Async HTTP client |
 | jinja2 | ≥3.1.0 | Template engine |
-| aiofiles | ≥24.0 | Async file operations |
+| python-multipart | ≥0.0.9 | Form data parsing |
+| lxml | ≥5.0.0 | XML/EPG parsing |
+| rapidfuzz | ≥3.0.0 | Fuzzy string matching |
+| packaging | ≥24.0 | Version comparison |
 
 ## Running Tests
 

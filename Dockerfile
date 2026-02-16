@@ -2,6 +2,9 @@ FROM python:3.13-slim
 
 WORKDIR /src
 
+# Ensure app package is importable regardless of working directory
+ENV PYTHONPATH=/src
+
 # Install dependencies
 # FastAPI with uvicorn for async support, httpx for async HTTP client, lxml for XML parsing
 RUN pip install --no-cache-dir fastapi uvicorn[standard] httpx jinja2 python-multipart lxml rapidfuzz packaging

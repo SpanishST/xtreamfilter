@@ -28,6 +28,9 @@
         .browse-nav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 12px 15px; margin-bottom: 20px; border: 1px solid rgba(255, 255, 255, 0.1); }
         .browse-nav-separator { width: 1px; height: 24px; background: rgba(255, 255, 255, 0.15); flex-shrink: 0; margin: 0 4px; }
         .browse-nav-actions { display: flex; gap: 6px; margin-left: auto; flex-shrink: 0; }
+        .btn-icon { padding: 6px 10px; font-size: 1em; line-height: 1; }
+        .btn-icon.refreshing { animation: spin 1s linear infinite; pointer-events: none; opacity: 0.6; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         .categories-list { display: flex; gap: 8px; flex-wrap: wrap; }
         .category-pill { padding: 8px 16px; border-radius: 20px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #888; cursor: pointer; transition: all 0.2s; font-size: 0.85em; display: flex; align-items: center; gap: 6px; }
         .category-pill:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
@@ -561,6 +564,21 @@
             } catch (error) { console.error('Error loading categories:', error); }
         }
 
+        async function refreshCategories() {
+            const btn = document.getElementById('refresh-cats-btn');
+            if (btn) btn.classList.add('refreshing');
+            try {
+                await fetch('/api/categories/refresh', { method: 'POST' });
+                await loadCategories();
+                if (selectedCategoryId) applyFilters();
+            } catch (error) {
+                console.error('Error refreshing categories:', error);
+            } finally {
+                const b = document.getElementById('refresh-cats-btn');
+                if (b) b.classList.remove('refreshing');
+            }
+        }
+
         function renderBrowseNav() {
             const container = document.getElementById('browse-nav');
             const allActive = selectedCategoryId === null ? 'active' : '';
@@ -579,6 +597,7 @@
                     + '<span class="cat-count">' + count + '</span></div>';
             }).join('');
             html += '<div class="browse-nav-actions">';
+            html += '<button id="refresh-cats-btn" class="btn btn-secondary btn-small btn-icon" onclick="refreshCategories()" title="Refresh automatic categories">🔄</button>';
             html += '<button class="btn btn-primary btn-small" onclick="openCategoryModal()">+ New</button>';
             html += '<button class="btn btn-secondary btn-small" onclick="openManageCategoriesModal()">Manage</button>';
             html += '</div>';

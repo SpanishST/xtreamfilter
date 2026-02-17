@@ -12,6 +12,8 @@ import unicodedata
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
+from xml.etree.ElementTree import Element, SubElement, tostring
+from xml.dom import minidom
 
 import httpx
 
@@ -39,6 +41,193 @@ def sanitize_filename(name: str) -> str:
 def get_player_headers(profile_key: str = "tivimate") -> dict:
     profile = PLAYER_PROFILES.get(profile_key, PLAYER_PROFILES["tivimate"])
     return dict(profile["headers"])
+
+
+# ------------------------------------------------------------------
+# NFO generation helpers (Jellyfin / Kodi compatible)
+# ------------------------------------------------------------------
+
+def _xml_prettify(elem: Element) -> str:
+    """Return a pretty-printed XML string with declaration."""
+    rough = tostring(elem, encoding="unicode")
+    parsed = minidom.parseString(rough)
+    return parsed.toprettyxml(indent="  ", encoding=None)
+
+
+def _add_text(parent: Element, tag: str, text: str | None) -> None:
+    """Add a text sub-element if the text is non-empty."""
+    if text:
+        el = SubElement(parent, tag)
+        el.text = str(text).strip()
+
+
+def _extract_year(info: dict) -> str:
+    """Try to extract a 4-digit year from various Xtream info fields."""
+    for key in ("releasedate", "releaseDate", "release_date", "year"):
+        val = str(info.get(key, "")).strip()
+        if val:
+            m = re.search(r"(\d{4})", val)
+            if m:
+                return m.group(1)
+    return ""
+
+
+def generate_movie_nfo(info: dict, name: str = "") -> str:
+    """Generate a Jellyfin-compatible movie NFO from Xtream VOD info.
+
+    See https://jellyfin.org/docs/general/server/metadata/nfo/
+    """
+    root = Element("movie")
+    title = info.get("name") or info.get("title") or info.get("o_name") or name
+    _add_text(root, "title", title)
+    _add_text(root, "originaltitle", info.get("o_name"))
+    year = _extract_year(info)
+    _add_text(root, "year", year)
+    _add_text(root, "plot", info.get("plot") or info.get("description"))
+    _add_text(root, "tagline", info.get("tagline"))
+    _add_text(root, "runtime", info.get("duration") or info.get("runtime"))
+
+    # Rating
+    rating_val = info.get("rating") or info.get("rating_5based")
+    if rating_val:
+        try:
+            r = float(rating_val)
+            if r > 0:
+                _add_text(root, "rating", str(r))
+        except (ValueError, TypeError):
+            pass
+
+    # TMDb / IMDB IDs — Jellyfin uses these for matching
+    tmdb_id = info.get("tmdb_id") or info.get("tmdb")
+    if tmdb_id:
+        _add_text(root, "tmdbid", str(tmdb_id))
+    imdb_id = info.get("imdb_id") or info.get("imdb")
+    if imdb_id:
+        _add_text(root, "imdbid", str(imdb_id))
+
+    # Genres
+    genre_str = info.get("genre") or info.get("category_name") or ""
+    for genre in re.split(r"[,/]", genre_str):
+        genre = genre.strip()
+        if genre:
+            _add_text(root, "genre", genre)
+
+    # Director
+    director_str = info.get("director") or ""
+    for director in re.split(r"[,/]", director_str):
+        director = director.strip()
+        if director:
+            _add_text(root, "director", director)
+
+    # Cast
+    cast_str = info.get("cast") or info.get("actors") or ""
+    for actor_name in re.split(r",", cast_str):
+        actor_name = actor_name.strip()
+        if actor_name:
+            actor_el = SubElement(root, "actor")
+            name_el = SubElement(actor_el, "name")
+            name_el.text = actor_name
+
+    # Country / Studio
+    _add_text(root, "country", info.get("country"))
+    _add_text(root, "studio", info.get("studio"))
+
+    # Poster / fanart (URL references for Jellyfin)
+    cover = info.get("cover_big") or info.get("cover") or info.get("movie_image") or info.get("stream_icon")
+    if cover:
+        art = SubElement(root, "art")
+        _add_text(art, "poster", cover)
+
+    return _xml_prettify(root)
+
+
+def generate_tvshow_nfo(info: dict, name: str = "") -> str:
+    """Generate a Jellyfin-compatible tvshow.nfo from Xtream series info."""
+    root = Element("tvshow")
+    title = info.get("name") or info.get("title") or name
+    _add_text(root, "title", title)
+    _add_text(root, "originaltitle", info.get("o_name"))
+    year = _extract_year(info)
+    _add_text(root, "year", year)
+    _add_text(root, "plot", info.get("plot") or info.get("description"))
+
+    rating_val = info.get("rating") or info.get("rating_5based")
+    if rating_val:
+        try:
+            r = float(rating_val)
+            if r > 0:
+                _add_text(root, "rating", str(r))
+        except (ValueError, TypeError):
+            pass
+
+    tmdb_id = info.get("tmdb_id") or info.get("tmdb")
+    if tmdb_id:
+        _add_text(root, "tmdbid", str(tmdb_id))
+    imdb_id = info.get("imdb_id") or info.get("imdb")
+    if imdb_id:
+        _add_text(root, "imdbid", str(imdb_id))
+
+    genre_str = info.get("genre") or info.get("category_name") or ""
+    for genre in re.split(r"[,/]", genre_str):
+        genre = genre.strip()
+        if genre:
+            _add_text(root, "genre", genre)
+
+    cast_str = info.get("cast") or info.get("actors") or ""
+    for actor_name in re.split(r",", cast_str):
+        actor_name = actor_name.strip()
+        if actor_name:
+            actor_el = SubElement(root, "actor")
+            name_el = SubElement(actor_el, "name")
+            name_el.text = actor_name
+
+    cover = info.get("cover") or info.get("cover_big") or info.get("stream_icon")
+    if cover:
+        art = SubElement(root, "art")
+        _add_text(art, "poster", cover)
+
+    return _xml_prettify(root)
+
+
+def generate_episode_nfo(item: dict, ep_info: dict | None = None) -> str:
+    """Generate a Jellyfin-compatible episodedetails NFO."""
+    root = Element("episodedetails")
+    _add_text(root, "title", item.get("episode_title") or item.get("name", ""))
+    _add_text(root, "season", str(item.get("season", 1)))
+    _add_text(root, "episode", str(item.get("episode_num", 1)))
+    _add_text(root, "showtitle", item.get("series_name", ""))
+
+    if ep_info:
+        _add_text(root, "plot", ep_info.get("plot") or ep_info.get("description"))
+        _add_text(root, "aired", ep_info.get("air_date") or ep_info.get("releasedate"))
+        rating_val = ep_info.get("rating")
+        if rating_val:
+            try:
+                r = float(rating_val)
+                if r > 0:
+                    _add_text(root, "rating", str(r))
+            except (ValueError, TypeError):
+                pass
+        _add_text(root, "runtime", ep_info.get("duration") or ep_info.get("runtime"))
+
+    return _xml_prettify(root)
+
+
+async def download_poster(url: str, dest_path: str) -> bool:
+    """Download a poster image to the given path. Returns True on success."""
+    if not url or not url.startswith("http"):
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), follow_redirects=True) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code == 200 and len(resp.content) > 100:
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                with open(dest_path, "wb") as f:
+                    f.write(resp.content)
+                return True
+    except Exception as e:
+        logger.debug(f"Failed to download poster {url}: {e}")
+    return False
 
 
 class CartService:
@@ -164,7 +353,7 @@ class CartService:
         ext = ext_override or item.get("container_extension", "mp4")
         name = sanitize_filename(item.get("name", "untitled"))
         if item.get("content_type") == "vod":
-            return os.path.join(base_path, "Films", f"{name}.{ext}")
+            return os.path.join(base_path, "Films", name, f"{name}.{ext}")
         elif item.get("content_type") == "series":
             series_name = sanitize_filename(item.get("series_name", name))
             season = item.get("season", "1")
@@ -231,9 +420,11 @@ class CartService:
                     content_type="series",
                     name=ep.get("title", "") or f"Episode {ep['episode_num']}",
                     series_name=ep.get("series_name", series_name),
+                    series_id=series_id,
                     season=ep["season"],
                     episode_num=ep.get("episode_num", 0),
                     episode_title=ep.get("title", ""),
+                    episode_info=ep.get("info"),
                     icon=data.get("icon", ""),
                     group=data.get("group", ""),
                     container_extension=ep.get("container_extension", "mp4"),
@@ -256,9 +447,11 @@ class CartService:
                 content_type=content_type,
                 name=data.get("name", ""),
                 series_name=data.get("series_name"),
+                series_id=data.get("series_id"),
                 season=data.get("season"),
                 episode_num=data.get("episode_num"),
                 episode_title=data.get("episode_title"),
+                episode_info=data.get("episode_info"),
                 icon=data.get("icon", ""),
                 group=data.get("group", ""),
                 container_extension=data.get("container_extension", "mp4"),
@@ -278,9 +471,11 @@ class CartService:
             "content_type": kwargs.get("content_type", "vod"),
             "name": kwargs.get("name", ""),
             "series_name": kwargs.get("series_name"),
+            "series_id": kwargs.get("series_id"),
             "season": kwargs.get("season"),
             "episode_num": kwargs.get("episode_num"),
             "episode_title": kwargs.get("episode_title"),
+            "episode_info": kwargs.get("episode_info"),
             "icon": kwargs.get("icon", ""),
             "group": kwargs.get("group", ""),
             "container_extension": kwargs.get("container_extension", "mp4"),
@@ -545,6 +740,8 @@ class CartService:
                     move_ok = await self._move_temp_to_destination(item, temp_path, file_path)
                     if not move_ok:
                         continue
+                    # Write Jellyfin-compatible NFO metadata + poster
+                    await self._write_metadata(item, file_path)
                     await self.notification_service.send_download_file_notification(item)
 
                 if pause_interval > 0 and pause_duration > 0:
@@ -650,3 +847,105 @@ class CartService:
         self.save_cart()
         logger.info(f"[MOVE] ✅ Completed: '{item_name}' -> {file_path} ({dest_size / 1024 / 1024:.1f} MB)")
         return True
+
+    # ------------------------------------------------------------------
+    # Metadata / NFO writing (Jellyfin-compatible)
+    # ------------------------------------------------------------------
+
+    async def _write_metadata(self, item: dict, file_path: str) -> None:
+        """Fetch metadata from the Xtream API and write NFO + poster next to the video file.
+
+        For **movies**: writes ``<MovieName>.nfo`` and ``poster.jpg`` in the same directory.
+        For **series episodes**: writes ``<Episode>.nfo`` next to the episode, plus
+        ``tvshow.nfo`` and ``poster.jpg`` in the series root folder (only if they don't exist yet).
+        """
+        content_type = item.get("content_type", "vod")
+        source_id = item.get("source_id", "")
+        nfo_path = os.path.splitext(file_path)[0] + ".nfo"
+
+        try:
+            if content_type == "vod":
+                await self._write_movie_metadata(item, file_path, nfo_path, source_id)
+            elif content_type == "series":
+                await self._write_episode_metadata(item, file_path, nfo_path, source_id)
+        except Exception as e:
+            logger.warning(f"Failed to write metadata for '{item.get('name')}': {e}")
+
+    async def _write_movie_metadata(
+        self, item: dict, file_path: str, nfo_path: str, source_id: str
+    ) -> None:
+        """Fetch VOD info and write movie NFO + poster."""
+        stream_id = item.get("stream_id", "")
+        info = await self.xtream_service.fetch_vod_info(source_id, stream_id)
+        if not info:
+            logger.debug(f"No VOD info available for stream {stream_id}, skipping NFO")
+            return
+
+        # Write movie NFO
+        nfo_content = generate_movie_nfo(info, name=item.get("name", ""))
+        with open(nfo_path, "w", encoding="utf-8") as f:
+            f.write(nfo_content)
+        logger.info(f"[META] Wrote movie NFO: {nfo_path}")
+
+        # Download poster next to the video file (poster.jpg or <name>-poster.jpg)
+        cover_url = (
+            info.get("cover_big")
+            or info.get("cover")
+            or info.get("movie_image")
+            or info.get("stream_icon")
+        )
+        if cover_url:
+            poster_ext = ".jpg"
+            if ".png" in cover_url.lower():
+                poster_ext = ".png"
+            poster_path = os.path.splitext(file_path)[0] + "-poster" + poster_ext
+            if not os.path.exists(poster_path):
+                ok = await download_poster(cover_url, poster_path)
+                if ok:
+                    logger.info(f"[META] Downloaded poster: {poster_path}")
+
+    async def _write_episode_metadata(
+        self, item: dict, file_path: str, nfo_path: str, source_id: str
+    ) -> None:
+        """Write episode NFO + series-level tvshow.nfo and poster."""
+        # Episode-level NFO (uses info already in the cart item)
+        ep_info = item.get("episode_info") or {}
+        nfo_content = generate_episode_nfo(item, ep_info=ep_info)
+        with open(nfo_path, "w", encoding="utf-8") as f:
+            f.write(nfo_content)
+        logger.info(f"[META] Wrote episode NFO: {nfo_path}")
+
+        # Series-level metadata (tvshow.nfo + poster in the series root folder)
+        # Series root = <download_path>/Series/<SeriesName>/
+        series_name = sanitize_filename(item.get("series_name", item.get("name", "")))
+        base_path = self.config_service.get_download_path()
+        series_root = os.path.join(base_path, "Series", series_name)
+        tvshow_nfo_path = os.path.join(series_root, "tvshow.nfo")
+
+        if not os.path.exists(tvshow_nfo_path):
+            # Fetch series-level info from the Xtream API
+            series_id = item.get("series_id", "")
+            if series_id:
+                series_info = await self.xtream_service.fetch_series_info(source_id, series_id)
+                if series_info:
+                    os.makedirs(series_root, exist_ok=True)
+                    tvshow_content = generate_tvshow_nfo(series_info, name=series_name)
+                    with open(tvshow_nfo_path, "w", encoding="utf-8") as f:
+                        f.write(tvshow_content)
+                    logger.info(f"[META] Wrote tvshow NFO: {tvshow_nfo_path}")
+
+                    # Download series poster
+                    cover_url = (
+                        series_info.get("cover")
+                        or series_info.get("cover_big")
+                        or series_info.get("stream_icon")
+                    )
+                    if cover_url:
+                        poster_ext = ".jpg"
+                        if ".png" in cover_url.lower():
+                            poster_ext = ".png"
+                        poster_path = os.path.join(series_root, "poster" + poster_ext)
+                        if not os.path.exists(poster_path):
+                            ok = await download_poster(cover_url, poster_path)
+                            if ok:
+                                logger.info(f"[META] Downloaded series poster: {poster_path}")

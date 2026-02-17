@@ -1,4 +1,4 @@
-"""Stream service — async stream proxy with dynamic adaptive pre-buffering."""
+"""Stream service — async stream proxy with live passthrough and VOD adaptive buffering."""
 from __future__ import annotations
 
 import logging
@@ -11,11 +11,16 @@ from fastapi.responses import Response, StreamingResponse
 
 logger = logging.getLogger(__name__)
 
-# Buffer sizing constants
-BUFFER_CHUNK_SIZE = 64 * 1024  # 64 KB chunks
-PRE_BUFFER_SIZE = 256 * 1024  # 256 KB pre-buffer
-MIN_BUFFER_SIZE = 1024 * 1024  # 1 MB minimum adaptive buffer
-MAX_BUFFER_SIZE = 16 * 1024 * 1024  # 16 MB maximum adaptive buffer
+# Live stream: immediate passthrough — no proxy-side buffering.
+# The IPTV player handles its own buffering; adding a second buffer here
+# causes bursty delivery that makes players stutter or replay ~2 s of video.
+LIVE_CHUNK_SIZE = 32 * 1024  # 32 KB — small chunks for low-latency forwarding
+
+# VOD / series: adaptive pre-buffering is still beneficial for downloads / seeking.
+VOD_CHUNK_SIZE = 64 * 1024  # 64 KB chunks
+VOD_PRE_BUFFER_SIZE = 256 * 1024  # 256 KB pre-buffer
+VOD_MIN_BUFFER_SIZE = 1024 * 1024  # 1 MB minimum adaptive buffer
+VOD_MAX_BUFFER_SIZE = 16 * 1024 * 1024  # 16 MB maximum adaptive buffer
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -27,7 +32,12 @@ HEADERS = {
 
 
 async def proxy_stream(upstream_url: str, request: Request, stream_type: str = "live") -> Response:
-    """Proxy a stream from upstream server with dynamic pre-buffering."""
+    """Proxy a stream from upstream server.
+
+    • **live** → immediate chunk-by-chunk passthrough (no proxy buffering)
+      so the player's own buffer is the only one in the chain.
+    • **vod / series** → adaptive pre-buffering for smoother downloads.
+    """
     upstream_headers = dict(HEADERS)
     if "range" in request.headers:
         upstream_headers["Range"] = request.headers["range"]
@@ -53,13 +63,36 @@ async def proxy_stream(upstream_url: str, request: Request, stream_type: str = "
         response_headers["X-Accel-Buffering"] = "no"
         response_headers["Cache-Control"] = "no-cache, no-store"
 
+        # ----- live: zero-copy passthrough -----
+        if stream_type == "live":
+            async def generate_live():
+                try:
+                    async for chunk in upstream_response.aiter_bytes(chunk_size=LIVE_CHUNK_SIZE):
+                        if chunk:
+                            yield chunk
+                except httpx.ReadError:
+                    logger.debug("Live upstream read interrupted")
+                except Exception:
+                    pass
+                finally:
+                    await upstream_response.aclose()
+                    await client.aclose()
+
+            return StreamingResponse(
+                generate_live(),
+                status_code=upstream_response.status_code,
+                headers=response_headers,
+                media_type=response_headers.get("content-type", "application/octet-stream"),
+            )
+
+        # ----- vod / series: adaptive pre-buffering -----
         async def generate_with_prebuffer():
             buffer: deque = deque()
             buffer_size = 0
             prebuffer_filled = False
             bytes_sent = 0
             start_time = time.time()
-            current_min_buffer = MIN_BUFFER_SIZE
+            current_min_buffer = VOD_MIN_BUFFER_SIZE
             last_throughput_check = time.time()
             bytes_since_check = 0
             throughput_samples: deque = deque(maxlen=10)
@@ -68,7 +101,7 @@ async def proxy_stream(upstream_url: str, request: Request, stream_type: str = "
             stable_periods = 0
 
             try:
-                async for chunk in upstream_response.aiter_bytes(chunk_size=BUFFER_CHUNK_SIZE):
+                async for chunk in upstream_response.aiter_bytes(chunk_size=VOD_CHUNK_SIZE):
                     if not chunk:
                         continue
                     buffer.append(chunk)
@@ -76,7 +109,7 @@ async def proxy_stream(upstream_url: str, request: Request, stream_type: str = "
                     bytes_since_check += len(chunk)
 
                     if not prebuffer_filled:
-                        if buffer_size >= PRE_BUFFER_SIZE:
+                        if buffer_size >= VOD_PRE_BUFFER_SIZE:
                             prebuffer_filled = True
                             elapsed = time.time() - start_time
                             initial_throughput = buffer_size / elapsed if elapsed > 0 else 0
@@ -96,12 +129,12 @@ async def proxy_stream(upstream_url: str, request: Request, stream_type: str = "
                                 consecutive_slowdowns += 1
                                 stable_periods = 0
                                 multiplier = 4 if consecutive_slowdowns >= 2 else 2
-                                current_min_buffer = min(current_min_buffer * multiplier, MAX_BUFFER_SIZE)
+                                current_min_buffer = min(current_min_buffer * multiplier, VOD_MAX_BUFFER_SIZE)
                             elif current_throughput > avg_throughput * 0.9:
                                 consecutive_slowdowns = 0
                                 stable_periods += 1
-                                if stable_periods >= 4 and current_min_buffer > MIN_BUFFER_SIZE:
-                                    current_min_buffer = max(int(current_min_buffer * 0.75), MIN_BUFFER_SIZE)
+                                if stable_periods >= 4 and current_min_buffer > VOD_MIN_BUFFER_SIZE:
+                                    current_min_buffer = max(int(current_min_buffer * 0.75), VOD_MIN_BUFFER_SIZE)
                                     stable_periods = 0
                             else:
                                 consecutive_slowdowns = 0

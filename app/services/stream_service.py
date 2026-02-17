@@ -204,6 +204,10 @@ async def remux_stream(upstream_url: str, request: Request) -> Response:
         "-hide_banner",
         "-loglevel", "error",
         "-user_agent", HEADERS["User-Agent"],
+        "-headers", "Accept: */*\r\nAccept-Encoding: identity\r\nConnection: keep-alive\r\n",
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
         "-fflags", "+genpts+discardcorrupt",
         "-i", upstream_url,
         "-c", "copy",                    # No transcoding — lossless remux
@@ -331,8 +335,14 @@ async def transcode_stream(
 
     # Common input options for resilience with broken IPTV streams.
     # +nobuffer reduces initial input buffering for faster startup.
+    # -headers sends the same browser-like headers that httpx uses —
+    # many IPTV CDNs reject requests missing Accept / Connection headers.
     input_opts = [
         "-user_agent", HEADERS["User-Agent"],
+        "-headers", "Accept: */*\r\nAccept-Encoding: identity\r\nConnection: keep-alive\r\n",
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
         "-fflags", "+genpts+discardcorrupt+nobuffer",
         "-analyzeduration", "3000000",    # 3s analysis — enough for IPTV
         "-probesize", "5000000",          # 5MB probe — faster startup

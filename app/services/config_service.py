@@ -218,3 +218,23 @@ class ConfigService:
         }
 
     download_throttle = property(get_download_throttle_settings)
+
+    def get_download_schedule(self) -> dict:
+        default = {
+            "enabled": False,
+            "monday": {"enabled": False, "start": "01:00", "end": "07:00"},
+            "tuesday": {"enabled": False, "start": "01:00", "end": "07:00"},
+            "wednesday": {"enabled": False, "start": "01:00", "end": "07:00"},
+            "thursday": {"enabled": False, "start": "01:00", "end": "07:00"},
+            "friday": {"enabled": False, "start": "01:00", "end": "07:00"},
+            "saturday": {"enabled": False, "start": "01:00", "end": "07:00"},
+            "sunday": {"enabled": False, "start": "01:00", "end": "07:00"},
+        }
+        schedule = self._config.get("options", {}).get("download_schedule", default)
+        # Ensure all days present
+        for day in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"):
+            if day not in schedule:
+                schedule[day] = {"enabled": False, "start": "01:00", "end": "07:00"}
+        return schedule
+
+    download_schedule = property(get_download_schedule)

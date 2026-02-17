@@ -67,6 +67,29 @@ class TelegramConfig(BaseModel):
     chat_id: str = ""
 
 
+class DaySchedule(BaseModel):
+    """Download schedule for a single day of the week."""
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = False
+    start: str = "01:00"
+    end: str = "07:00"
+
+
+class DownloadSchedule(BaseModel):
+    """Per-day-of-week download time-slot schedule."""
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = False
+    monday: DaySchedule = Field(default_factory=DaySchedule)
+    tuesday: DaySchedule = Field(default_factory=DaySchedule)
+    wednesday: DaySchedule = Field(default_factory=DaySchedule)
+    thursday: DaySchedule = Field(default_factory=DaySchedule)
+    friday: DaySchedule = Field(default_factory=DaySchedule)
+    saturday: DaySchedule = Field(default_factory=DaySchedule)
+    sunday: DaySchedule = Field(default_factory=DaySchedule)
+
+
 class Options(BaseModel):
     """Application options."""
     model_config = ConfigDict(extra="allow")
@@ -86,6 +109,7 @@ class Options(BaseModel):
     download_burst_reconnect: int = 0
     download_notify_file: bool = False
     download_notify_queue: bool = False
+    download_schedule: DownloadSchedule = Field(default_factory=DownloadSchedule)
 
 
 class ContentTypes(BaseModel):

@@ -307,3 +307,37 @@ async def set_download_notifications_api(request: Request, cfg: ConfigService = 
         "notify_file": cfg.config["options"]["download_notify_file"],
         "notify_queue": cfg.config["options"]["download_notify_queue"],
     }
+
+
+# ---- Download schedule ----
+
+VALID_DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
+
+@router.get("/api/options/download_schedule")
+async def get_download_schedule_api(cfg: ConfigService = Depends(get_config_service)):
+    return cfg.download_schedule
+
+
+@router.post("/api/options/download_schedule")
+async def set_download_schedule_api(request: Request, cfg: ConfigService = Depends(get_config_service)):
+    data = await request.json()
+    if "options" not in cfg.config:
+        cfg.config["options"] = {}
+    schedule = cfg.config["options"].get("download_schedule", {})
+    if "enabled" in data:
+        schedule["enabled"] = bool(data["enabled"])
+    for day in VALID_DAYS:
+        if day in data:
+            day_data = data[day]
+            if day not in schedule:
+                schedule[day] = {"enabled": False, "start": "01:00", "end": "07:00"}
+            if "enabled" in day_data:
+                schedule[day]["enabled"] = bool(day_data["enabled"])
+            if "start" in day_data:
+                schedule[day]["start"] = str(day_data["start"]).strip()[:5]
+            if "end" in day_data:
+                schedule[day]["end"] = str(day_data["end"]).strip()[:5]
+    cfg.config["options"]["download_schedule"] = schedule
+    cfg.save()
+    return {"status": "ok", "schedule": schedule}

@@ -99,6 +99,22 @@
 
         .cart-section { background: rgba(255, 255, 255, 0.03); border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.08); overflow: hidden; }
 
+        /* Schedule grid */
+        .schedule-grid { display: grid; grid-template-columns: 100px 50px 120px 30px 120px; gap: 8px 12px; align-items: center; margin-top: 10px; }
+        .schedule-grid .day-label { font-size: 0.9em; font-weight: 500; color: #ccc; }
+        .schedule-grid .day-label.disabled { color: #555; }
+        .schedule-grid input[type="time"] { padding: 6px 8px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; background: rgba(0, 0, 0, 0.3); color: #fff; font-size: 0.85em; }
+        .schedule-grid input[type="time"]:disabled { opacity: 0.3; }
+        .schedule-grid .time-sep { text-align: center; color: #666; font-size: 0.85em; }
+        .schedule-toggle { width: 38px; height: 20px; border-radius: 10px; border: none; cursor: pointer; position: relative; transition: background 0.2s; background: rgba(255,255,255,0.1); }
+        .schedule-toggle.on { background: rgba(0, 212, 255, 0.5); }
+        .schedule-toggle::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform 0.2s; }
+        .schedule-toggle.on::after { transform: translateX(18px); }
+        .schedule-status { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 8px; font-size: 0.85em; margin-bottom: 15px; }
+        .schedule-status.in-window { background: rgba(46, 213, 115, 0.15); border: 1px solid rgba(46, 213, 115, 0.3); color: #2ed573; }
+        .schedule-status.outside-window { background: rgba(255, 165, 2, 0.15); border: 1px solid rgba(255, 165, 2, 0.3); color: #ffa502; }
+        .schedule-status.disabled { background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #888; }
+
         @media (max-width: 768px) {
             .settings-row { flex-direction: column; }
             .setting-group input { min-width: 100%; }
@@ -204,7 +220,29 @@
                     </label>
                 </div>
             </div>
+
+            <!-- Download Schedule -->
+            <div style="margin-top:16px;">
+                <div class="settings-section-title">⏰ Download Schedule</div>
+                <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:0.9em;">
+                        <input type="checkbox" id="schedule-enabled" onchange="saveSchedule()" style="width:16px; height:16px; accent-color:#00d4ff;">
+                        Enable download time slots
+                    </label>
+                    <span style="font-size:0.8em; color:#666;">(downloads auto-start only during allowed windows — "Start Downloads" always works)</span>
+                </div>
+                <div id="schedule-details" style="display:none;">
+                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+                        <a href="#" id="schedule-collapse-toggle" onclick="toggleScheduleCollapse(event)" style="font-size:0.85em; color:#00d4ff; text-decoration:none; user-select:none;">▶ Show details</a>
+                        <button class="btn btn-secondary btn-small" id="schedule-apply-btn" onclick="applyToAllDays()" style="font-size:0.8em; display:none;">Apply first row to all days</button>
+                    </div>
+                    <div class="schedule-grid" id="schedule-grid" style="display:none;"></div>
+                </div>
+            </div>
         </div>
+
+        <!-- Schedule Status Indicator -->
+        <div id="schedule-indicator" class="schedule-status disabled" style="display:none;"></div>
 
         <!-- Summary -->
         <div class="summary-bar">
@@ -293,6 +331,7 @@
             loadDownloadPath();
             loadThrottleSettings();
             loadNotifySettings();
+            loadSchedule();
             loadCart();
             startPolling();
         });
@@ -452,6 +491,121 @@
             } catch (e) { showToast('Error saving notification settings', 'error'); }
         }
 
+        // ---- Download Schedule ----
+        const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+        const DAY_LABELS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+        let scheduleData = {};
+
+        let scheduleExpanded = false;
+
+        function toggleScheduleCollapse(e) {
+            if (e) e.preventDefault();
+            scheduleExpanded = !scheduleExpanded;
+            const grid = document.getElementById('schedule-grid');
+            const btn = document.getElementById('schedule-apply-btn');
+            const toggle = document.getElementById('schedule-collapse-toggle');
+            grid.style.display = scheduleExpanded ? '' : 'none';
+            btn.style.display = scheduleExpanded ? '' : 'none';
+            toggle.textContent = scheduleExpanded ? '▼ Hide details' : '▶ Show details';
+        }
+
+        async function loadSchedule() {
+            try {
+                const resp = await fetch('/api/options/download_schedule');
+                scheduleData = await resp.json();
+                document.getElementById('schedule-enabled').checked = !!scheduleData.enabled;
+                document.getElementById('schedule-details').style.display = scheduleData.enabled ? '' : 'none';
+                renderScheduleGrid();
+            } catch (e) { console.error('Error loading schedule:', e); }
+        }
+
+        function renderScheduleGrid() {
+            const grid = document.getElementById('schedule-grid');
+            grid.innerHTML = DAYS.map((day, i) => {
+                const cfg = scheduleData[day] || { enabled: false, start: '01:00', end: '07:00' };
+                const on = cfg.enabled ? 'on' : '';
+                const dis = cfg.enabled ? '' : 'disabled';
+                return '<span class="day-label ' + dis + '" id="label-' + day + '">' + DAY_LABELS[i] + '</span>' +
+                    '<button type="button" class="schedule-toggle ' + on + '" id="toggle-' + day + '" onclick="toggleDay(\'' + day + '\')"></button>' +
+                    '<input type="time" id="start-' + day + '" value="' + (cfg.start || '01:00') + '" onchange="saveSchedule()" ' + (cfg.enabled ? '' : 'disabled') + '>' +
+                    '<span class="time-sep">→</span>' +
+                    '<input type="time" id="end-' + day + '" value="' + (cfg.end || '07:00') + '" onchange="saveSchedule()" ' + (cfg.enabled ? '' : 'disabled') + '>';
+            }).join('');
+        }
+
+        function toggleDay(day) {
+            if (!scheduleData[day]) scheduleData[day] = { enabled: false, start: '01:00', end: '07:00' };
+            scheduleData[day].enabled = !scheduleData[day].enabled;
+            renderScheduleGrid();
+            saveSchedule();
+        }
+
+        function applyToAllDays() {
+            const first = DAYS[0];
+            const firstCfg = scheduleData[first] || { enabled: false, start: '01:00', end: '07:00' };
+            const startVal = document.getElementById('start-' + first).value || firstCfg.start;
+            const endVal = document.getElementById('end-' + first).value || firstCfg.end;
+            const enabledVal = firstCfg.enabled;
+            DAYS.forEach(day => {
+                if (!scheduleData[day]) scheduleData[day] = {};
+                scheduleData[day].enabled = enabledVal;
+                scheduleData[day].start = startVal;
+                scheduleData[day].end = endVal;
+            });
+            renderScheduleGrid();
+            saveSchedule();
+        }
+
+        async function saveSchedule() {
+            const enabled = document.getElementById('schedule-enabled').checked;
+            document.getElementById('schedule-details').style.display = enabled ? '' : 'none';
+            if (!enabled) {
+                scheduleExpanded = false;
+                document.getElementById('schedule-grid').style.display = 'none';
+                document.getElementById('schedule-apply-btn').style.display = 'none';
+                const toggle = document.getElementById('schedule-collapse-toggle');
+                if (toggle) toggle.textContent = '▶ Show details';
+            }
+            const payload = { enabled };
+            DAYS.forEach(day => {
+                const toggle = document.getElementById('toggle-' + day);
+                const dayEnabled = toggle ? toggle.classList.contains('on') : false;
+                const start = document.getElementById('start-' + day)?.value || '01:00';
+                const end = document.getElementById('end-' + day)?.value || '07:00';
+                payload[day] = { enabled: dayEnabled, start, end };
+            });
+            try {
+                const resp = await fetch('/api/options/download_schedule', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (resp.ok) {
+                    const data = await resp.json();
+                    scheduleData = data.schedule || scheduleData;
+                    showToast('Schedule saved', 'success');
+                } else {
+                    showToast('Failed to save schedule', 'error');
+                }
+            } catch (e) { showToast('Error saving schedule', 'error'); }
+        }
+
+        function updateScheduleIndicator(statusData) {
+            const el = document.getElementById('schedule-indicator');
+            if (!statusData.schedule_enabled) {
+                el.style.display = 'none';
+                return;
+            }
+            el.style.display = '';
+            if (statusData.in_download_window) {
+                el.className = 'schedule-status in-window';
+                el.innerHTML = '🟢 In download window — auto-downloads active';
+            } else {
+                el.className = 'schedule-status outside-window';
+                el.innerHTML = '⏰ Outside download window — queued items will wait for the next slot';
+            }
+        }
+
         async function loadCart() {
             try {
                 const resp = await fetch('/api/cart');
@@ -546,6 +700,8 @@
                 document.getElementById('cancel-btn').style.display = isRunning ? '' : 'none';
                 document.getElementById('start-btn').disabled = data.queued === 0;
                 document.getElementById('retry-all-btn').style.display = data.failed > 0 ? '' : 'none';
+
+                updateScheduleIndicator(data);
 
                 const currentEl = document.getElementById('current-download');
                 if (data.current && data.is_running) {

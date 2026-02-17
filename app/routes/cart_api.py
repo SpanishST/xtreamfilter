@@ -206,6 +206,7 @@ async def start_downloads(
         os.makedirs(download_path, exist_ok=True)
     except OSError as e:
         return JSONResponse(status_code=500, content={"error": f"Cannot create download directory: {e}"})
+    cart._force_started = True
     cart._download_task = asyncio.create_task(cart.download_worker())
     return {"status": "ok", "message": f"Started downloading {len(queued)} items"}
 
@@ -243,6 +244,9 @@ async def cart_status(cart: CartService = Depends(get_cart_service)):
         }
 
     is_running = cart._download_task is not None and not cart._download_task.done()
+    schedule = cart.config_service.get_download_schedule()
+    schedule_active = schedule.get("enabled", False)
+    in_window = cart.is_in_download_window() if schedule_active else True
     return {
         "is_running": is_running,
         "queued": queued,
@@ -251,6 +255,8 @@ async def cart_status(cart: CartService = Depends(get_cart_service)):
         "failed": failed,
         "total": len(dl),
         "current": current,
+        "schedule_enabled": schedule_active,
+        "in_download_window": in_window,
     }
 
 

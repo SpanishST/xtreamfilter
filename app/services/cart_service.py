@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+DAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
 
 def sanitize_filename(name: str) -> str:
     name = unicodedata.normalize("NFKD", name)
@@ -66,6 +68,7 @@ class CartService:
             "paused": False,
             "pause_remaining": 0,
         }
+        self._force_started: bool = False
 
     # ------------------------------------------------------------------
     # Properties
@@ -90,6 +93,44 @@ class CartService:
     @property
     def progress(self) -> dict:
         return self._download_progress
+
+    # ------------------------------------------------------------------
+    # Download schedule
+    # ------------------------------------------------------------------
+
+    def is_in_download_window(self) -> bool:
+        """Check if the current time falls within the configured download window.
+
+        Returns True if schedule is disabled (always allowed) or if we're
+        inside the current day's time slot.  Handles overnight windows
+        (e.g. 23:00 → 06:00) correctly.
+        """
+        schedule = self.config_service.get_download_schedule()
+        if not schedule.get("enabled", False):
+            return True  # No schedule — always allowed
+
+        now = datetime.now()
+        day_name = DAY_NAMES[now.weekday()]
+        day_cfg = schedule.get(day_name, {})
+        if not day_cfg.get("enabled", False):
+            return False  # This day is not enabled
+
+        try:
+            start_h, start_m = map(int, day_cfg.get("start", "00:00").split(":"))
+            end_h, end_m = map(int, day_cfg.get("end", "00:00").split(":"))
+        except (ValueError, AttributeError):
+            return False
+
+        start_minutes = start_h * 60 + start_m
+        end_minutes = end_h * 60 + end_m
+        now_minutes = now.hour * 60 + now.minute
+
+        if start_minutes <= end_minutes:
+            # Same-day window (e.g. 01:00 → 07:00)
+            return start_minutes <= now_minutes < end_minutes
+        else:
+            # Overnight window (e.g. 23:00 → 06:00)
+            return now_minutes >= start_minutes or now_minutes < end_minutes
 
     # ------------------------------------------------------------------
     # Persistence
@@ -301,6 +342,11 @@ class CartService:
             queued = [item for item in self._download_cart if item.get("status") == "queued"]
             if not queued:
                 logger.info("Download queue empty, worker stopping")
+                break
+
+            # Check download schedule (skip if force-started by user)
+            if not self._force_started and not self.is_in_download_window():
+                logger.info("Outside download window, worker pausing until next slot")
                 break
 
             item = queued[0]
@@ -528,7 +574,11 @@ class CartService:
 
         self._download_current_item = None
         self._download_progress = {"bytes_downloaded": 0, "total_bytes": 0, "speed": 0, "paused": False, "pause_remaining": 0}
-        await self.notification_service.send_download_queue_complete_notification(self._download_cart)
+        self._force_started = False
+        # Only send queue-complete notification if queue is actually empty
+        remaining_queued = [i for i in self._download_cart if i.get("status") == "queued"]
+        if not remaining_queued:
+            await self.notification_service.send_download_queue_complete_notification(self._download_cart)
 
     async def _move_temp_to_destination(self, item: dict, temp_path: str, file_path: str) -> bool:
         item_name = item.get("name", "unknown")

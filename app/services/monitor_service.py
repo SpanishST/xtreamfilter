@@ -168,10 +168,13 @@ class MonitorService:
         if any_queued:
             queued = [i for i in self.cart_service.cart if i.get("status") == "queued"]
             if queued and (self.cart_service.download_task is None or self.cart_service.download_task.done()):
-                download_path = self._cfg.download_path
-                os.makedirs(download_path, exist_ok=True)
-                self.cart_service.download_task = asyncio.create_task(self.cart_service.download_worker())
-                logger.info(f"Series monitoring: auto-started download worker for {len(queued)} queued items")
+                if self.cart_service.is_in_download_window():
+                    download_path = self._cfg.download_path
+                    os.makedirs(download_path, exist_ok=True)
+                    self.cart_service.download_task = asyncio.create_task(self.cart_service.download_worker())
+                    logger.info(f"Series monitoring: auto-started download worker for {len(queued)} queued items")
+                else:
+                    logger.info(f"Series monitoring: {len(queued)} items queued but outside download window, waiting for schedule")
 
         total_new = sum(len(eps) for _, eps, _, _ in all_notifications)
         logger.info(f"Series monitoring: check complete. {total_new} new episodes found.")

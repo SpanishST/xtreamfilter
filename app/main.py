@@ -90,6 +90,33 @@ async def background_refresh_loop(
             await asyncio.sleep(60)
 
 
+async def download_schedule_loop(cart: CartService) -> None:
+    """Periodically check if we're inside a download window and auto-start the worker."""
+    logger.info("Download schedule loop started")
+    await asyncio.sleep(30)  # Initial delay to let other services start
+
+    while True:
+        try:
+            schedule = cart.config_service.get_download_schedule()
+            if schedule.get("enabled", False):
+                has_queued = any(i.get("status") == "queued" for i in cart.cart)
+                worker_idle = cart.download_task is None or cart.download_task.done()
+                if has_queued and worker_idle and cart.is_in_download_window():
+                    download_path = cart.config_service.download_path
+                    os.makedirs(download_path, exist_ok=True)
+                    cart._force_started = False
+                    cart.download_task = asyncio.create_task(cart.download_worker())
+                    queued_count = len([i for i in cart.cart if i.get("status") == "queued"])
+                    logger.info(f"Download schedule: auto-started worker for {queued_count} queued items")
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            logger.info("Download schedule loop cancelled")
+            break
+        except Exception as exc:
+            logger.error(f"Download schedule loop error: {exc}")
+            await asyncio.sleep(60)
+
+
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
@@ -153,6 +180,9 @@ async def lifespan(app: FastAPI):
     bg_task = asyncio.create_task(
         background_refresh_loop(cache, epg_svc, monitor, cat)
     )
+    schedule_task = asyncio.create_task(
+        download_schedule_loop(cart)
+    )
 
     async def _initial_on_cache_refreshed():
         await cat.refresh_pattern_categories_async()
@@ -169,8 +199,13 @@ async def lifespan(app: FastAPI):
 
     # --- shutdown ---
     bg_task.cancel()
+    schedule_task.cancel()
     try:
         await bg_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await schedule_task
     except asyncio.CancelledError:
         pass
     await http.close()

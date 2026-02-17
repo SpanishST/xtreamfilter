@@ -1557,24 +1557,45 @@
             }
             sourceContainer.innerHTML = sourceHtml;
 
-            // Load season list for season scope
-            _loadSeasonsList(sourceId || (allSources && allSources.length > 0 ? allSources[0].source_id : null),
-                             seriesId || (allSources && allSources.length > 0 ? allSources[0].series_id : null));
+            // Load season list for season scope (aggregate from all sources)
+            _loadSeasonsList(sourceId, seriesId, allSources);
 
             modal.classList.add('show');
         }
 
-        async function _loadSeasonsList(sourceId, seriesId) {
+        async function _loadSeasonsList(sourceId, seriesId, allSources) {
             const seasonSelect = document.getElementById('monitor-season-select');
             seasonSelect.innerHTML = '<option value="">Loading...</option>';
-            if (!sourceId || !seriesId) return;
+
+            // Build list of source/series pairs to query
+            const pairs = [];
+            if (allSources && allSources.length > 0) {
+                for (const s of allSources) pairs.push({ sourceId: s.source_id, seriesId: s.series_id });
+            } else if (sourceId && seriesId) {
+                pairs.push({ sourceId, seriesId });
+            }
+            if (pairs.length === 0) return;
 
             try {
-                const resp = await fetch('/api/cart/series-episodes/' + sourceId + '/' + seriesId);
-                const data = await resp.json();
-                if (data.seasons) {
-                    const seasonNums = Object.keys(data.seasons).sort((a, b) => parseInt(a) - parseInt(b));
-                    seasonSelect.innerHTML = seasonNums.map(s => '<option value="' + s + '">Season ' + s + ' (' + data.seasons[s].length + ' episodes)</option>').join('');
+                // Fetch episodes from all sources in parallel
+                const results = await Promise.allSettled(
+                    pairs.map(p => fetch('/api/cart/series-episodes/' + p.sourceId + '/' + p.seriesId).then(r => r.json()))
+                );
+                // Merge seasons: keep the max episode count per season across sources
+                const mergedSeasons = {};
+                for (const r of results) {
+                    if (r.status !== 'fulfilled' || !r.value.seasons) continue;
+                    for (const [sNum, eps] of Object.entries(r.value.seasons)) {
+                        if (!mergedSeasons[sNum] || eps.length > mergedSeasons[sNum]) {
+                            mergedSeasons[sNum] = eps.length;
+                        }
+                    }
+                }
+                const seasonNums = Object.keys(mergedSeasons).sort((a, b) => parseInt(a) - parseInt(b));
+                if (seasonNums.length > 0) {
+                    seasonSelect.innerHTML = seasonNums.map(s => '<option value="' + s + '">Season ' + s + ' (' + mergedSeasons[s] + ' episodes)</option>').join('');
+                } else {
+                    seasonSelect.innerHTML = '<option value="">No seasons found</option>';
                 }
             } catch (e) {
                 seasonSelect.innerHTML = '<option value="">Error loading seasons</option>';

@@ -6,8 +6,9 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends
 
-from app.dependencies import get_cache_service
+from app.dependencies import get_cache_service, get_category_service
 from app.services.cache_service import CacheService
+from app.services.category_service import CategoryService
 
 router = APIRouter(tags=["cache"])
 
@@ -69,8 +70,14 @@ async def cache_status(cache: CacheService = Depends(get_cache_service)):
 
 
 @router.post("/api/cache/refresh")
-async def trigger_cache_refresh(cache: CacheService = Depends(get_cache_service)):
-    asyncio.create_task(cache.refresh_cache())
+async def trigger_cache_refresh(
+    cache: CacheService = Depends(get_cache_service),
+    cat: CategoryService = Depends(get_category_service),
+):
+    async def _on_cache_refreshed():
+        await cat.refresh_pattern_categories_async()
+
+    asyncio.create_task(cache.refresh_cache(on_cache_refreshed=_on_cache_refreshed))
     return {"status": "refresh_started", "message": "Cache refresh has been triggered in the background"}
 
 

@@ -57,16 +57,21 @@ async def background_refresh_loop(
     cache: CacheService,
     epg_svc: EpgService,
     monitor: MonitorService,
+    cat: CategoryService | None = None,
 ) -> None:
     """Periodically refresh cache, EPG, and run series monitoring."""
     logger.info("Background refresh task started")
     await asyncio.sleep(10)
 
+    async def _on_cache_refreshed():
+        if cat:
+            await cat.refresh_pattern_categories_async()
+
     while True:
         try:
             if not cache.is_cache_valid():
                 logger.info("Cache expired, triggering refresh…")
-                await cache.refresh_cache()
+                await cache.refresh_cache(on_cache_refreshed=_on_cache_refreshed)
             else:
                 logger.info(f"Cache still valid. Last refresh: {cache._api_cache.get('last_refresh', 'Never')}")
 
@@ -146,12 +151,15 @@ async def lifespan(app: FastAPI):
 
     # --- background tasks ---
     bg_task = asyncio.create_task(
-        background_refresh_loop(cache, epg_svc, monitor)
+        background_refresh_loop(cache, epg_svc, monitor, cat)
     )
+
+    async def _initial_on_cache_refreshed():
+        await cat.refresh_pattern_categories_async()
 
     if not cache.is_cache_valid():
         logger.info("Cache is empty or invalid, triggering initial refresh…")
-        asyncio.create_task(cache.refresh_cache())
+        asyncio.create_task(cache.refresh_cache(on_cache_refreshed=_initial_on_cache_refreshed))
 
     if not epg_svc.is_epg_cache_valid():
         logger.info("EPG cache is empty or invalid, triggering initial EPG refresh…")

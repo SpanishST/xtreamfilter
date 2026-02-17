@@ -105,7 +105,7 @@ class TestShouldInclude:
             {"type": "exclude", "match": "all", "value": "*", "case_sensitive": False},
             {"type": "include", "match": "exact", "value": "TF1", "case_sensitive": False},
         ]
-        # exclude takes priority
+        # include first, then exclude: TF1 passes include but is still excluded by "all"
         assert should_include("TF1", rules) is False
         assert should_include("Other", rules) is False
 

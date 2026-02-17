@@ -44,19 +44,28 @@ def matches_filter(value: str, filter_rule: dict) -> bool:
 
 
 def should_include(value: str, filter_rules: list[dict]) -> bool:
-    """Determine if a value should be included based on filter rules."""
+    """Determine if a value should be included based on filter rules.
+
+    Semantics:
+      1. If there are include rules, the value must match at least one of
+         them to be retained.  (No include rules ⇒ everything is retained.)
+      2. From the retained set, any value matching an exclude rule is removed.
+
+    In other words: **include first, then exclude**.
+    """
     include_rules = [r for r in filter_rules if r.get("type") == "include"]
     exclude_rules = [r for r in filter_rules if r.get("type") == "exclude"]
 
+    # Step 1 — include gate: if include rules exist the value must match one.
+    if include_rules:
+        included = any(matches_filter(value, rule) for rule in include_rules)
+        if not included:
+            return False
+
+    # Step 2 — exclude gate: reject if any exclude rule matches.
     for rule in exclude_rules:
         if matches_filter(value, rule):
             return False
-
-    if include_rules:
-        for rule in include_rules:
-            if matches_filter(value, rule):
-                return True
-        return False
 
     return True
 

@@ -5,6 +5,9 @@ WORKDIR /src
 # Ensure app package is importable regardless of working directory
 ENV PYTHONPATH=/src
 
+# Install ffmpeg for stream remuxing (MKV→MP4, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies
 # FastAPI with uvicorn for async support, httpx for async HTTP client, lxml for XML parsing
 RUN pip install --no-cache-dir fastapi uvicorn[standard] httpx jinja2 python-multipart lxml rapidfuzz packaging

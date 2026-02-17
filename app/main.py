@@ -39,6 +39,7 @@ from app.routes import (
     cart_api,
     monitor_api,
     health,
+    player_api,
 )
 
 logging.basicConfig(
@@ -244,6 +245,7 @@ app.include_router(monitor_api.router)
 app.include_router(epg.router)
 app.include_router(category_api.router)
 app.include_router(browse_api.router)
+app.include_router(player_api.router)
 app.include_router(playlist.router)
 app.include_router(xtream_merged.router)
 app.include_router(stream_proxy.router)

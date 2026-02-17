@@ -256,7 +256,7 @@ class NotificationService:
     # Monitor notification
     # ------------------------------------------------------------------
 
-    async def send_monitor_notification(self, series_name: str, new_episodes: list, cover: str) -> None:
+    async def send_monitor_notification(self, series_name: str, new_episodes: list, cover: str, action: str = "both") -> None:
         creds = self._get_telegram_credentials()
         if not creds:
             return
@@ -269,7 +269,10 @@ class NotificationService:
             title = ep.get("episode_title") or ep.get("name", "")
             ep_lines.append(f"  • S{int(season):02d}E{int(ep_num):02d} — {title}")
         text = f"📡 <b>Series Monitor</b> — <b>{series_name}</b>\n"
-        text += f"{count} new episode(s) detected and queued:\n\n"
+        if action in ("download", "both"):
+            text += f"{count} new episode(s) detected and queued for download:\n\n"
+        else:
+            text += f"{count} new episode(s) detected:\n\n"
         text += "\n".join(ep_lines)
         if count > 15:
             text += f"\n  ... and {count - 15} more"

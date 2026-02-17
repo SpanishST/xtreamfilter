@@ -163,7 +163,7 @@ class MonitorService:
 
         for series_name, new_eps, cover, action in all_notifications:
             if action in ("notify", "both"):
-                await self.notification_service.send_monitor_notification(series_name, new_eps, cover)
+                await self.notification_service.send_monitor_notification(series_name, new_eps, cover, action)
 
         if any_queued:
             queued = [i for i in self.cart_service.cart if i.get("status") == "queued"]

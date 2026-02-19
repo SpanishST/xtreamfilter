@@ -3,7 +3,7 @@
 [![Docker Hub](https://img.shields.io/docker/pulls/spanishst/xtreamfilter.svg)](https://hub.docker.com/r/spanishst/xtreamfilter)
 [![Docker Image Size](https://img.shields.io/docker/image-size/spanishst/xtreamfilter/latest)](https://hub.docker.com/r/spanishst/xtreamfilter)
 
-A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Series) from multiple sources with per-source dedicated routes, merged playlists, stream proxying, and advanced filtering.
+A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Series) from multiple sources with per-source dedicated routes, merged playlists, stream proxying, advanced filtering, monitoring and downloading.
 
 ## Screenshots
 

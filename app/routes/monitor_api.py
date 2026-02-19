@@ -16,6 +16,30 @@ from app.services.xtream_service import XtreamService
 router = APIRouter(tags=["monitor"])
 
 
+def _normalize_tmdb_id(value) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip().lower()
+    if raw.startswith("tmdb:"):
+        raw = raw[5:].strip()
+    if raw.isdigit():
+        return raw
+    return None
+
+
+def _normalize_imdb_id(value) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip().lower()
+    if raw.startswith("imdb:"):
+        raw = raw[5:].strip()
+    if raw.startswith("tt") and raw[2:].isdigit():
+        return raw
+    if raw.isdigit():
+        return f"tt{raw}"
+    return None
+
+
 @router.get("/api/monitor")
 async def get_monitored(monitor: MonitorService = Depends(get_monitor_service)):
     return {"series": monitor._monitored_series}
@@ -34,6 +58,8 @@ async def add_monitored(
     source_name = data.get("source_name") or None
     source_category = data.get("source_category") or None
     cover = data.get("cover", "")
+    tmdb_id = _normalize_tmdb_id(data.get("tmdb_id") or data.get("tmdb"))
+    imdb_id = _normalize_imdb_id(data.get("imdb_id") or data.get("imdb"))
     scope = data.get("scope", "new_only")
     season_filter = data.get("season_filter")
     action = data.get("action", "both")
@@ -53,7 +79,14 @@ async def add_monitored(
             if m.get("source_id") == source_id and m.get("series_id") == series_id:
                 return JSONResponse(status_code=409, content={"error": "This series is already being monitored from this source"})
         else:
-            if not m.get("source_id") and normalize_name(m.get("series_name", "")) == normalize_name(series_name):
+            existing_tmdb_id = _normalize_tmdb_id(m.get("tmdb_id") or m.get("tmdb"))
+            existing_imdb_id = _normalize_imdb_id(m.get("imdb_id") or m.get("imdb"))
+            same_id = (
+                (tmdb_id and existing_tmdb_id and tmdb_id == existing_tmdb_id)
+                or (imdb_id and existing_imdb_id and imdb_id == existing_imdb_id)
+            )
+            same_name = normalize_name(m.get("series_name", "")) == normalize_name(series_name)
+            if not m.get("source_id") and (same_id or same_name):
                 return JSONResponse(status_code=409, content={"error": "This series is already being monitored (any source)"})
 
     # Build known episodes snapshot
@@ -62,7 +95,7 @@ async def add_monitored(
         if source_id:
             episodes = await xtream.fetch_series_episodes(source_id, series_id)
         else:
-            matches = monitor.find_series_across_sources(series_name)
+            matches = monitor.find_series_across_sources(series_name, tmdb_id=tmdb_id, imdb_id=imdb_id)
             episodes = []
             for m in matches:
                 eps = await xtream.fetch_series_episodes(m["source_id"], m["series_id"])
@@ -88,6 +121,8 @@ async def add_monitored(
         "source_name": source_name,
         "source_category": source_category,
         "cover": cover,
+        "tmdb_id": tmdb_id,
+        "imdb_id": imdb_id,
         "scope": scope,
         "season_filter": str(season_filter) if season_filter else None,
         "action": action,
@@ -118,6 +153,10 @@ async def update_monitored(monitor_id: str, request: Request, monitor: MonitorSe
             if "source_id" in data:
                 entry["source_id"] = data["source_id"] or None
                 entry["source_name"] = data.get("source_name") or None
+            if "tmdb_id" in data or "tmdb" in data:
+                entry["tmdb_id"] = _normalize_tmdb_id(data.get("tmdb_id") or data.get("tmdb"))
+            if "imdb_id" in data or "imdb" in data:
+                entry["imdb_id"] = _normalize_imdb_id(data.get("imdb_id") or data.get("imdb"))
             if "action" in data and data["action"] in ("notify", "download", "both"):
                 entry["action"] = data["action"]
             monitor.save_monitored()

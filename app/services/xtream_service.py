@@ -76,6 +76,62 @@ class XtreamService:
         info = await self.get_provider_info(source)
         return info["has_free_slot"]
 
+    async def fetch_vod_info(self, source_id: str, vod_id: str) -> dict | None:
+        """Fetch VOD (movie) metadata from upstream Xtream API.
+
+        Returns the raw ``info`` dict with fields like name, plot, cast,
+        director, genre, rating, tmdb_id, releasedate, cover_big, etc.
+        Returns *None* on failure.
+        """
+        source = self.config_service.get_source_by_id(source_id)
+        if not source:
+            return None
+        host = source["host"].rstrip("/")
+        params = {
+            "username": source["username"],
+            "password": source["password"],
+            "action": "get_vod_info",
+            "vod_id": vod_id,
+        }
+        try:
+            client = await self.http_client.get_client()
+            response = await client.get(f"{host}/player_api.php", params=params, timeout=60.0)
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            return data.get("info") or data.get("movie_data") or {}
+        except Exception as e:
+            logger.error(f"Error fetching VOD info for {vod_id}: {e}")
+            return None
+
+    async def fetch_series_info(self, source_id: str, series_id: str) -> dict | None:
+        """Fetch series-level metadata from upstream Xtream API.
+
+        Returns the raw ``info`` dict with fields like name, plot, cast,
+        director, genre, rating, tmdb_id, cover, releaseDate, etc.
+        Returns *None* on failure.
+        """
+        source = self.config_service.get_source_by_id(source_id)
+        if not source:
+            return None
+        host = source["host"].rstrip("/")
+        params = {
+            "username": source["username"],
+            "password": source["password"],
+            "action": "get_series_info",
+            "series_id": series_id,
+        }
+        try:
+            client = await self.http_client.get_client()
+            response = await client.get(f"{host}/player_api.php", params=params, timeout=60.0)
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            return data.get("info", {})
+        except Exception as e:
+            logger.error(f"Error fetching series info for {series_id}: {e}")
+            return None
+
     async def fetch_series_episodes(self, source_id: str, series_id: str) -> list:
         """Fetch all episodes for a series from upstream."""
         source = self.config_service.get_source_by_id(source_id)

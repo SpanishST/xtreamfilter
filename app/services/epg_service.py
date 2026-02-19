@@ -6,7 +6,7 @@ import io
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import httpx
@@ -283,3 +283,131 @@ class EpgService:
             "cache_ttl_seconds": self.config_service.get_epg_cache_ttl(),
             "cache_size_bytes": len(self._epg_cache.get("data", b"")) if self._epg_cache.get("data") else 0,
         }
+
+    # ------------------------------------------------------------------
+    # EPG now / next programme lookup
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_xmltv_time(time_str: str) -> datetime | None:
+        """Parse XMLTV datetime string like '20260217120000 +0100' into a timezone-aware datetime."""
+        if not time_str:
+            return None
+        try:
+            # Strip whitespace and try common XMLTV formats
+            time_str = time_str.strip()
+            # Format: YYYYMMDDHHmmss +HHMM
+            if " " in time_str:
+                dt_part, tz_part = time_str.rsplit(" ", 1)
+            else:
+                dt_part = time_str
+                tz_part = "+0000"
+            dt = datetime.strptime(dt_part, "%Y%m%d%H%M%S")
+            # Parse timezone offset
+            tz_sign = 1 if tz_part[0] == "+" else -1
+            tz_hours = int(tz_part[1:3])
+            tz_minutes = int(tz_part[3:5])
+            from datetime import timedelta, timezone as tz
+            offset = timedelta(hours=tz_hours, minutes=tz_minutes) * tz_sign
+            dt = dt.replace(tzinfo=tz(offset))
+            return dt
+        except Exception:
+            return None
+
+    def get_now_next(self, channel_id: str) -> dict:
+        """Get current and next programme for a channel from cached EPG XML.
+
+        Args:
+            channel_id: The EPG channel ID (e.g. 'source1_channel.epg.id')
+
+        Returns:
+            Dict with 'current' and 'next' programme info, or empty values if unavailable.
+        """
+        result = {"current": None, "next": None}
+        data = self._epg_cache.get("data")
+        if not data:
+            return result
+
+        try:
+            parser = etree.XMLParser(recover=True)
+            tree = etree.parse(io.BytesIO(data), parser)
+            root = tree.getroot()
+
+            now = datetime.now(timezone.utc)
+            channel_id_lower = channel_id.lower()
+
+            # Collect all programmes for this channel
+            programmes = []
+            for prog in root.findall("programme"):
+                prog_channel = (prog.get("channel") or "").lower()
+                if prog_channel != channel_id_lower:
+                    continue
+
+                start = self._parse_xmltv_time(prog.get("start", ""))
+                stop = self._parse_xmltv_time(prog.get("stop", ""))
+                if not start:
+                    continue
+
+                title_el = prog.find("title")
+                title = title_el.text if title_el is not None and title_el.text else ""
+                desc_el = prog.find("desc")
+                desc = desc_el.text if desc_el is not None and desc_el.text else ""
+
+                programmes.append({
+                    "title": title,
+                    "description": desc,
+                    "start": start,
+                    "stop": stop,
+                    "start_ts": int(start.timestamp()),
+                    "stop_ts": int(stop.timestamp()) if stop else None,
+                })
+
+            if not programmes:
+                return result
+
+            # Sort by start time
+            programmes.sort(key=lambda p: p["start"])
+
+            # Find current programme (start <= now < stop)
+            current = None
+            current_idx = -1
+            for i, prog in enumerate(programmes):
+                start = prog["start"]
+                stop = prog["stop"]
+                if start <= now and (stop is None or now < stop):
+                    current = prog
+                    current_idx = i
+                    break
+
+            if current:
+                duration = (current["stop"] - current["start"]).total_seconds() if current["stop"] else 0
+                elapsed = (now - current["start"]).total_seconds()
+                progress_pct = round((elapsed / duration) * 100, 1) if duration > 0 else 0
+                result["current"] = {
+                    "title": current["title"],
+                    "description": current["description"],
+                    "start": current["start_ts"],
+                    "stop": current["stop_ts"],
+                    "progress_pct": min(progress_pct, 100.0),
+                }
+                # Next programme
+                if current_idx + 1 < len(programmes):
+                    nxt = programmes[current_idx + 1]
+                    result["next"] = {
+                        "title": nxt["title"],
+                        "start": nxt["start_ts"],
+                    }
+            else:
+                # No current programme — find the next upcoming one
+                for prog in programmes:
+                    if prog["start"] > now:
+                        result["next"] = {
+                            "title": prog["title"],
+                            "start": prog["start_ts"],
+                        }
+                        break
+
+        except Exception as e:
+            logger.error(f"Error parsing EPG for now/next (channel={channel_id}): {e}")
+
+        return result

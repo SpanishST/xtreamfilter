@@ -244,6 +244,22 @@ def test_monitor_empty(client):
     assert r.json()["series"] == []
 
 
+def test_monitor_add_persists_external_ids(client):
+    payload = {
+        "series_name": "Test Show",
+        "series_id": "123",
+        "scope": "all",
+        "action": "notify",
+        "tmdb_id": "tmdb:100088",
+        "imdb_id": "1234567",
+    }
+    r = client.post("/api/monitor", json=payload)
+    assert r.status_code == 200
+    entry = r.json()["entry"]
+    assert entry["tmdb_id"] == "100088"
+    assert entry["imdb_id"] == "tt1234567"
+
+
 # -------------------------------------------------------------------
 # EPG API
 # -------------------------------------------------------------------

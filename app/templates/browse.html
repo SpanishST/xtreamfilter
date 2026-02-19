@@ -2035,7 +2035,7 @@
                     const epExt = ep.container_extension || 'mp4';
                     const epPlayBtn = '<button class="episode-play-btn" onclick="event.stopPropagation(); playEpisode(\'' + ep.stream_id + '\', \'' + escapeAttr(ep.title || 'Episode ' + ep.episode_num) + '\', \'' + epExt + '\')" title="Play episode">▶ Play</button>';
                     html += '<div class="episode-row" onclick="playEpisode(\'' + ep.stream_id + '\', \'' + escapeAttr(ep.title || 'Episode ' + ep.episode_num) + '\', \'' + epExt + '\')">' +
-                        '<input type="checkbox" data-season="' + seasonNum + '" data-stream-id="' + ep.stream_id + '" data-ep-num="' + ep.episode_num + '" data-title="' + escapeHtml(ep.title || '') + '" data-ext="' + epExt + '">' +
+                        '<input type="checkbox" onclick="event.stopPropagation()" data-season="' + seasonNum + '" data-stream-id="' + ep.stream_id + '" data-ep-num="' + ep.episode_num + '" data-title="' + escapeHtml(ep.title || '') + '" data-ext="' + epExt + '">' +
                         epPlayBtn +
                         '<span class="ep-num">E' + String(ep.episode_num).padStart(2, '0') + '</span>' +
                         '<span class="ep-title">' + escapeHtml(ep.title || 'Episode ' + ep.episode_num) + '</span>' +

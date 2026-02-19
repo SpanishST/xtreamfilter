@@ -28,8 +28,10 @@ A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Se
 - � **Content Browser** - Browse and search all your content with cover art and details
 - 📂 **Custom Categories** - Create manual or automatic categories with pattern matching
 - 📱 **Telegram Notifications** - Get notified when new content matches your categories
-- ⬇️ **VOD & Series Downloads** - Download movies and series episodes locally with a cart-based queue- 🎞️ **Jellyfin/Kodi Metadata** - Auto-generate `.nfo` files and download poster art alongside videos for seamless library integration
-- ▶️ **Built-in Stream Preview** - Preview streams directly in the browser with mpegts.js/hls.js support, audio track selection, and keyboard shortcuts- 📡 **Series Monitoring** - Automatically track series for new episodes with auto-download and Telegram alerts
+- ⬇️ **VOD & Series Downloads** - Download movies and series episodes locally with a cart-based queue
+- 🎞️ **Jellyfin/Kodi Metadata** - Auto-generate `.nfo` files and download poster art alongside videos for seamless library integration
+- ▶️ **Built-in Stream Preview** - Preview streams directly in the browser with mpegts.js/hls.js support, audio track selection, and keyboard shortcuts
+- 📡 **Series Monitoring** - Automatically track series for new episodes with auto-download and Telegram alerts
 - �🐳 **Docker Ready** - Easy deployment with docker-compose
 
 ## Quick Start

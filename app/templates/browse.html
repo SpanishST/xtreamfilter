@@ -1476,7 +1476,7 @@
                     ? '<button class="episode-play-btn" onclick="event.stopPropagation(); openEpisodeModal(\'' + escapeAttr(sub.source_id) + '\', \'' + escapeAttr(sub.id) + '\', \'' + jsEscape(sub.name) + '\', \'' + escapeAttr(sub.icon || '') + '\', \'' + escapeAttr(sub.group || '') + '\')" title="Browse episodes">▶</button>'
                     : '<button class="episode-play-btn" onclick="event.stopPropagation(); openPlayer(\'' + escapeAttr(subType) + '\', \'' + escapeAttr(sub.source_id) + '\', \'' + escapeAttr(sub.id) + '\', \'' + jsEscape(sub.name) + '\', \'' + escapeAttr(sub.icon || '') + '\', \'' + escapeAttr(sub.group || '') + '\', \'' + escapeAttr(subPlayExt) + '\')" title="Play">▶</button>';
                 return '<div class="source-row">' +
-                    '<div class="source-row-name">' + subPlayBtn + escapeHtml(sub.name) + '</div>' +
+                    '<div class="source-row-name">' + subPlayBtn + ' ' + escapeHtml(sub.name) + '</div>' +
                     '<div class="source-row-meta">' +
                     '<span class="source-badge" data-color="' + (si % 5 || 5) + '">' + escapeHtml(sName) + '</span>' +
                     (sub.group ? '<span class="source-row-group">' + escapeHtml(sub.group) + '</span>' : '') +

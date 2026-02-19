@@ -222,3 +222,64 @@ class TestSafeEpisodeNum:
 
     def test_empty_string(self):
         assert _safe_episode_num("") == 0
+
+
+# ---------------------------------------------------------------
+# ID-first cross-source matching
+# ---------------------------------------------------------------
+
+class TestMonitorIdFirstMatching:
+
+    def _build_monitor_with_series(self, series_items: list[dict]):
+        from app.services.monitor_service import MonitorService
+
+        class _Cfg:
+            config = {"sources": [{"id": "src1"}, {"id": "src2"}]}
+
+        class _Cache:
+            def get_cached_with_source_info(self, *_args, **_kwargs):
+                return series_items, []
+
+        ms = MonitorService.__new__(MonitorService)
+        ms._cfg = _Cfg()
+        ms.cache_service = _Cache()
+        return ms
+
+    def test_id_match_prioritized_over_fuzzy(self):
+        ms = self._build_monitor_with_series([
+            {
+                "_source_id": "src1",
+                "series_id": "100",
+                "name": "NF - The Last Of Us",
+                "tmdb": "100088",
+            },
+            {
+                "_source_id": "src2",
+                "series_id": "200",
+                "name": "NF - The Last Of Us (FR)",
+                "tmdb": "999999",
+            },
+        ])
+
+        matches = ms.find_series_across_sources("The Last Of Us", tmdb_id="100088")
+        assert matches
+        assert matches[0]["source_id"] == "src1"
+        assert matches[0]["matched_by"] == "id"
+
+    def test_fallback_to_fuzzy_when_no_ids(self):
+        ms = self._build_monitor_with_series([
+            {
+                "_source_id": "src1",
+                "series_id": "100",
+                "name": "FR - Breaking Bad",
+            },
+            {
+                "_source_id": "src2",
+                "series_id": "200",
+                "name": "Breaking Bad",
+            },
+        ])
+
+        matches = ms.find_series_across_sources("Breaking Bad")
+        assert matches
+        assert any(m["matched_by"] == "fuzzy" for m in matches)

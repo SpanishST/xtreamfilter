@@ -272,13 +272,21 @@ class CategoryService:
                             "content_type": ct,
                             "name": name,
                             "cover": stream.get("stream_icon", "") or stream.get("cover", ""),
+                            "tmdb_id": stream.get("tmdb_id") or stream.get("tmdb"),
+                            "imdb_id": stream.get("imdb_id") or stream.get("imdb"),
                         }
                     )
 
             old_items = cat.get("cached_items", [])
             old_keys = {(i.get("id"), i.get("source_id"), i.get("content_type")) for i in old_items}
             new_items = [
-                {"name": i["name"], "cover": i["cover"], "source_id": i["source_id"]}
+                {
+                    "name": i["name"],
+                    "cover": i["cover"],
+                    "source_id": i["source_id"],
+                    "tmdb_id": i.get("tmdb_id"),
+                    "imdb_id": i.get("imdb_id"),
+                }
                 for i in matched_items
                 if (i["id"], i["source_id"], i["content_type"]) not in old_keys
             ]

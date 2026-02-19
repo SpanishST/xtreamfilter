@@ -1,7 +1,11 @@
 """Notification service — all Telegram messaging logic."""
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from rapidfuzz import fuzz
@@ -21,6 +25,8 @@ class NotificationService:
     def __init__(self, config_service: "ConfigService", http_client: "HttpClientService"):
         self.config_service = config_service
         self.http_client = http_client
+        self._recent_notifications: dict[str, float] = {}
+        self._recent_notifications_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -56,6 +62,60 @@ class NotificationService:
             return name
         return item.get("name", "Unknown")
 
+    @staticmethod
+    def _normalize_tmdb_id(value) -> str | None:
+        if value is None:
+            return None
+        raw = str(value).strip().lower()
+        if raw.startswith("tmdb:"):
+            raw = raw[5:].strip()
+        if raw.isdigit():
+            return raw
+        return None
+
+    @staticmethod
+    def _normalize_imdb_id(value) -> str | None:
+        if value is None:
+            return None
+        raw = str(value).strip().lower()
+        if raw.startswith("imdb:"):
+            raw = raw[5:].strip()
+        if raw.startswith("tt") and raw[2:].isdigit():
+            return raw
+        if raw.isdigit():
+            return f"tt{raw}"
+        return None
+
+    def _external_key(self, item: dict) -> str | None:
+        tmdb_id = self._normalize_tmdb_id(item.get("tmdb_id") or item.get("tmdb"))
+        if tmdb_id:
+            return f"tmdb:{tmdb_id}"
+        imdb_id = self._normalize_imdb_id(item.get("imdb_id") or item.get("imdb"))
+        if imdb_id:
+            return f"imdb:{imdb_id}"
+        return None
+
+    async def _should_send_deduped(self, kind: str, payload: dict, ttl_seconds: int = 120) -> bool:
+        """Return True if notification should be sent (not seen in recent TTL window)."""
+        digest = hashlib.sha1(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        key = f"{kind}:{digest}"
+        now = time.time()
+
+        async with self._recent_notifications_lock:
+            cutoff = now - max(ttl_seconds * 5, 600)
+            stale = [k for k, ts in self._recent_notifications.items() if ts < cutoff]
+            for k in stale:
+                self._recent_notifications.pop(k, None)
+
+            last_seen = self._recent_notifications.get(key)
+            if last_seen is not None and (now - last_seen) < ttl_seconds:
+                return False
+
+            self._recent_notifications[key] = now
+            return True
+
     def _group_new_items_for_notification(self, new_items: list) -> list:
         if not new_items:
             return []
@@ -66,13 +126,20 @@ class NotificationService:
             item_name = item.get("name", "")
             item_normalized = normalize_name(item_name)
             source_name = sources_by_id.get(item.get("source_id", ""), "")
+            external_key = self._external_key(item)
             best_group = None
             best_score = 0
-            for group in groups:
-                score = fuzz.token_sort_ratio(item_normalized, group["normalized"])
-                if score >= 85 and score > best_score:
-                    best_score = score
-                    best_group = group
+            if external_key:
+                for group in groups:
+                    if group.get("external_key") == external_key:
+                        best_group = group
+                        break
+            if best_group is None:
+                for group in groups:
+                    score = fuzz.token_sort_ratio(item_normalized, group["normalized"])
+                    if score >= 85 and score > best_score:
+                        best_score = score
+                        best_group = group
             if best_group is not None:
                 if source_name and source_name not in best_group["sources"]:
                     best_group["sources"].append(source_name)
@@ -84,6 +151,7 @@ class NotificationService:
                 groups.append(
                     {
                         "normalized": item_normalized,
+                        "external_key": external_key,
                         "name": item_name,
                         "cover": item.get("cover", ""),
                         "sources": [source_name] if source_name else [],
@@ -117,6 +185,19 @@ class NotificationService:
             return
         grouped = self._group_new_items_for_notification(new_items)
         unique_count = len(grouped)
+        dedupe_payload = {
+            "category": category_name,
+            "items": [
+                {
+                    "name": g.get("name", ""),
+                    "sources": sorted(g.get("sources", [])),
+                }
+                for g in grouped
+            ],
+        }
+        if not await self._should_send_deduped("category", dedupe_payload, ttl_seconds=120):
+            logger.info(f"Skipped duplicate category notification for '{category_name}'")
+            return
         try:
             client = await self.http_client.get_client()
             groups_with_covers = [g for g in grouped if g.get("cover")]
@@ -262,6 +343,23 @@ class NotificationService:
             return
         bot_token, chat_id = creds
         count = len(new_episodes)
+        dedupe_payload = {
+            "series": series_name,
+            "action": action,
+            "episodes": sorted(
+                [
+                    (
+                        str(ep.get("season", "")),
+                        int(ep.get("episode_num", 0) or 0),
+                        ep.get("stream_id", ""),
+                    )
+                    for ep in new_episodes
+                ]
+            ),
+        }
+        if not await self._should_send_deduped("monitor", dedupe_payload, ttl_seconds=120):
+            logger.info(f"Skipped duplicate monitor notification for '{series_name}'")
+            return
         ep_lines: list[str] = []
         for ep in new_episodes[:15]:
             season = ep.get("season", "?")

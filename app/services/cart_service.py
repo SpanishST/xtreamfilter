@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import time
 import unicodedata
 import uuid
@@ -60,11 +61,24 @@ def _xml_prettify(elem: Element) -> str:
     return pretty
 
 
-def _add_text(parent: Element, tag: str, text: str | None) -> None:
+def _str_val(value) -> str:
+    """Safely coerce an API value to a string.
+
+    Xtream APIs sometimes return lists where a string is expected.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value if v)
+    return str(value)
+
+
+def _add_text(parent: Element, tag: str, text) -> None:
     """Add a text sub-element if the text is non-empty."""
-    if text:
+    t = _str_val(text)
+    if t:
         el = SubElement(parent, tag)
-        el.text = str(text).strip()
+        el.text = t.strip()
 
 
 def _add_uniqueid(parent: Element, provider: str, value: str, default: bool = False) -> None:
@@ -109,79 +123,102 @@ def generate_movie_nfo(info: dict, name: str = "") -> str:
     """Generate a Jellyfin-compatible movie NFO from Xtream VOD info.
 
     See https://jellyfin.org/docs/general/server/metadata/nfo/
+    Matches the format Jellyfin's own "Nfo saver" produces.
     """
     root = Element("movie")
+
+    # Plot first (matches Jellyfin's own output order)
+    _add_text(root, "plot", info.get("plot") or info.get("description"))
+    _add_text(root, "lockdata", "false")
+    _add_text(root, "dateadded", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
     title = info.get("name") or info.get("title") or info.get("o_name") or name
     _add_text(root, "title", title)
     _add_text(root, "originaltitle", info.get("o_name"))
-    year = _extract_year(info)
-    _add_text(root, "year", year)
-    _add_text(root, "plot", info.get("plot") or info.get("description"))
-    _add_text(root, "tagline", info.get("tagline"))
-    _add_text(root, "runtime", info.get("duration") or info.get("runtime"))
-
-    # Premiered date (Jellyfin uses this for display & matching)
-    for key in ("releasedate", "releaseDate", "release_date"):
-        rd = str(info.get(key, "")).strip()
-        if rd:
-            _add_text(root, "premiered", rd)
-            break
-
-    # Ratings — use <ratings> container for proper Jellyfin parsing
-    rating_val = info.get("rating") or info.get("rating_5based")
-    if rating_val:
-        try:
-            r = float(rating_val)
-            if r > 0:
-                # Normalize 5-based ratings to 10-scale
-                if info.get("rating_5based") and not info.get("rating") and r <= 5:
-                    r = r * 2
-                _add_ratings(root, r)
-        except (ValueError, TypeError):
-            pass
-
-    # TMDb / IMDB IDs — <uniqueid> is the standard Kodi/Jellyfin tag
-    tmdb_id = info.get("tmdb_id") or info.get("tmdb")
-    imdb_id = info.get("imdb_id") or info.get("imdb")
-    if imdb_id:
-        _add_uniqueid(root, "imdb", str(imdb_id), default=True)
-        _add_text(root, "imdbid", str(imdb_id))
-    if tmdb_id:
-        _add_uniqueid(root, "tmdb", str(tmdb_id), default=not imdb_id)
-        _add_text(root, "tmdbid", str(tmdb_id))
-
-    # Genres
-    genre_str = info.get("genre") or info.get("category_name") or ""
-    for genre in re.split(r"[,/]", genre_str):
-        genre = genre.strip()
-        if genre:
-            _add_text(root, "genre", genre)
 
     # Director
-    director_str = info.get("director") or ""
+    director_str = _str_val(info.get("director"))
     for director in re.split(r"[,/]", director_str):
         director = director.strip()
         if director:
             _add_text(root, "director", director)
 
+    # Rating — Jellyfin's own saver uses bare <rating> tag
+    rating_val = info.get("rating") or info.get("rating_5based")
+    if rating_val:
+        try:
+            r = float(rating_val)
+            if r > 0:
+                if info.get("rating_5based") and not info.get("rating") and r <= 5:
+                    r = r * 2
+                _add_text(root, "rating", f"{r:.3f}")
+        except (ValueError, TypeError):
+            pass
+
+    year = _extract_year(info)
+    _add_text(root, "year", year)
+    _add_text(root, "mpaa", info.get("mpaa") or info.get("certification"))
+
+    # Provider IDs — both flat tags and <uniqueid> for max compatibility
+    tmdb_id = info.get("tmdb_id") or info.get("tmdb")
+    imdb_id = info.get("imdb_id") or info.get("imdb")
+    if imdb_id:
+        _add_text(root, "imdbid", str(imdb_id))
+    if tmdb_id:
+        _add_text(root, "tmdbid", str(tmdb_id))
+
+    # Premiered + releasedate (Jellyfin uses both)
+    release_date = ""
+    for key in ("releasedate", "releaseDate", "release_date"):
+        rd = str(info.get(key, "")).strip()
+        if rd:
+            release_date = rd
+            break
+    if release_date:
+        _add_text(root, "premiered", release_date)
+        _add_text(root, "releasedate", release_date)
+
+    _add_text(root, "runtime", info.get("duration") or info.get("runtime"))
+    _add_text(root, "tagline", info.get("tagline"))
+    _add_text(root, "country", info.get("country"))
+
+    # Genres
+    genre_str = _str_val(info.get("genre") or info.get("category_name"))
+    for genre in re.split(r"[,/]", genre_str):
+        genre = genre.strip()
+        if genre:
+            _add_text(root, "genre", genre)
+
+    _add_text(root, "studio", info.get("studio"))
+
     # Cast
-    cast_str = info.get("cast") or info.get("actors") or ""
-    for actor_name in re.split(r",", cast_str):
+    cast_str = _str_val(info.get("cast") or info.get("actors"))
+    for idx, actor_name in enumerate(re.split(r",", cast_str)):
         actor_name = actor_name.strip()
         if actor_name:
             actor_el = SubElement(root, "actor")
             name_el = SubElement(actor_el, "name")
             name_el.text = actor_name
+            type_el = SubElement(actor_el, "type")
+            type_el.text = "Actor"
+            sort_el = SubElement(actor_el, "sortorder")
+            sort_el.text = str(idx)
 
-    # Country / Studio
-    _add_text(root, "country", info.get("country"))
-    _add_text(root, "studio", info.get("studio"))
+    # IMDb ID as <id> tag (Jellyfin's own saver includes this)
+    if imdb_id:
+        _add_text(root, "id", str(imdb_id))
 
-    # Poster / fanart — use <thumb> and <fanart> tags (Jellyfin/Kodi URL format)
-    cover = info.get("cover_big") or info.get("cover") or info.get("movie_image") or info.get("stream_icon")
+    # uniqueid tags for Kodi compatibility
+    if imdb_id:
+        _add_uniqueid(root, "imdb", str(imdb_id), default=True)
+    if tmdb_id:
+        _add_uniqueid(root, "tmdb", str(tmdb_id), default=not imdb_id)
+
+    # Poster / fanart — use <thumb> tags (Jellyfin/Kodi URL format)
+    cover = _str_val(info.get("cover_big") or info.get("cover") or info.get("movie_image") or info.get("stream_icon"))
     if cover:
         _add_thumb(root, cover, aspect="poster")
-    backdrop = info.get("backdrop_path") or info.get("backdrop")
+    backdrop = _str_val(info.get("backdrop_path") or info.get("backdrop"))
     if backdrop:
         fanart_el = SubElement(root, "fanart")
         thumb_el = SubElement(fanart_el, "thumb")
@@ -193,21 +230,16 @@ def generate_movie_nfo(info: dict, name: str = "") -> str:
 def generate_tvshow_nfo(info: dict, name: str = "") -> str:
     """Generate a Jellyfin-compatible tvshow.nfo from Xtream series info."""
     root = Element("tvshow")
+
+    _add_text(root, "plot", info.get("plot") or info.get("description"))
+    _add_text(root, "lockdata", "false")
+    _add_text(root, "dateadded", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
     title = info.get("name") or info.get("title") or name
     _add_text(root, "title", title)
     _add_text(root, "originaltitle", info.get("o_name"))
-    year = _extract_year(info)
-    _add_text(root, "year", year)
-    _add_text(root, "plot", info.get("plot") or info.get("description"))
 
-    # Premiered
-    for key in ("releasedate", "releaseDate", "release_date"):
-        rd = str(info.get(key, "")).strip()
-        if rd:
-            _add_text(root, "premiered", rd)
-            break
-
-    # Ratings
+    # Rating
     rating_val = info.get("rating") or info.get("rating_5based")
     if rating_val:
         try:
@@ -215,39 +247,70 @@ def generate_tvshow_nfo(info: dict, name: str = "") -> str:
             if r > 0:
                 if info.get("rating_5based") and not info.get("rating") and r <= 5:
                     r = r * 2
-                _add_ratings(root, r)
+                _add_text(root, "rating", f"{r:.3f}")
         except (ValueError, TypeError):
             pass
+
+    year = _extract_year(info)
+    _add_text(root, "year", year)
+    _add_text(root, "mpaa", info.get("mpaa") or info.get("certification"))
 
     # Provider IDs
     tmdb_id = info.get("tmdb_id") or info.get("tmdb")
     imdb_id = info.get("imdb_id") or info.get("imdb")
     if imdb_id:
-        _add_uniqueid(root, "imdb", str(imdb_id), default=True)
         _add_text(root, "imdbid", str(imdb_id))
     if tmdb_id:
-        _add_uniqueid(root, "tmdb", str(tmdb_id), default=not imdb_id)
         _add_text(root, "tmdbid", str(tmdb_id))
 
-    genre_str = info.get("genre") or info.get("category_name") or ""
+    # Premiered + releasedate
+    release_date = ""
+    for key in ("releasedate", "releaseDate", "release_date"):
+        rd = str(info.get(key, "")).strip()
+        if rd:
+            release_date = rd
+            break
+    if release_date:
+        _add_text(root, "premiered", release_date)
+        _add_text(root, "releasedate", release_date)
+
+    _add_text(root, "runtime", info.get("duration") or info.get("runtime"))
+
+    genre_str = _str_val(info.get("genre") or info.get("category_name"))
     for genre in re.split(r"[,/]", genre_str):
         genre = genre.strip()
         if genre:
             _add_text(root, "genre", genre)
 
-    cast_str = info.get("cast") or info.get("actors") or ""
-    for actor_name in re.split(r",", cast_str):
+    _add_text(root, "studio", info.get("studio"))
+
+    cast_str = _str_val(info.get("cast") or info.get("actors"))
+    for idx, actor_name in enumerate(re.split(r",", cast_str)):
         actor_name = actor_name.strip()
         if actor_name:
             actor_el = SubElement(root, "actor")
             name_el = SubElement(actor_el, "name")
             name_el.text = actor_name
+            type_el = SubElement(actor_el, "type")
+            type_el.text = "Actor"
+            sort_el = SubElement(actor_el, "sortorder")
+            sort_el.text = str(idx)
+
+    # <id> tag
+    if imdb_id:
+        _add_text(root, "id", str(imdb_id))
+
+    # uniqueid tags
+    if imdb_id:
+        _add_uniqueid(root, "imdb", str(imdb_id), default=True)
+    if tmdb_id:
+        _add_uniqueid(root, "tmdb", str(tmdb_id), default=not imdb_id)
 
     # Poster / fanart
-    cover = info.get("cover") or info.get("cover_big") or info.get("stream_icon")
+    cover = _str_val(info.get("cover") or info.get("cover_big") or info.get("stream_icon"))
     if cover:
         _add_thumb(root, cover, aspect="poster")
-    backdrop = info.get("backdrop_path") or info.get("backdrop")
+    backdrop = _str_val(info.get("backdrop_path") or info.get("backdrop"))
     if backdrop:
         fanart_el = SubElement(root, "fanart")
         thumb_el = SubElement(fanart_el, "thumb")
@@ -259,6 +322,9 @@ def generate_tvshow_nfo(info: dict, name: str = "") -> str:
 def generate_episode_nfo(item: dict, ep_info: dict | None = None) -> str:
     """Generate a Jellyfin-compatible episodedetails NFO."""
     root = Element("episodedetails")
+
+    _add_text(root, "lockdata", "false")
+    _add_text(root, "dateadded", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     _add_text(root, "title", item.get("episode_title") or item.get("name", ""))
     _add_text(root, "season", str(item.get("season", 1)))
     _add_text(root, "episode", str(item.get("episode_num", 1)))
@@ -273,7 +339,7 @@ def generate_episode_nfo(item: dict, ep_info: dict | None = None) -> str:
             try:
                 r = float(rating_val)
                 if r > 0:
-                    _add_ratings(root, r)
+                    _add_text(root, "rating", f"{r:.3f}")
             except (ValueError, TypeError):
                 pass
         _add_text(root, "runtime", ep_info.get("duration") or ep_info.get("runtime"))
@@ -820,6 +886,8 @@ class CartService:
                         continue
                     # Write Jellyfin-compatible NFO metadata + poster
                     await self._write_metadata(item, file_path)
+                    # Embed metadata directly into the video container (MKV/MP4)
+                    await self._embed_container_metadata(item, file_path)
                     await self.notification_service.send_download_file_notification(item)
 
                 if pause_interval > 0 and pause_duration > 0:
@@ -933,12 +1001,13 @@ class CartService:
     async def _write_metadata(self, item: dict, file_path: str) -> None:
         """Fetch metadata from the Xtream API and write NFO + poster next to the video file.
 
-        For **movies**: writes ``<MovieName>.nfo`` and ``poster.jpg`` in the same directory.
+        For **movies**: writes ``movie.nfo`` and ``poster.jpg`` in the movie folder.
         For **series episodes**: writes ``<Episode>.nfo`` next to the episode, plus
         ``tvshow.nfo`` and ``poster.jpg`` in the series root folder (only if they don't exist yet).
         """
         content_type = item.get("content_type", "vod")
         source_id = item.get("source_id", "")
+
         nfo_path = os.path.splitext(file_path)[0] + ".nfo"
 
         try:
@@ -1029,3 +1098,198 @@ class CartService:
                             ok = await download_poster(cover_url, poster_path)
                             if ok:
                                 logger.info(f"[META] Downloaded series poster: {poster_path}")
+
+    # ------------------------------------------------------------------
+    # Container metadata embedding (MKV / MP4)
+    # ------------------------------------------------------------------
+
+    async def _embed_container_metadata(self, item: dict, file_path: str) -> None:
+        """Embed metadata tags directly into the video container file.
+
+        - **MKV**: uses ``mkvpropedit`` (in-place, no remux needed).
+        - **MP4/other**: uses ``ffmpeg -c copy`` (fast remux, no re-encoding).
+        """
+        content_type = item.get("content_type", "vod")
+        source_id = item.get("source_id", "")
+
+        try:
+            # Gather metadata from the Xtream API (reuse cached info when possible)
+            meta = await self._gather_embed_metadata(item, content_type, source_id)
+            if not meta.get("title"):
+                logger.debug(f"No title for container embed, skipping: {file_path}")
+                return
+
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext == ".mkv":
+                await self._embed_mkv_metadata(file_path, meta)
+            else:
+                await self._embed_ffmpeg_metadata(file_path, meta)
+        except Exception as e:
+            logger.warning(f"Failed to embed container metadata for '{item.get('name')}': {e}")
+
+    async def _gather_embed_metadata(
+        self, item: dict, content_type: str, source_id: str
+    ) -> dict:
+        """Build a flat metadata dict from Xtream info for container embedding."""
+        meta: dict[str, str] = {}
+
+        if content_type == "vod":
+            stream_id = item.get("stream_id", "")
+            info = await self.xtream_service.fetch_vod_info(source_id, stream_id)
+            if info:
+                meta["title"] = info.get("name") or info.get("title") or item.get("name", "")
+                meta["date"] = str(info.get("releasedate") or info.get("releaseDate") or info.get("release_date") or "")
+                year = _extract_year(info)
+                if year:
+                    meta["year"] = year
+                meta["description"] = info.get("plot") or info.get("description") or ""
+                meta["genre"] = info.get("genre") or info.get("category_name") or ""
+                meta["artist"] = info.get("director") or ""
+            else:
+                meta["title"] = item.get("name", "")
+
+        elif content_type == "series":
+            series_name = item.get("series_name", item.get("name", ""))
+            ep_title = item.get("episode_title", "")
+            season = item.get("season", 1)
+            episode = item.get("episode_num", 1)
+            meta["title"] = ep_title or f"S{int(season):02d}E{int(episode):02d}"
+            meta["show"] = series_name
+            meta["season_number"] = str(season)
+            meta["episode_sort"] = str(episode)
+            ep_info = item.get("episode_info") or {}
+            meta["description"] = ep_info.get("plot") or ep_info.get("description") or ""
+            meta["date"] = ep_info.get("air_date") or ep_info.get("releasedate") or ""
+        else:
+            meta["title"] = item.get("name", "")
+
+        # Strip empty values
+        return {k: v for k, v in meta.items() if v}
+
+    async def _embed_mkv_metadata(self, file_path: str, meta: dict) -> None:
+        """Embed metadata into an MKV file using mkvpropedit (in-place, no remux)."""
+        cmd = ["mkvpropedit", file_path]
+
+        # Segment-level title
+        if meta.get("title"):
+            cmd += ["--edit", "info", "--set", f"title={meta['title']}"]
+
+        # Date (MKV uses "date" tag at segment level)
+        if meta.get("date"):
+            cmd += ["--edit", "info", "--set", f"date={meta['date']}"]
+
+        # Tags via XML for richer metadata (genre, description, etc.)
+        tags_xml = self._build_mkv_tags_xml(meta)
+        if tags_xml:
+            import tempfile
+            tags_file = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".xml", delete=False, encoding="utf-8"
+            )
+            try:
+                tags_file.write(tags_xml)
+                tags_file.close()
+                cmd += ["--tags", f"global:{tags_file.name}"]
+
+                result = await asyncio.to_thread(
+                    subprocess.run, cmd,
+                    capture_output=True, text=True, timeout=60,
+                )
+                if result.returncode == 0:
+                    logger.info(f"[META] Embedded MKV metadata: {file_path}")
+                else:
+                    logger.warning(f"mkvpropedit failed ({result.returncode}): {result.stderr.strip()}")
+            finally:
+                try:
+                    os.unlink(tags_file.name)
+                except OSError:
+                    pass
+        else:
+            # No tags XML needed, just set the title/date
+            result = await asyncio.to_thread(
+                subprocess.run, cmd,
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode == 0:
+                logger.info(f"[META] Embedded MKV metadata: {file_path}")
+            else:
+                logger.warning(f"mkvpropedit failed ({result.returncode}): {result.stderr.strip()}")
+
+    @staticmethod
+    def _build_mkv_tags_xml(meta: dict) -> str:
+        """Build an MKV tags XML string for mkvpropedit --tags."""
+        tag_map = {
+            "TITLE": meta.get("title", ""),
+            "DATE_RELEASED": meta.get("date", ""),
+            "GENRE": meta.get("genre", ""),
+            "DESCRIPTION": meta.get("description", ""),
+            "DIRECTOR": meta.get("artist", ""),
+            "SHOW": meta.get("show", ""),
+            "SEASON_NUMBER": meta.get("season_number", ""),
+            "EPISODE_SORT": meta.get("episode_sort", ""),
+        }
+        # Filter out empty tags
+        tag_map = {k: v for k, v in tag_map.items() if v}
+        if not tag_map:
+            return ""
+
+        lines = ['<?xml version="1.0" encoding="UTF-8"?>', "<!DOCTYPE Tags SYSTEM \"matroskatags.dtd\">", "<Tags>", "  <Tag>", "    <Targets/>"]
+        for name, value in tag_map.items():
+            # Escape XML special characters
+            value = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            lines.append(f"    <Simple>")
+            lines.append(f"      <Name>{name}</Name>")
+            lines.append(f"      <String>{value}</String>")
+            lines.append(f"    </Simple>")
+        lines += ["  </Tag>", "</Tags>"]
+        return "\n".join(lines)
+
+    async def _embed_ffmpeg_metadata(self, file_path: str, meta: dict) -> None:
+        """Embed metadata into MP4/other containers using ffmpeg (fast copy-remux)."""
+        tmp_path = file_path + ".meta_tmp" + os.path.splitext(file_path)[1]
+        cmd = ["ffmpeg", "-y", "-i", file_path, "-c", "copy"]
+
+        # Map metadata keys to ffmpeg metadata tags
+        ffmpeg_map = {
+            "title": meta.get("title", ""),
+            "date": meta.get("date", ""),
+            "year": meta.get("year", ""),
+            "description": meta.get("description", ""),
+            "synopsis": meta.get("description", ""),
+            "genre": meta.get("genre", ""),
+            "artist": meta.get("artist", ""),
+            "show": meta.get("show", ""),
+            "season_number": meta.get("season_number", ""),
+            "episode_sort": meta.get("episode_sort", ""),
+        }
+        has_meta = False
+        for key, value in ffmpeg_map.items():
+            if value:
+                cmd += ["-metadata", f"{key}={value}"]
+                has_meta = True
+
+        if not has_meta:
+            return
+
+        cmd.append(tmp_path)
+
+        result = await asyncio.to_thread(
+            subprocess.run, cmd,
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0 and os.path.exists(tmp_path):
+            tmp_size = os.path.getsize(tmp_path)
+            orig_size = os.path.getsize(file_path)
+            # Sanity check: remuxed file should be roughly the same size
+            if tmp_size > orig_size * 0.9:
+                os.replace(tmp_path, file_path)
+                logger.info(f"[META] Embedded container metadata (ffmpeg): {file_path}")
+            else:
+                os.unlink(tmp_path)
+                logger.warning(f"[META] Remuxed file too small ({tmp_size} vs {orig_size}), skipped")
+        else:
+            logger.warning(f"ffmpeg metadata embed failed ({result.returncode}): {result.stderr.strip()[:200]}")
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass

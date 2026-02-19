@@ -28,8 +28,8 @@ A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Se
 - � **Content Browser** - Browse and search all your content with cover art and details
 - 📂 **Custom Categories** - Create manual or automatic categories with pattern matching
 - 📱 **Telegram Notifications** - Get notified when new content matches your categories
-- ⬇️ **VOD & Series Downloads** - Download movies and series episodes locally with a cart-based queue
-- 📡 **Series Monitoring** - Automatically track series for new episodes with auto-download and Telegram alerts
+- ⬇️ **VOD & Series Downloads** - Download movies and series episodes locally with a cart-based queue- 🎞️ **Jellyfin/Kodi Metadata** - Auto-generate `.nfo` files and download poster art alongside videos for seamless library integration
+- ▶️ **Built-in Stream Preview** - Preview streams directly in the browser with mpegts.js/hls.js support, audio track selection, and keyboard shortcuts- 📡 **Series Monitoring** - Automatically track series for new episodes with auto-download and Telegram alerts
 - �🐳 **Docker Ready** - Easy deployment with docker-compose
 
 ## Quick Start
@@ -321,8 +321,22 @@ The **Browse** feature provides a rich interface to explore all your IPTV conten
 - **Content Details** - View descriptions, ratings, cast, and episode lists
 - **Quick Actions** - Add items to custom categories directly from the browser
 - **Pagination** - Efficiently browse large catalogs
+- ▶️ **Stream Preview** - Preview video streams directly without leaving the page
 
 Access the browser at `/browse` or click the **🔍 Browse Content** button on the main page.
+
+### Stream Preview Player
+
+The Browse page includes an integrated player for quickly previewing streams before downloading or adding to your library:
+
+| Feature | Description |
+|---|---|
+| **MPEG-TS & HLS** | Automatic format detection using mpegts.js and hls.js |
+| **Audio tracks** | Select between available audio tracks |
+| **Custom seek bar** | Frame-accurate seeking for transcoded VOD |
+| **Keyboard shortcuts** | Space (play/pause), arrows (seek), F (fullscreen), M (mute) |
+| **Episode playback** | Play buttons on each episode row for direct streaming |
+| **Fullscreen** | Double-click or press F for fullscreen mode |
 
 ## Custom Categories
 
@@ -456,20 +470,44 @@ All settings are configurable from the Cart page UI and persisted in `config.jso
 
 ### File Organization
 
-Downloads are organized automatically:
+Downloads are organized automatically with Jellyfin/Kodi-compatible folder structures and metadata:
 
 ```
 <download_path>/
 ├── Films/
-│   └── Movie Name.mp4
+│   └── Movie Name/
+│       ├── Movie Name.mp4
+│       ├── Movie Name.nfo          # Jellyfin/Kodi movie metadata
+│       └── poster.jpg               # Movie poster artwork
 └── Series/
     └── Show Name/
+        ├── tvshow.nfo                # Series-level metadata
+        ├── poster.jpg                # Series poster artwork
         ├── S01/
         │   ├── Show Name S01E01 - Episode Title.mkv
+        │   ├── Show Name S01E01 - Episode Title.nfo
         │   └── Show Name S01E02.mkv
         └── S02/
             └── Show Name S02E01 - Pilot.mp4
 ```
+
+### Jellyfin / Kodi Metadata
+
+When downloading VOD or series content, XtreamFilter automatically fetches metadata from the Xtream API and writes Jellyfin/Kodi-compatible `.nfo` files alongside each video:
+
+| Content Type | NFO File | Contents |
+|---|---|---|
+| **Movie** | `<MovieName>.nfo` | Title, plot, year, premiered date, ratings, genres, cast, director, TMDB/IMDb IDs, poster URL |
+| **TV Show** | `tvshow.nfo` (in series root) | Series title, plot, year, premiered, ratings, genres, cast, TMDB/IMDb IDs, poster URL |
+| **Episode** | `<EpisodeName>.nfo` | Episode title, season/episode numbers, show title, plot, aired date, ratings |
+
+**NFO features:**
+- `<uniqueid type="imdb">` / `<uniqueid type="tmdb">` tags for automatic provider matching
+- `<ratings>` container with proper Kodi/Jellyfin structure
+- `<thumb aspect="poster">` and `<fanart>` image URL references
+- `<premiered>` tag for release date display and sorting
+- Poster artwork downloaded as `poster.jpg` in each movie/series folder
+- XML declaration with `encoding="UTF-8" standalone="yes"` for full compatibility
 
 ### Download API
 
@@ -513,6 +551,7 @@ Automatically track your favorite series for new episodes. When new episodes are
 |---------|-------------|
 | **Multi-source** | Monitor a series across all sources or pin to a specific one |
 | **Fuzzy matching** | Finds the same series across different providers by name |
+| **TMDB/IMDb normalization** | Consistent metadata IDs across sources for accurate matching |
 | **Duplicate prevention** | Won't re-queue episodes already in the download cart |
 | **File detection** | Skips episodes that already exist on disk |
 | **Enable/Disable** | Toggle monitoring per series without removing it |

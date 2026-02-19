@@ -48,10 +48,16 @@ def get_player_headers(profile_key: str = "tivimate") -> dict:
 # ------------------------------------------------------------------
 
 def _xml_prettify(elem: Element) -> str:
-    """Return a pretty-printed XML string with declaration."""
+    """Return a pretty-printed XML string with Jellyfin-compatible declaration."""
     rough = tostring(elem, encoding="unicode")
     parsed = minidom.parseString(rough)
-    return parsed.toprettyxml(indent="  ", encoding=None)
+    pretty = parsed.toprettyxml(indent="  ", encoding=None)
+    # Replace default declaration with Jellyfin/Kodi-compatible one
+    pretty = pretty.replace(
+        '<?xml version="1.0" ?>',
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    )
+    return pretty
 
 
 def _add_text(parent: Element, tag: str, text: str | None) -> None:
@@ -59,6 +65,33 @@ def _add_text(parent: Element, tag: str, text: str | None) -> None:
     if text:
         el = SubElement(parent, tag)
         el.text = str(text).strip()
+
+
+def _add_uniqueid(parent: Element, provider: str, value: str, default: bool = False) -> None:
+    """Add a <uniqueid type="provider"> tag (Kodi/Jellyfin standard)."""
+    el = SubElement(parent, "uniqueid")
+    el.set("type", provider)
+    if default:
+        el.set("default", "true")
+    el.text = str(value).strip()
+
+
+def _add_ratings(parent: Element, value: float, name: str = "default", max_val: int = 10) -> None:
+    """Add a <ratings> block with proper Jellyfin/Kodi structure."""
+    ratings_el = SubElement(parent, "ratings")
+    rating_el = SubElement(ratings_el, "rating")
+    rating_el.set("name", name)
+    rating_el.set("max", str(max_val))
+    rating_el.set("default", "true")
+    val_el = SubElement(rating_el, "value")
+    val_el.text = f"{value:.1f}"
+
+
+def _add_thumb(parent: Element, url: str, aspect: str = "poster") -> None:
+    """Add a <thumb aspect="..."> tag for Jellyfin/Kodi image references."""
+    el = SubElement(parent, "thumb")
+    el.set("aspect", aspect)
+    el.text = url
 
 
 def _extract_year(info: dict) -> str:
@@ -87,23 +120,35 @@ def generate_movie_nfo(info: dict, name: str = "") -> str:
     _add_text(root, "tagline", info.get("tagline"))
     _add_text(root, "runtime", info.get("duration") or info.get("runtime"))
 
-    # Rating
+    # Premiered date (Jellyfin uses this for display & matching)
+    for key in ("releasedate", "releaseDate", "release_date"):
+        rd = str(info.get(key, "")).strip()
+        if rd:
+            _add_text(root, "premiered", rd)
+            break
+
+    # Ratings — use <ratings> container for proper Jellyfin parsing
     rating_val = info.get("rating") or info.get("rating_5based")
     if rating_val:
         try:
             r = float(rating_val)
             if r > 0:
-                _add_text(root, "rating", str(r))
+                # Normalize 5-based ratings to 10-scale
+                if info.get("rating_5based") and not info.get("rating") and r <= 5:
+                    r = r * 2
+                _add_ratings(root, r)
         except (ValueError, TypeError):
             pass
 
-    # TMDb / IMDB IDs — Jellyfin uses these for matching
+    # TMDb / IMDB IDs — <uniqueid> is the standard Kodi/Jellyfin tag
     tmdb_id = info.get("tmdb_id") or info.get("tmdb")
-    if tmdb_id:
-        _add_text(root, "tmdbid", str(tmdb_id))
     imdb_id = info.get("imdb_id") or info.get("imdb")
     if imdb_id:
+        _add_uniqueid(root, "imdb", str(imdb_id), default=True)
         _add_text(root, "imdbid", str(imdb_id))
+    if tmdb_id:
+        _add_uniqueid(root, "tmdb", str(tmdb_id), default=not imdb_id)
+        _add_text(root, "tmdbid", str(tmdb_id))
 
     # Genres
     genre_str = info.get("genre") or info.get("category_name") or ""
@@ -132,11 +177,15 @@ def generate_movie_nfo(info: dict, name: str = "") -> str:
     _add_text(root, "country", info.get("country"))
     _add_text(root, "studio", info.get("studio"))
 
-    # Poster / fanart (URL references for Jellyfin)
+    # Poster / fanart — use <thumb> and <fanart> tags (Jellyfin/Kodi URL format)
     cover = info.get("cover_big") or info.get("cover") or info.get("movie_image") or info.get("stream_icon")
     if cover:
-        art = SubElement(root, "art")
-        _add_text(art, "poster", cover)
+        _add_thumb(root, cover, aspect="poster")
+    backdrop = info.get("backdrop_path") or info.get("backdrop")
+    if backdrop:
+        fanart_el = SubElement(root, "fanart")
+        thumb_el = SubElement(fanart_el, "thumb")
+        thumb_el.text = backdrop
 
     return _xml_prettify(root)
 
@@ -151,21 +200,34 @@ def generate_tvshow_nfo(info: dict, name: str = "") -> str:
     _add_text(root, "year", year)
     _add_text(root, "plot", info.get("plot") or info.get("description"))
 
+    # Premiered
+    for key in ("releasedate", "releaseDate", "release_date"):
+        rd = str(info.get(key, "")).strip()
+        if rd:
+            _add_text(root, "premiered", rd)
+            break
+
+    # Ratings
     rating_val = info.get("rating") or info.get("rating_5based")
     if rating_val:
         try:
             r = float(rating_val)
             if r > 0:
-                _add_text(root, "rating", str(r))
+                if info.get("rating_5based") and not info.get("rating") and r <= 5:
+                    r = r * 2
+                _add_ratings(root, r)
         except (ValueError, TypeError):
             pass
 
+    # Provider IDs
     tmdb_id = info.get("tmdb_id") or info.get("tmdb")
-    if tmdb_id:
-        _add_text(root, "tmdbid", str(tmdb_id))
     imdb_id = info.get("imdb_id") or info.get("imdb")
     if imdb_id:
+        _add_uniqueid(root, "imdb", str(imdb_id), default=True)
         _add_text(root, "imdbid", str(imdb_id))
+    if tmdb_id:
+        _add_uniqueid(root, "tmdb", str(tmdb_id), default=not imdb_id)
+        _add_text(root, "tmdbid", str(tmdb_id))
 
     genre_str = info.get("genre") or info.get("category_name") or ""
     for genre in re.split(r"[,/]", genre_str):
@@ -181,10 +243,15 @@ def generate_tvshow_nfo(info: dict, name: str = "") -> str:
             name_el = SubElement(actor_el, "name")
             name_el.text = actor_name
 
+    # Poster / fanart
     cover = info.get("cover") or info.get("cover_big") or info.get("stream_icon")
     if cover:
-        art = SubElement(root, "art")
-        _add_text(art, "poster", cover)
+        _add_thumb(root, cover, aspect="poster")
+    backdrop = info.get("backdrop_path") or info.get("backdrop")
+    if backdrop:
+        fanart_el = SubElement(root, "fanart")
+        thumb_el = SubElement(fanart_el, "thumb")
+        thumb_el.text = backdrop
 
     return _xml_prettify(root)
 
@@ -199,16 +266,27 @@ def generate_episode_nfo(item: dict, ep_info: dict | None = None) -> str:
 
     if ep_info:
         _add_text(root, "plot", ep_info.get("plot") or ep_info.get("description"))
-        _add_text(root, "aired", ep_info.get("air_date") or ep_info.get("releasedate"))
+        aired = ep_info.get("air_date") or ep_info.get("releasedate")
+        _add_text(root, "aired", aired)
         rating_val = ep_info.get("rating")
         if rating_val:
             try:
                 r = float(rating_val)
                 if r > 0:
-                    _add_text(root, "rating", str(r))
+                    _add_ratings(root, r)
             except (ValueError, TypeError):
                 pass
         _add_text(root, "runtime", ep_info.get("duration") or ep_info.get("runtime"))
+
+        # Episode thumbnail
+        thumb_url = ep_info.get("movie_image") or ep_info.get("cover_big") or ep_info.get("cover")
+        if thumb_url:
+            _add_thumb(root, thumb_url, aspect="thumb")
+
+    # Provider IDs at the episode level
+    tmdb_id = (ep_info or {}).get("tmdb_id") or item.get("tmdb_id")
+    if tmdb_id:
+        _add_uniqueid(root, "tmdb", str(tmdb_id), default=True)
 
     return _xml_prettify(root)
 
@@ -887,7 +965,8 @@ class CartService:
             f.write(nfo_content)
         logger.info(f"[META] Wrote movie NFO: {nfo_path}")
 
-        # Download poster next to the video file (poster.jpg or <name>-poster.jpg)
+        # Download poster into the movie folder.
+        # Jellyfin expects: <MovieFolder>/poster.jpg  (or <moviefilename>-poster.jpg)
         cover_url = (
             info.get("cover_big")
             or info.get("cover")
@@ -898,7 +977,8 @@ class CartService:
             poster_ext = ".jpg"
             if ".png" in cover_url.lower():
                 poster_ext = ".png"
-            poster_path = os.path.splitext(file_path)[0] + "-poster" + poster_ext
+            movie_dir = os.path.dirname(file_path)
+            poster_path = os.path.join(movie_dir, "poster" + poster_ext)
             if not os.path.exists(poster_path):
                 ok = await download_poster(cover_url, poster_path)
                 if ok:

@@ -492,6 +492,53 @@ class CartService:
     # Path helpers
     # ------------------------------------------------------------------
 
+    async def _enrich_item_name_from_metadata(self, item: dict) -> None:
+        """Fetch metadata from the Xtream API and update the item's name/series_name
+        with the proper title (and year) when available.
+
+        This is called *before* building the download path so that filenames and
+        directories use the canonical metadata name instead of the raw catalogue
+        entry which often contains prefixes, tags or provider-specific labels.
+        """
+        source_id = item.get("source_id", "")
+        content_type = item.get("content_type", "vod")
+
+        try:
+            if content_type == "vod":
+                stream_id = item.get("stream_id", "")
+                info = await self.xtream_service.fetch_vod_info(source_id, stream_id)
+                if info:
+                    meta_title = _str_val(
+                        info.get("name") or info.get("title") or info.get("o_name")
+                    ).strip()
+                    if meta_title:
+                        year = _extract_year(info)
+                        if year and year not in meta_title:
+                            meta_title = f"{meta_title} ({year})"
+                        item["name"] = meta_title
+                        # Store info for later NFO generation to avoid a second API call
+                        item["_vod_info"] = info
+                        logger.info(f"[META] Enriched movie name: '{meta_title}'")
+
+            elif content_type == "series":
+                series_id = item.get("series_id", "")
+                if series_id:
+                    info = await self.xtream_service.fetch_series_info(source_id, series_id)
+                    if info:
+                        meta_title = _str_val(
+                            info.get("name") or info.get("title")
+                        ).strip()
+                        if meta_title:
+                            year = _extract_year(info)
+                            if year and year not in meta_title:
+                                meta_title = f"{meta_title} ({year})"
+                            item["series_name"] = meta_title
+                            # Store for NFO generation
+                            item["_series_info"] = info
+                            logger.info(f"[META] Enriched series name: '{meta_title}'")
+        except Exception as e:
+            logger.debug(f"Could not enrich item name from metadata: {e}")
+
     def build_download_filepath(self, item: dict, ext_override: str | None = None) -> str:
         base_path = self.config_service.get_download_path()
         ext = ext_override or item.get("container_extension", "mp4")
@@ -707,6 +754,10 @@ class CartService:
                 item["error"] = "Could not build upstream URL (source not found)"
                 self.save_cart()
                 continue
+
+            # Enrich item name from upstream metadata (title, year) before
+            # building the file path so directories/filenames are canonical.
+            await self._enrich_item_name_from_metadata(item)
 
             file_path = self.build_download_filepath(item)
             item["file_path"] = file_path
@@ -1023,7 +1074,10 @@ class CartService:
     ) -> None:
         """Fetch VOD info and write movie NFO + poster."""
         stream_id = item.get("stream_id", "")
-        info = await self.xtream_service.fetch_vod_info(source_id, stream_id)
+        # Reuse info cached during name enrichment if available
+        info = item.pop("_vod_info", None)
+        if not info:
+            info = await self.xtream_service.fetch_vod_info(source_id, stream_id)
         if not info:
             logger.debug(f"No VOD info available for stream {stream_id}, skipping NFO")
             return
@@ -1072,32 +1126,33 @@ class CartService:
         tvshow_nfo_path = os.path.join(series_root, "tvshow.nfo")
 
         if not os.path.exists(tvshow_nfo_path):
-            # Fetch series-level info from the Xtream API
+            # Reuse info cached during name enrichment if available
             series_id = item.get("series_id", "")
-            if series_id:
+            series_info = item.pop("_series_info", None)
+            if not series_info and series_id:
                 series_info = await self.xtream_service.fetch_series_info(source_id, series_id)
-                if series_info:
-                    os.makedirs(series_root, exist_ok=True)
-                    tvshow_content = generate_tvshow_nfo(series_info, name=series_name)
-                    with open(tvshow_nfo_path, "w", encoding="utf-8") as f:
-                        f.write(tvshow_content)
-                    logger.info(f"[META] Wrote tvshow NFO: {tvshow_nfo_path}")
+            if series_info:
+                os.makedirs(series_root, exist_ok=True)
+                tvshow_content = generate_tvshow_nfo(series_info, name=series_name)
+                with open(tvshow_nfo_path, "w", encoding="utf-8") as f:
+                    f.write(tvshow_content)
+                logger.info(f"[META] Wrote tvshow NFO: {tvshow_nfo_path}")
 
-                    # Download series poster
-                    cover_url = (
-                        series_info.get("cover")
-                        or series_info.get("cover_big")
-                        or series_info.get("stream_icon")
-                    )
-                    if cover_url:
-                        poster_ext = ".jpg"
-                        if ".png" in cover_url.lower():
-                            poster_ext = ".png"
-                        poster_path = os.path.join(series_root, "poster" + poster_ext)
-                        if not os.path.exists(poster_path):
-                            ok = await download_poster(cover_url, poster_path)
-                            if ok:
-                                logger.info(f"[META] Downloaded series poster: {poster_path}")
+                # Download series poster
+                cover_url = (
+                    series_info.get("cover")
+                    or series_info.get("cover_big")
+                    or series_info.get("stream_icon")
+                )
+                if cover_url:
+                    poster_ext = ".jpg"
+                    if ".png" in cover_url.lower():
+                        poster_ext = ".png"
+                    poster_path = os.path.join(series_root, "poster" + poster_ext)
+                    if not os.path.exists(poster_path):
+                        ok = await download_poster(cover_url, poster_path)
+                        if ok:
+                            logger.info(f"[META] Downloaded series poster: {poster_path}")
 
     # ------------------------------------------------------------------
     # Container metadata embedding (MKV / MP4)

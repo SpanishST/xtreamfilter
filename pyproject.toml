@@ -1,6 +1,6 @@
 [project]
 name = "xtreamfilter"
-version = "0.4.1"
+version = "0.5.0"
 description = "A Docker-based Xtream Codes proxy that filters IPTV content with advanced per-category rules, caching, Telegram notifications, and download support."
 readme = "README.md"
 requires-python = ">=3.13"

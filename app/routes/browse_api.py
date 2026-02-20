@@ -235,6 +235,9 @@ async def api_browse(
                 "rating": rating_val,
                 "content_type": ct,
             }
+            if ct in ("vod", "series"):
+                raw_tmdb = s.get("tmdb_id") or s.get("tmdb")
+                item_data["tmdb_id"] = raw_tmdb if raw_tmdb else None
             if ct == "vod":
                 item_data["container_extension"] = s.get("container_extension", "mp4")
             items.append(item_data)
@@ -252,8 +255,14 @@ async def api_browse(
     else:
         items.sort(key=lambda x: (x["group"].lower(), x["name"].lower()))
 
+    # Group vod/series results always (TMDB-ID first, fuzzy fallback);
+    # also group when browsing a manual/smart category regardless of content type.
+    should_group = bool(category_id) or all(
+        ct in ("vod", "series") for ct in content_types_to_query
+    )
+
     grouped = False
-    if category_id:
+    if should_group:
         grouped_items = group_similar_items(items, threshold=85)
         # Re-sort grouped items by group-level rating/added if sort requested
         if sort_by == "added":

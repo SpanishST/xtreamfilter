@@ -129,53 +129,82 @@ def normalize_name(name: str) -> str:
     return n
 
 
-def group_similar_items(items: list, threshold: int = 85) -> list:
-    """Group items with similar names using fuzzy matching.
+def _normalize_tmdb_id_for_grouping(value) -> str | None:
+    """Return a normalised TMDB ID string (digits only) or None."""
+    if value is None:
+        return None
+    raw = str(value).strip().lower()
+    if raw.startswith("tmdb:"):
+        raw = raw[5:].strip()
+    if raw.isdigit() and raw != "0":
+        return raw
+    return None
 
-    Returns list of group dicts: {name, icon, items, count}.
+
+def group_similar_items(items: list, threshold: int = 85) -> list:
+    """Group items by TMDB ID first, then by fuzzy name similarity as fallback.
+
+    Returns list of group dicts: {name, icon, items, count, rating, added}.
     """
     if not items:
         return []
 
     groups: list[dict] = []
+    # Fast lookup: tmdb_id -> group dict (only for groups that have a TMDB ID)
+    tmdb_index: dict[str, dict] = {}
 
     for item in items:
         item_name = item.get("name", "")
         item_normalized = normalize_name(item_name)
+        item_tmdb = _normalize_tmdb_id_for_grouping(
+            item.get("tmdb_id") or item.get("tmdb")
+        )
 
-        best_group = None
-        best_score = 0
+        matched_group = None
 
-        for group in groups:
-            score = fuzz.token_sort_ratio(item_normalized, group["normalized"])
-            if score >= threshold and score > best_score:
-                best_score = score
-                best_group = group
+        # 1) Try TMDB ID grouping (O(1))
+        if item_tmdb:
+            matched_group = tmdb_index.get(item_tmdb)
 
-        if best_group is not None:
-            best_group["items"].append(item)
-            if len(item_name) < len(best_group["name"]):
-                best_group["name"] = item_name
-            if not best_group["icon"] and item.get("icon"):
-                best_group["icon"] = item["icon"]
+        # 2) Fallback: fuzzy name similarity
+        if matched_group is None:
+            best_score = 0
+            for group in groups:
+                score = fuzz.token_sort_ratio(item_normalized, group["normalized"])
+                if score >= threshold and score > best_score:
+                    best_score = score
+                    matched_group = group
+
+        if matched_group is not None:
+            matched_group["items"].append(item)
+            if len(item_name) < len(matched_group["name"]):
+                matched_group["name"] = item_name
+            if not matched_group["icon"] and item.get("icon"):
+                matched_group["icon"] = item["icon"]
             # Track best rating and newest added date
             item_rating = item.get("rating", 0) or 0
             item_added = item.get("added", 0) or 0
-            if item_rating > best_group["rating"]:
-                best_group["rating"] = item_rating
-            if item_added > best_group["added"]:
-                best_group["added"] = item_added
+            if item_rating > matched_group["rating"]:
+                matched_group["rating"] = item_rating
+            if item_added > matched_group["added"]:
+                matched_group["added"] = item_added
+            # Promote TMDB ID to the group index if the group didn't have one yet
+            if item_tmdb and matched_group.get("tmdb_id") is None:
+                matched_group["tmdb_id"] = item_tmdb
+                tmdb_index[item_tmdb] = matched_group
         else:
-            groups.append(
-                {
-                    "normalized": item_normalized,
-                    "name": item_name,
-                    "icon": item.get("icon", ""),
-                    "items": [item],
-                    "rating": item.get("rating", 0) or 0,
-                    "added": item.get("added", 0) or 0,
-                }
-            )
+            new_group: dict = {
+                "normalized": item_normalized,
+                "name": item_name,
+                "icon": item.get("icon", ""),
+                "items": [item],
+                "rating": item.get("rating", 0) or 0,
+                "added": item.get("added", 0) or 0,
+                "tmdb_id": item_tmdb,
+            }
+            groups.append(new_group)
+            if item_tmdb:
+                tmdb_index[item_tmdb] = new_group
 
     return [
         {

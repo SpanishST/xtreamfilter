@@ -200,7 +200,10 @@ class NotificationService:
             return
         try:
             client = await self.http_client.get_client()
-            groups_with_covers = [g for g in grouped if g.get("cover")]
+            groups_with_covers = [
+                g for g in grouped
+                if g.get("cover") and str(g["cover"]).startswith(("http://", "https://"))
+            ]
 
             if len(groups_with_covers) >= 2:
                 media_items = groups_with_covers[:10]
@@ -211,7 +214,7 @@ class NotificationService:
                         caption = f"🆕 <b>{category_name}</b> - {unique_count} new unique title(s)\n\n"
                         for gr in grouped:
                             line = self._format_grouped_item_line(gr)
-                            if len(caption) + len(line) < 1000:
+                            if len(caption) + len(line) < 1024:
                                 caption += line
                             else:
                                 break

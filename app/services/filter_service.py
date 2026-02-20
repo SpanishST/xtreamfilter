@@ -158,6 +158,13 @@ def group_similar_items(items: list, threshold: int = 85) -> list:
                 best_group["name"] = item_name
             if not best_group["icon"] and item.get("icon"):
                 best_group["icon"] = item["icon"]
+            # Track best rating and newest added date
+            item_rating = item.get("rating", 0) or 0
+            item_added = item.get("added", 0) or 0
+            if item_rating > best_group["rating"]:
+                best_group["rating"] = item_rating
+            if item_added > best_group["added"]:
+                best_group["added"] = item_added
         else:
             groups.append(
                 {
@@ -165,11 +172,20 @@ def group_similar_items(items: list, threshold: int = 85) -> list:
                     "name": item_name,
                     "icon": item.get("icon", ""),
                     "items": [item],
+                    "rating": item.get("rating", 0) or 0,
+                    "added": item.get("added", 0) or 0,
                 }
             )
 
     return [
-        {"name": g["name"], "icon": g["icon"], "items": g["items"], "count": len(g["items"])}
+        {
+            "name": g["name"],
+            "icon": g["icon"],
+            "items": g["items"],
+            "count": len(g["items"]),
+            "rating": g["rating"],
+            "added": g["added"],
+        }
         for g in groups
     ]
 

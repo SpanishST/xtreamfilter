@@ -68,6 +68,8 @@
         .source-badge[data-color="4"] { background: rgba(116, 185, 255, 0.2); color: #74b9ff; }
         .source-badge[data-color="5"] { background: rgba(162, 155, 254, 0.2); color: #a29bfe; }
         .card-date { font-size: 0.7em; color: #666; margin-top: 4px; }
+        .card-rating { font-size: 0.75em; color: #ffa502; display: flex; align-items: center; gap: 3px; }
+        .card-rating .star { color: #ffa502; }
         .card-categories { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
         .card-cat-badge { font-size: 0.65em; padding: 2px 6px; border-radius: 3px; background: rgba(46, 213, 115, 0.2); color: #2ed573; }
         .add-category-btn { position: absolute; top: 10px; right: 10px; width: 36px; height: 36px; border-radius: 50%; background: rgba(0, 0, 0, 0.6); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.2em; transition: all 0.2s; color: rgba(255, 255, 255, 0.7); }
@@ -304,6 +306,52 @@
                         <input type="checkbox" id="use-source-filters-browse" style="width: 18px; height: 18px;">
                         <span style="white-space: nowrap;">Apply source filter rules</span>
                     </label>
+                </div>
+            </div>
+            <div class="controls-row" id="sort-filter-row" style="margin-top: 12px; display: none;">
+                <div class="control-group">
+                    <label>Sort By</label>
+                    <select id="sort-by" onchange="currentPage=1;applyFilters()">
+                        <option value="">Default</option>
+                        <option value="name">Name</option>
+                        <option value="added">Added Date</option>
+                        <option value="rating">Rating</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label>Order</label>
+                    <select id="sort-order" onchange="currentPage=1;applyFilters()">
+                        <option value="desc">Descending</option>
+                        <option value="asc">Ascending</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label>Min Rating</label>
+                    <select id="min-rating" onchange="currentPage=1;applyFilters()">
+                        <option value="0">Any</option>
+                        <option value="1">1+</option>
+                        <option value="2">2+</option>
+                        <option value="3">3+</option>
+                        <option value="4">4+</option>
+                        <option value="5">5+</option>
+                        <option value="6">6+</option>
+                        <option value="7">7+</option>
+                        <option value="8">8+</option>
+                        <option value="9">9+</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label>Added Within</label>
+                    <select id="max-added-days" onchange="currentPage=1;applyFilters()">
+                        <option value="0">Any time</option>
+                        <option value="1">Last 24h</option>
+                        <option value="7">Last 7 days</option>
+                        <option value="14">Last 14 days</option>
+                        <option value="30">Last 30 days</option>
+                        <option value="90">Last 3 months</option>
+                        <option value="180">Last 6 months</option>
+                        <option value="365">Last year</option>
+                    </select>
                 </div>
             </div>
         </div>
@@ -1224,8 +1272,10 @@
             } else {
                 selectedCategoryId = categoryId;
             }
-            const controlsBar = document.getElementById('controls-bar');
-            controlsBar.style.display = selectedCategoryId ? 'none' : 'block';
+            // Hide main controls row in category view, but keep sort/filter visible
+            document.querySelector('#controls-bar > .controls-row:first-child').style.display = selectedCategoryId ? 'none' : 'flex';
+            document.getElementById('sort-filter-row').style.display = selectedCategoryId ? 'flex' : ((contentType === 'vod' || contentType === 'series') ? 'flex' : 'none');
+            document.getElementById('controls-bar').style.display = 'block';
             renderBrowseNav();
             currentPage = 1;
             applyFilters();
@@ -1236,6 +1286,9 @@
             document.querySelectorAll('.type-pill').forEach(pill => {
                 pill.classList.toggle('active', pill.dataset.type === type);
             });
+            // Show sort/filter row for vod and series only
+            const sortFilterRow = document.getElementById('sort-filter-row');
+            sortFilterRow.style.display = (type === 'vod' || type === 'series') ? 'flex' : 'none';
             currentPage = 1;
             // Don't auto-search - user will click Search button
         }
@@ -1274,6 +1327,11 @@
             pagination.style.display = 'none';
 
             try {
+                const sortBy = document.getElementById('sort-by').value;
+                const sortOrder = document.getElementById('sort-order').value;
+                const minRating = document.getElementById('min-rating').value;
+                const maxAddedDays = document.getElementById('max-added-days').value;
+
                 let url;
                 if (selectedCategoryId) {
                     // Category view: don't send type — API returns all types
@@ -1285,6 +1343,10 @@
                     if (group) url += '&group=' + encodeURIComponent(group);
                     if (useSourceFilters) url += '&use_source_filters=true';
                 }
+                if (sortBy) url += '&sort_by=' + sortBy;
+                if (sortOrder !== 'desc') url += '&sort_order=' + sortOrder;
+                if (minRating !== '0') url += '&min_rating=' + minRating;
+                if (maxAddedDays !== '0') url += '&max_added_days=' + maxAddedDays;
 
                 const response = await fetch(url, { signal });
                 const data = await response.json();
@@ -1394,6 +1456,7 @@
                 '<div class="card-meta">' +
                 '<span class="source-badge" data-color="' + (sourceIndex % 5 || 5) + '">' + escapeHtml(sourceName) + '</span>' +
                 (item.group ? '<span class="card-group">' + escapeHtml(item.group) + '</span>' : '') +
+                (item.rating ? '<span class="card-rating"><span class="star">★</span> ' + item.rating.toFixed(1) + '</span>' : '') +
                 '</div>' +
                 catBadges +
                 (item.added ? '<div class="card-date">Added: ' + formatDate(item.added) + '</div>' : '') +
@@ -1520,7 +1583,11 @@
                 '<div class="card-title">' + escapeHtml(group.name) + (inCategoryView ? typeBadgeHtml(groupType) : '') +
                 '<span class="sources-badge">' + group.count + ' sources</span>' +
                 '</div>' +
+                '<div class="card-meta">' +
+                (group.rating ? '<span class="card-rating"><span class="star">★</span> ' + group.rating.toFixed(1) + '</span>' : '') +
+                '</div>' +
                 catBadges +
+                (group.added ? '<div class="card-date">Added: ' + formatDate(group.added) + '</div>' : '') +
                 '</div>' +
                 '<div class="sources-toggle" onclick="toggleSourcesList(this, \'' + groupId + '\')">' +
                 '<span class="arrow">▼</span> Show ' + group.count + ' sources' +
@@ -1799,7 +1866,7 @@
             try {
                 await fetch('/api/categories/' + categoryId, { method: 'DELETE' });
                 await loadCategories();
-                if (selectedCategoryId === categoryId) { selectedCategoryId = null; document.getElementById('controls-bar').style.display = 'block'; applyFilters(); }
+                if (selectedCategoryId === categoryId) { selectedCategoryId = null; document.querySelector('#controls-bar > .controls-row:first-child').style.display = 'flex'; document.getElementById('sort-filter-row').style.display = (contentType === 'vod' || contentType === 'series') ? 'flex' : 'none'; applyFilters(); }
                 renderBrowseNav();
                 openManageCategoriesModal();
             } catch (error) { console.error('Error deleting category:', error); }

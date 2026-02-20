@@ -103,6 +103,10 @@ async def api_browse(
     news_days: int = Query(0),
     category_id: str = Query(""),
     use_source_filters: bool = Query(False),
+    sort_by: str = Query(""),
+    sort_order: str = Query("desc"),
+    min_rating: float = Query(0),
+    max_added_days: int = Query(0),
     page: int = Query(1),
     per_page: int = Query(50),
     cfg: ConfigService = Depends(get_config_service),
@@ -197,6 +201,23 @@ async def api_browse(
             if group and grp != group:
                 continue
 
+            # Parse rating
+            raw_rating = s.get("rating", 0)
+            try:
+                rating_val = float(raw_rating) if raw_rating else 0.0
+            except (ValueError, TypeError):
+                rating_val = 0.0
+
+            # Apply rating filter
+            if min_rating > 0 and rating_val < min_rating:
+                continue
+
+            # Apply max_added_days filter
+            if max_added_days > 0:
+                added_cutoff = current_time - (max_added_days * 86400)
+                if added_ts < added_cutoff:
+                    continue
+
             item_data = {
                 "name": name,
                 "group": grp,
@@ -205,6 +226,7 @@ async def api_browse(
                 "source_id": src_id,
                 "source_name": src_name,
                 "added": added_ts,
+                "rating": rating_val,
                 "content_type": ct,
             }
             if ct == "vod":
@@ -212,7 +234,14 @@ async def api_browse(
             items.append(item_data)
 
     total = len(items)
-    if news_days > 0:
+    reverse = sort_order == "desc"
+    if sort_by == "added":
+        items.sort(key=lambda x: x["added"], reverse=reverse)
+    elif sort_by == "rating":
+        items.sort(key=lambda x: x["rating"], reverse=reverse)
+    elif sort_by == "name":
+        items.sort(key=lambda x: x["name"].lower(), reverse=reverse)
+    elif news_days > 0:
         items.sort(key=lambda x: x["added"], reverse=True)
     else:
         items.sort(key=lambda x: (x["group"].lower(), x["name"].lower()))
@@ -220,6 +249,13 @@ async def api_browse(
     grouped = False
     if category_id:
         grouped_items = group_similar_items(items, threshold=85)
+        # Re-sort grouped items by group-level rating/added if sort requested
+        if sort_by == "added":
+            grouped_items.sort(key=lambda x: x["added"], reverse=reverse)
+        elif sort_by == "rating":
+            grouped_items.sort(key=lambda x: x["rating"], reverse=reverse)
+        elif sort_by == "name":
+            grouped_items.sort(key=lambda x: x["name"].lower(), reverse=reverse)
         for gi in grouped_items:
             for sub in gi["items"]:
                 key = (sub.get("content_type", type), sub["id"], sub["source_id"])

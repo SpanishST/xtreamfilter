@@ -1,6 +1,8 @@
 """Browse API routes — channel listing, groups, search, stats, preview."""
 from __future__ import annotations
 
+import asyncio
+import functools
 import time
 from typing import Optional
 
@@ -263,7 +265,10 @@ async def api_browse(
 
     grouped = False
     if should_group:
-        grouped_items = group_similar_items(items, threshold=85)
+        loop = asyncio.get_event_loop()
+        grouped_items = await loop.run_in_executor(
+            None, functools.partial(group_similar_items, items, 85)
+        )
         # Re-sort grouped items by group-level rating/added if sort requested
         if sort_by == "added":
             grouped_items.sort(key=lambda x: x["added"], reverse=reverse)

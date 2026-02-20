@@ -141,8 +141,12 @@ def _normalize_tmdb_id_for_grouping(value) -> str | None:
     return None
 
 
-def group_similar_items(items: list, threshold: int = 85) -> list:
+def group_similar_items(items: list, threshold: int = 85, fuzzy_limit: int = 0) -> list:
     """Group items by TMDB ID first, then by fuzzy name similarity as fallback.
+
+    The fuzzy pass is O(n²) and is skipped when the number of items without a
+    TMDB ID exceeds *fuzzy_limit* to avoid blocking the event loop on large
+    result sets.  Grouping by TMDB ID is always performed regardless of size.
 
     Returns list of group dicts: {name, icon, items, count, rating, added}.
     """
@@ -152,6 +156,13 @@ def group_similar_items(items: list, threshold: int = 85) -> list:
     groups: list[dict] = []
     # Fast lookup: tmdb_id -> group dict (only for groups that have a TMDB ID)
     tmdb_index: dict[str, dict] = {}
+
+    # Count items lacking a TMDB ID to decide whether fuzzy is safe
+    without_tmdb = sum(
+        1 for it in items
+        if not _normalize_tmdb_id_for_grouping(it.get("tmdb_id") or it.get("tmdb"))
+    )
+    use_fuzzy = without_tmdb <= fuzzy_limit
 
     for item in items:
         item_name = item.get("name", "")
@@ -166,8 +177,8 @@ def group_similar_items(items: list, threshold: int = 85) -> list:
         if item_tmdb:
             matched_group = tmdb_index.get(item_tmdb)
 
-        # 2) Fallback: fuzzy name similarity
-        if matched_group is None:
+        # 2) Fallback: fuzzy name similarity (only when set is small enough)
+        if matched_group is None and use_fuzzy:
             best_score = 0
             for group in groups:
                 score = fuzz.token_sort_ratio(item_normalized, group["normalized"])

@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 
+from app.database import DB_NAME, db_connect
+
 if TYPE_CHECKING:
     from app.services.config_service import ConfigService
 
@@ -32,8 +34,7 @@ class CacheService:
         self.config_service = config_service
         self.http_client = http_client
         self.data_dir = config_service.data_dir
-        self.api_cache_file = os.path.join(self.data_dir, "api_cache.json")
-        self.progress_file = os.path.join(self.data_dir, "refresh_progress.json")
+        self.db_path = os.path.join(self.data_dir, DB_NAME)
 
         self._api_cache: dict[str, Any] = {
             "sources": {},
@@ -57,24 +58,55 @@ class CacheService:
         self._stream_map_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
-    # Progress file helpers
+    # Progress helpers  (SQLite replaces refresh_progress.json)
     # ------------------------------------------------------------------
 
     def save_refresh_progress(self, progress_data: dict) -> None:
+        conn = db_connect(self.db_path)
         try:
-            os.makedirs(os.path.dirname(self.progress_file), exist_ok=True)
-            with open(self.progress_file, "w") as f:
-                json.dump(progress_data, f)
+            conn.execute(
+                """INSERT OR REPLACE INTO refresh_progress
+                   (id, in_progress, current_source, total_sources,
+                    current_source_name, current_step, percent, started_at)
+                   VALUES (1,?,?,?,?,?,?,?)""",
+                (
+                    int(progress_data.get("in_progress", False)),
+                    progress_data.get("current_source", 0),
+                    progress_data.get("total_sources", 0),
+                    progress_data.get("current_source_name", ""),
+                    progress_data.get("current_step", ""),
+                    progress_data.get("percent", 0),
+                    progress_data.get("started_at"),
+                ),
+            )
+            conn.commit()
         except Exception as e:
             logger.warning(f"Failed to save progress: {e}")
+        finally:
+            conn.close()
 
     def load_refresh_progress(self) -> dict:
+        conn = db_connect(self.db_path)
         try:
-            if os.path.exists(self.progress_file):
-                with open(self.progress_file) as f:
-                    return json.load(f)
+            row = conn.execute(
+                "SELECT in_progress, current_source, total_sources, "
+                "current_source_name, current_step, percent, started_at "
+                "FROM refresh_progress WHERE id = 1"
+            ).fetchone()
+            if row:
+                return {
+                    "in_progress": bool(row["in_progress"]),
+                    "current_source": row["current_source"],
+                    "total_sources": row["total_sources"],
+                    "current_source_name": row["current_source_name"],
+                    "current_step": row["current_step"],
+                    "percent": row["percent"],
+                    "started_at": row["started_at"],
+                }
         except Exception:
             pass
+        finally:
+            conn.close()
         return {
             "in_progress": False,
             "current_source": 0,
@@ -86,45 +118,217 @@ class CacheService:
         }
 
     def clear_refresh_progress(self) -> None:
+        conn = db_connect(self.db_path)
         try:
-            if os.path.exists(self.progress_file):
-                os.remove(self.progress_file)
+            conn.execute(
+                "UPDATE refresh_progress SET in_progress=0, current_step='', percent=0 WHERE id=1"
+            )
+            conn.commit()
         except Exception:
             pass
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
-    # Disk persistence
+    # Disk persistence  (SQLite replaces api_cache.json)
     # ------------------------------------------------------------------
 
     def load_cache_from_disk(self) -> None:
-        if os.path.exists(self.api_cache_file):
-            try:
-                with open(self.api_cache_file) as f:
-                    data = json.load(f)
-                if "sources" not in data and "live_streams" in data:
-                    logger.info("Migrating old cache format to multi-source format")
-                    self._api_cache = {
-                        "sources": {},
-                        "last_refresh": data.get("last_refresh"),
-                        "refresh_in_progress": False,
+        conn = db_connect(self.db_path)
+        try:
+            # Global last_refresh
+            meta_row = conn.execute(
+                "SELECT last_refresh FROM cache_meta WHERE id = 1"
+            ).fetchone()
+            if meta_row:
+                self._api_cache["last_refresh"] = meta_row["last_refresh"]
+
+            # Per-source categories
+            cat_rows = conn.execute(
+                "SELECT source_id, content_type, category_id, category_name, data "
+                "FROM source_categories ORDER BY source_id, content_type"
+            ).fetchall()
+
+            # Per-source streams
+            stream_rows = conn.execute(
+                "SELECT source_id, content_type, stream_id, data "
+                "FROM streams ORDER BY source_id, content_type"
+            ).fetchall()
+
+            sources: dict[str, dict] = {}
+
+            CAT_KEY = {
+                "live": "live_categories",
+                "vod": "vod_categories",
+                "series": "series_categories",
+            }
+            STREAM_KEY = {
+                "live": "live_streams",
+                "vod": "vod_streams",
+                "series": "series",
+            }
+
+            for row in cat_rows:
+                src = row["source_id"]
+                ct = row["content_type"]
+                if src not in sources:
+                    sources[src] = {
+                        "live_categories": [], "vod_categories": [],
+                        "series_categories": [], "live_streams": [],
+                        "vod_streams": [], "series": [], "last_refresh": None,
                     }
-                else:
-                    self._api_cache.update(data)
-                    self._api_cache["refresh_in_progress"] = False
+                key = CAT_KEY.get(ct)
+                if key:
+                    try:
+                        sources[src][key].append(json.loads(row["data"]))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+            for row in stream_rows:
+                src = row["source_id"]
+                ct = row["content_type"]
+                if src not in sources:
+                    sources[src] = {
+                        "live_categories": [], "vod_categories": [],
+                        "series_categories": [], "live_streams": [],
+                        "vod_streams": [], "series": [], "last_refresh": None,
+                    }
+                key = STREAM_KEY.get(ct)
+                if key:
+                    try:
+                        sources[src][key].append(json.loads(row["data"]))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+            # Per-source last_refresh from separate table
+            src_refresh_rows = conn.execute(
+                "SELECT source_id, last_refresh FROM source_last_refresh"
+            ).fetchall()
+            for rr in src_refresh_rows:
+                if rr["source_id"] in sources:
+                    sources[rr["source_id"]]["last_refresh"] = rr["last_refresh"]
+
+            if sources:
+                self._api_cache["sources"] = sources
+                self._api_cache["refresh_in_progress"] = False
                 self._rebuild_stream_source_map_sync()
-                logger.info(f"Loaded cache from disk. Last refresh: {self._api_cache.get('last_refresh', 'Never')}")
-            except Exception as e:
-                logger.error(f"Failed to load cache from disk: {e}")
+                logger.info(
+                    f"Loaded cache from DB. Last refresh: {self._api_cache.get('last_refresh', 'Never')}"
+                )
+            else:
+                logger.info("DB cache is empty — will refresh on first request")
+        except Exception as e:
+            logger.error(f"Failed to load cache from DB: {e}")
+        finally:
+            conn.close()
 
     def save_cache_to_disk(self) -> None:
+        conn = db_connect(self.db_path)
         try:
-            data = {k: v for k, v in self._api_cache.items() if k != "refresh_in_progress"}
-            os.makedirs(os.path.dirname(self.api_cache_file), exist_ok=True)
-            with open(self.api_cache_file, "w") as f:
-                json.dump(data, f)
-            logger.info(f"Cache saved to disk at {datetime.now().isoformat()}")
+            sources = self._api_cache.get("sources", {})
+
+            # Collect all current source IDs so we can prune stale entries
+            active_source_ids = list(sources.keys())
+
+            # Clear stale source data
+            if active_source_ids:
+                placeholders = ",".join("?" * len(active_source_ids))
+                conn.execute(
+                    f"DELETE FROM streams WHERE source_id NOT IN ({placeholders})",
+                    active_source_ids,
+                )
+                conn.execute(
+                    f"DELETE FROM source_categories WHERE source_id NOT IN ({placeholders})",
+                    active_source_ids,
+                )
+                conn.execute(
+                    f"DELETE FROM source_last_refresh WHERE source_id NOT IN ({placeholders})",
+                    active_source_ids,
+                )
+            else:
+                conn.execute("DELETE FROM streams")
+                conn.execute("DELETE FROM source_categories")
+                conn.execute("DELETE FROM source_last_refresh")
+
+            TYPE_MAP: list[tuple[str, str, str]] = [
+                ("live_streams", "live", "stream_id"),
+                ("vod_streams", "vod", "stream_id"),
+                ("series", "series", "series_id"),
+            ]
+            CAT_MAP: list[tuple[str, str]] = [
+                ("live_categories", "live"),
+                ("vod_categories", "vod"),
+                ("series_categories", "series"),
+            ]
+
+            for source_id, src_cache in sources.items():
+                # Categories
+                cat_rows = []
+                for cat_key, ct in CAT_MAP:
+                    for cat in src_cache.get(cat_key, []):
+                        cat_rows.append((
+                            source_id, ct,
+                            str(cat.get("category_id", "")),
+                            cat.get("category_name", ""),
+                            json.dumps(cat),
+                        ))
+                if cat_rows:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO source_categories "
+                        "(source_id, content_type, category_id, category_name, data) "
+                        "VALUES (?,?,?,?,?)",
+                        cat_rows,
+                    )
+
+                # Streams
+                stream_rows = []
+                for list_key, ct, id_field in TYPE_MAP:
+                    for stream in src_cache.get(list_key, []):
+                        sid = str(stream.get(id_field, ""))
+                        if not sid:
+                            continue
+                        added_raw = stream.get("added") or stream.get("last_modified", 0)
+                        try:
+                            added = int(added_raw) if added_raw else 0
+                        except (ValueError, TypeError):
+                            added = 0
+                        stream_rows.append((
+                            source_id, ct, sid,
+                            stream.get("name", ""),
+                            str(stream.get("category_id", "")),
+                            added,
+                            json.dumps(stream),
+                        ))
+                if stream_rows:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO streams "
+                        "(source_id, content_type, stream_id, name, category_id, added, data) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        stream_rows,
+                    )
+
+                # Per-source last_refresh
+                src_last = src_cache.get("last_refresh")
+                if src_last:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO source_last_refresh (source_id, last_refresh) VALUES (?,?)",
+                        (source_id, src_last),
+                    )
+
+            # Global last_refresh
+            global_refresh = self._api_cache.get("last_refresh")
+            if global_refresh:
+                conn.execute(
+                    "INSERT OR REPLACE INTO cache_meta (id, last_refresh) VALUES (1, ?)",
+                    (global_refresh,),
+                )
+
+            conn.commit()
+            logger.info(f"Cache saved to DB at {datetime.now().isoformat()}")
         except Exception as e:
-            logger.error(f"Failed to save cache to disk: {e}")
+            logger.error(f"Failed to save cache to DB: {e}")
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # Stream source map
@@ -492,5 +696,14 @@ class CacheService:
             self._api_cache = {"sources": {}, "last_refresh": None, "refresh_in_progress": False}
         async with self._stream_map_lock:
             self._stream_source_map = {"live": {}, "vod": {}, "series": {}}
-        if os.path.exists(self.api_cache_file):
-            os.remove(self.api_cache_file)
+        conn = db_connect(self.db_path)
+        try:
+            conn.execute("DELETE FROM streams")
+            conn.execute("DELETE FROM source_categories")
+            conn.execute("DELETE FROM source_last_refresh")
+            conn.execute("DELETE FROM cache_meta")
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to clear cache in DB: {e}")
+        finally:
+            conn.close()

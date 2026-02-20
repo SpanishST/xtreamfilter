@@ -6,6 +6,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 
+from app.database import db_connect
+
 from app.dependencies import (
     get_cache_service,
     get_config_service,
@@ -122,14 +124,18 @@ async def api_browse(
     current_time = int(time.time())
     news_cutoff = current_time - (news_days * 86400) if news_days > 0 else 0
 
-    # Build category membership map
-    categories_data = cat_svc.load_categories()
+    # Build category membership map via direct SQL (avoids loading all categories JSON)
     category_membership: dict[tuple, list] = {}
-    for cat in categories_data.get("categories", []):
-        if cat.get("mode") == "manual":
-            for item in cat.get("items", []):
-                key = (item.get("content_type"), str(item.get("id")), item.get("source_id"))
-                category_membership.setdefault(key, []).append(cat.get("id"))
+    _cm_conn = db_connect(cat_svc.db_path)
+    try:
+        for _row in _cm_conn.execute(
+            "SELECT category_id, stream_id, source_id, content_type "
+            "FROM category_manual_items"
+        ).fetchall():
+            _key = (_row["content_type"], _row["stream_id"], _row["source_id"])
+            category_membership.setdefault(_key, []).append(_row["category_id"])
+    finally:
+        _cm_conn.close()
 
     # Determine which content types to query
     cat_data = None

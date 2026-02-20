@@ -73,17 +73,17 @@
         .card-rating .star { color: #ffa502; }
         .card-categories { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
         .card-cat-badge { font-size: 0.65em; padding: 2px 6px; border-radius: 3px; background: rgba(46, 213, 115, 0.2); color: #2ed573; }
-        .add-category-btn { position: absolute; top: 10px; right: 10px; width: 36px; height: 36px; border-radius: 50%; background: rgba(0, 0, 0, 0.6); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.2em; transition: all 0.2s; color: rgba(255, 255, 255, 0.7); }
+        .add-category-btn { position: absolute; top: 10px; right: 10px; width: 36px; height: 36px; border-radius: 50%; background: rgba(0, 0, 0, 0.6); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.2em; transition: all 0.2s; color: rgba(255, 255, 255, 0.7); z-index: 4; }
         .add-category-btn:hover { transform: scale(1.1); background: rgba(0, 0, 0, 0.8); color: #00d4ff; }
         .add-category-btn.has-categories { color: #2ed573; }
-        .category-dropdown { position: absolute; top: 50px; right: 10px; background: rgba(20, 20, 40, 0.98); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 8px; min-width: 200px; z-index: 100; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5); display: none; }
+        .category-dropdown { position: absolute; top: 50px; right: 10px; background: rgba(20, 20, 40, 0.98); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 8px; min-width: 200px; z-index: 200; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5); display: none; }
         .category-dropdown.show { display: block; }
         .category-dropdown-item { padding: 10px 14px; display: flex; align-items: center; gap: 8px; cursor: pointer; transition: background 0.2s; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
         .category-dropdown-item:last-child { border-bottom: none; }
         .category-dropdown-item:hover { background: rgba(255, 255, 255, 0.1); }
         .category-dropdown-item.in-category { color: #2ed573; }
         .category-dropdown-item .cat-check { width: 18px; text-align: center; }
-        .new-badge { position: absolute; top: 10px; left: 10px; background: linear-gradient(135deg, #2ed573, #1abc9c); color: #000; font-size: 0.7em; font-weight: 600; padding: 4px 10px; border-radius: 4px; text-transform: uppercase; }
+        .new-badge { position: absolute; top: 10px; left: 10px; background: linear-gradient(135deg, #2ed573, #1abc9c); color: #000; font-size: 0.7em; font-weight: 600; padding: 4px 10px; border-radius: 4px; text-transform: uppercase; z-index: 4; }
         .pagination { display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 30px; flex-wrap: wrap; }
         .pagination button { padding: 10px 20px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; color: #fff; cursor: pointer; transition: all 0.2s; }
         .pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -165,13 +165,16 @@
         .source-row .source-row-cat-btn:hover { color: #00d4ff; background: rgba(0, 0, 0, 0.6); }
         .source-row .source-row-cat-btn.has-categories { color: #2ed573; }
         /* Cart button styles */
-        .add-cart-btn { position: absolute; top: 10px; right: 52px; width: 36px; height: 36px; border-radius: 50%; background: rgba(0, 0, 0, 0.6); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.1em; transition: all 0.2s; color: rgba(255, 255, 255, 0.7); }
+        .add-cart-btn { position: absolute; top: 10px; right: 52px; width: 36px; height: 36px; border-radius: 50%; background: rgba(0, 0, 0, 0.6); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.1em; transition: all 0.2s; color: rgba(255, 255, 255, 0.7); z-index: 4; }
         .add-cart-btn:hover { transform: scale(1.1); background: rgba(0, 0, 0, 0.8); color: #2ed573; }
         .source-row .source-row-cart-btn { width: 24px; height: 24px; border-radius: 50%; background: rgba(0, 0, 0, 0.4); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.85em; color: rgba(255, 255, 255, 0.5); transition: all 0.2s; }
         .source-row .source-row-cart-btn:hover { color: #2ed573; background: rgba(0, 0, 0, 0.6); }
         /* Monitor button */
-        .add-monitor-btn { position: absolute; top: 10px; right: 94px; width: 36px; height: 36px; border-radius: 50%; background: rgba(0, 0, 0, 0.6); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.1em; transition: all 0.2s; color: rgba(255, 255, 255, 0.7); }
+        .add-monitor-btn { position: absolute; top: 10px; right: 94px; width: 36px; height: 36px; border-radius: 50%; background: rgba(0, 0, 0, 0.6); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.1em; transition: all 0.2s; color: rgba(255, 255, 255, 0.7); z-index: 4; }
         .add-monitor-btn:hover { transform: scale(1.1); background: rgba(0, 0, 0, 0.8); color: #a29bfe; }
+        /* Shift buttons right when the + category button is absent (grouped cards) */
+        .no-cat-btn .add-cart-btn { right: 10px; }
+        .no-cat-btn .add-monitor-btn { right: 52px; }
         /* Monitor modal form */
         .monitor-form .form-group { margin-bottom: 15px; }
         .monitor-form .form-group label { display: block; margin-bottom: 6px; color: #888; font-size: 0.9em; }
@@ -1575,7 +1578,7 @@
                 groupPlayBtn = '<button class="play-btn" onclick="event.stopPropagation(); openPlayer(\'' + escapeAttr(groupType) + '\', \'' + escapeAttr(firstItem.source_id) + '\', \'' + escapeAttr(firstItem.id) + '\', \'' + jsEscape(group.name) + '\', \'' + escapeAttr(group.icon || '') + '\', \'' + escapeAttr(firstItem.group || '') + '\', \'' + escapeAttr(groupPlayExt) + '\')" title="Play in browser">▶</button>';
             }
 
-            return '<div class="content-card">' +
+            return '<div class="content-card no-cat-btn">' +
                 (isNew ? '<div class="new-badge">NEW</div>' : '') +
                 groupCartBtn +
                 groupMonitorBtn +

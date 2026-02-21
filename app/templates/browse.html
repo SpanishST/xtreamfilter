@@ -2489,6 +2489,13 @@
                 }
             }
 
+            const confirmBtn = document.querySelector('#monitor-modal .modal-footer .btn-primary');
+            const originalBtnHtml = confirmBtn ? confirmBtn.innerHTML : null;
+            if (confirmBtn) {
+                confirmBtn.disabled = true;
+                confirmBtn.innerHTML = '<span class="loading-spinner" style="width:16px;height:16px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px;"></span>Saving…';
+            }
+
             try {
                 const resp = await fetch('/api/monitor', {
                     method: 'POST',
@@ -2517,9 +2524,11 @@
                     closeMonitorModal();
                 } else {
                     showToast(data.error || 'Failed to add monitoring', 'error');
+                    if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.innerHTML = originalBtnHtml; }
                 }
             } catch (e) {
                 showToast('Error adding monitoring', 'error');
+                if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.innerHTML = originalBtnHtml; }
             }
         }
     </script>

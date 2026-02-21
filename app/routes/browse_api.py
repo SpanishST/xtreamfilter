@@ -119,6 +119,13 @@ async def api_browse(
 ):
     per_page = min(per_page, 200)
     search_lower = search.lower()
+
+    # Handle tmdb:XXXX search prefix
+    tmdb_search_id: Optional[str] = None
+    if search_lower.startswith("tmdb:"):
+        tmdb_search_id = search_lower[5:].strip()
+        search_lower = ""  # disable name search
+
     sources_config = {}
     if use_source_filters:
         sources_config = {s.get("id"): s for s in cfg.config.get("sources", [])}
@@ -204,7 +211,11 @@ async def api_browse(
                 continue
             if category_id and (item_id, src_id) not in cat_item_set:
                 continue
-            if search_lower and search_lower not in name.lower() and search_lower not in grp.lower():
+            if tmdb_search_id is not None:
+                raw_tmdb = s.get("tmdb_id") or s.get("tmdb")
+                if not raw_tmdb or str(raw_tmdb).strip() != tmdb_search_id:
+                    continue
+            elif search_lower and search_lower not in name.lower() and search_lower not in grp.lower():
                 continue
             if group and grp != group:
                 continue

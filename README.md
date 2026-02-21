@@ -7,6 +7,8 @@ A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Se
 
 ## Screenshots
 
+![Browse content Interface](app3.png)
+
 ![Configuration Interface](app1.png)
 
 ![Filter Management](app2.png)

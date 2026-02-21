@@ -22,6 +22,18 @@ async def get_cart(cart: CartService = Depends(get_cart_service)):
     return {"items": cart._download_cart}
 
 
+@router.get("/api/cart/active-source-downloads")
+async def active_source_downloads(cart: CartService = Depends(get_cart_service)):
+    """Return the number of active (downloading) items per source_id."""
+    result: dict[str, int] = {}
+    for item in cart._download_cart:
+        if item.get("status") == "downloading":
+            sid = item.get("source_id", "")
+            if sid:
+                result[sid] = result.get(sid, 0) + 1
+    return result
+
+
 @router.post("/api/cart")
 async def add_to_cart(
     request: Request,
@@ -239,6 +251,7 @@ async def cart_status(cart: CartService = Depends(get_cart_service)):
             "bytes_downloaded": cart._download_progress.get("bytes_downloaded", 0),
             "total_bytes": cart._download_progress.get("total_bytes", 0),
             "speed": cart._download_progress.get("speed", 0),
+            "eta_speed": cart._download_progress.get("eta_speed", 0),
             "paused": cart._download_progress.get("paused", False),
             "pause_remaining": cart._download_progress.get("pause_remaining", 0),
         }

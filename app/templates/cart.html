@@ -326,8 +326,10 @@
         let cartItems = [];
         let pollInterval = null;
         let isRunning = false;
+        let sourcesMap = {}; // source_id -> source name
 
         document.addEventListener('DOMContentLoaded', function() {
+            loadSources();
             loadDownloadPath();
             loadThrottleSettings();
             loadNotifySettings();
@@ -335,6 +337,15 @@
             loadCart();
             startPolling();
         });
+
+        async function loadSources() {
+            try {
+                const resp = await fetch('/api/sources');
+                const data = await resp.json();
+                sourcesMap = {};
+                (data.sources || []).forEach(s => { sourcesMap[s.id] = s.name; });
+            } catch (_) {}
+        }
 
         async function loadDownloadPath() {
             try {
@@ -647,6 +658,9 @@
                 if (item.group) {
                     metaInfo += '<div class="item-meta">' + escapeHtml(item.group) + '</div>';
                 }
+                if (item.source_id && sourcesMap[item.source_id]) {
+                    metaInfo += '<div class="item-meta" style="color:#00d4ff;opacity:0.8;">📡 ' + escapeHtml(sourcesMap[item.source_id]) + '</div>';
+                }
 
                 const typeBadge = '<span class="type-badge ' + item.content_type + '">' +
                     (item.content_type === 'vod' ? 'Film' : 'Series') + '</span>';
@@ -721,11 +735,12 @@
                     document.getElementById('current-percent').textContent = data.current.progress + '%';
                     document.getElementById('current-progress-bar').style.width = data.current.progress + '%';
 
-                    // Compute ETA
+                    // Compute ETA using the smoothed 20 s window speed to avoid burst artefacts
                     const etaEl = document.getElementById('current-eta');
-                    if (data.current.speed > 0 && data.current.total_bytes > 0) {
+                    const etaSpeed = data.current.eta_speed || data.current.speed;
+                    if (etaSpeed > 0 && data.current.total_bytes > 0) {
                         const remaining = data.current.total_bytes - data.current.bytes_downloaded;
-                        const etaSec = Math.max(0, Math.round(remaining / data.current.speed));
+                        const etaSec = Math.max(0, Math.round(remaining / etaSpeed));
                         etaEl.textContent = 'ETA ' + formatDuration(etaSec);
                     } else if (data.current.total_bytes > 0) {
                         etaEl.textContent = 'ETA --:--';

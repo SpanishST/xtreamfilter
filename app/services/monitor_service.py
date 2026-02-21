@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import uuid
@@ -11,6 +10,7 @@ from typing import TYPE_CHECKING, Optional
 
 from rapidfuzz import fuzz
 
+from app.database import DB_NAME, db_connect
 from app.services.filter_service import normalize_name
 
 if TYPE_CHECKING:
@@ -72,7 +72,7 @@ class MonitorService:
         self.cart_service = cart_service
         self.notification_service = notification_service
         self.xtream_service = xtream_service
-        self.monitored_file = os.path.join(config_service.data_dir, "monitored_series.json")
+        self.db_path = os.path.join(config_service.data_dir, DB_NAME)
         self._monitored_series: list[dict] = []
 
     # ------------------------------------------------------------------
@@ -92,17 +92,157 @@ class MonitorService:
     # ------------------------------------------------------------------
 
     def load_monitored(self) -> list:
-        if os.path.exists(self.monitored_file):
-            try:
-                with open(self.monitored_file) as f:
-                    data = json.load(f)
-                self._monitored_series = data.get("series", [])
-                self._backfill_external_ids()
-                return self._monitored_series
-            except (OSError, json.JSONDecodeError) as e:
-                logger.error(f"Error loading monitored series: {e}")
-        self._monitored_series = []
-        return self._monitored_series
+        conn = db_connect(self.db_path)
+        try:
+            series_rows = conn.execute(
+                "SELECT id, series_name, series_id, source_id, source_name, "
+                "source_category, cover, scope, season_filter, action, enabled, "
+                "created_at, last_checked, last_new_count, tmdb_id, imdb_id "
+                "FROM monitored_series ORDER BY created_at"
+            ).fetchall()
+
+            result: list[dict] = []
+            for sr in series_rows:
+                sid = sr["id"]
+
+                known = conn.execute(
+                    "SELECT stream_id, source_id, season, episode_num "
+                    "FROM known_episodes WHERE series_id = ?",
+                    (sid,),
+                ).fetchall()
+
+                downloaded = conn.execute(
+                    "SELECT stream_id, source_id, season, episode_num "
+                    "FROM downloaded_episodes WHERE series_id = ?",
+                    (sid,),
+                ).fetchall()
+
+                result.append({
+                    "id": sid,
+                    "series_name": sr["series_name"],
+                    "series_id": sr["series_id"],
+                    "source_id": sr["source_id"],
+                    "source_name": sr["source_name"],
+                    "source_category": sr["source_category"],
+                    "cover": sr["cover"],
+                    "scope": sr["scope"],
+                    "season_filter": sr["season_filter"],
+                    "action": sr["action"],
+                    "enabled": bool(sr["enabled"]),
+                    "created_at": sr["created_at"],
+                    "last_checked": sr["last_checked"],
+                    "last_new_count": sr["last_new_count"],
+                    "tmdb_id": sr["tmdb_id"],
+                    "imdb_id": sr["imdb_id"],
+                    "known_episodes": [
+                        {"stream_id": k["stream_id"], "source_id": k["source_id"],
+                         "season": k["season"], "episode_num": k["episode_num"]}
+                        for k in known
+                    ],
+                    "downloaded_episodes": [
+                        {"stream_id": d["stream_id"], "source_id": d["source_id"],
+                         "season": d["season"], "episode_num": d["episode_num"]}
+                        for d in downloaded
+                    ],
+                })
+
+            self._monitored_series = result
+            self._backfill_external_ids()
+            return self._monitored_series
+        except Exception as e:
+            logger.error(f"Error loading monitored series from DB: {e}")
+            self._monitored_series = []
+            return self._monitored_series
+        finally:
+            conn.close()
+
+    def save_monitored(self, items: list | None = None) -> None:
+        if items is not None:
+            self._monitored_series = items
+        conn = db_connect(self.db_path)
+        try:
+            for entry in self._monitored_series:
+                entry_id = entry.get("id")
+                if not entry_id:
+                    continue
+
+                conn.execute(
+                    """INSERT OR REPLACE INTO monitored_series
+                       (id, series_name, series_id, source_id, source_name,
+                        source_category, cover, scope, season_filter, action,
+                        enabled, created_at, last_checked, last_new_count,
+                        tmdb_id, imdb_id)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        entry_id,
+                        entry.get("series_name", ""),
+                        entry.get("series_id", ""),
+                        entry.get("source_id"),
+                        entry.get("source_name"),
+                        entry.get("source_category"),
+                        entry.get("cover"),
+                        entry.get("scope", "all"),
+                        entry.get("season_filter"),
+                        entry.get("action", "notify"),
+                        int(entry.get("enabled", True)),
+                        entry.get("created_at"),
+                        entry.get("last_checked"),
+                        int(entry.get("last_new_count", 0)),
+                        entry.get("tmdb_id"),
+                        entry.get("imdb_id"),
+                    ),
+                )
+
+                # Replace episodes (simpler than diffing)
+                conn.execute(
+                    "DELETE FROM known_episodes WHERE series_id = ?", (entry_id,)
+                )
+                conn.execute(
+                    "DELETE FROM downloaded_episodes WHERE series_id = ?", (entry_id,)
+                )
+
+                known_rows = [
+                    (entry_id, ep.get("stream_id", ""), ep.get("source_id", ""),
+                     ep.get("season"), ep.get("episode_num"))
+                    for ep in entry.get("known_episodes", [])
+                ]
+                if known_rows:
+                    conn.executemany(
+                        "INSERT OR IGNORE INTO known_episodes "
+                        "(series_id, stream_id, source_id, season, episode_num) "
+                        "VALUES (?,?,?,?,?)",
+                        known_rows,
+                    )
+
+                dl_rows = [
+                    (entry_id, ep.get("stream_id", ""), ep.get("source_id", ""),
+                     ep.get("season"), ep.get("episode_num"))
+                    for ep in entry.get("downloaded_episodes", [])
+                ]
+                if dl_rows:
+                    conn.executemany(
+                        "INSERT OR IGNORE INTO downloaded_episodes "
+                        "(series_id, stream_id, source_id, season, episode_num) "
+                        "VALUES (?,?,?,?,?)",
+                        dl_rows,
+                    )
+
+            # Remove deleted entries
+            current_ids = [e["id"] for e in self._monitored_series if e.get("id")]
+            if current_ids:
+                placeholders = ",".join("?" * len(current_ids))
+                conn.execute(
+                    f"DELETE FROM monitored_series WHERE id NOT IN ({placeholders})",
+                    current_ids,
+                )
+            else:
+                conn.execute("DELETE FROM monitored_series")
+
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Error saving monitored series to DB: {e}")
+        finally:
+            conn.close()
 
     def _backfill_external_ids(self) -> None:
         """Backfill tmdb/imdb ids for legacy monitored entries when possible."""
@@ -140,13 +280,6 @@ class MonitorService:
                 changed = True
         if changed:
             self.save_monitored()
-
-    def save_monitored(self, items: list | None = None) -> None:
-        if items is not None:
-            self._monitored_series = items
-        os.makedirs(os.path.dirname(self.monitored_file), exist_ok=True)
-        with open(self.monitored_file, "w") as f:
-            json.dump({"series": self._monitored_series}, f, indent=2)
 
     # ------------------------------------------------------------------
     # Cross-source lookup

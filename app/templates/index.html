@@ -1365,6 +1365,11 @@
                                 <div class="hint">Prefix added to all group names from this source</div>
                             </div>
                             <div class="form-group">
+                                <label>Max Connections</label>
+                                <input type="number" id="edit-source-max-connections" value="${source.max_connections ?? 1}" min="1" style="max-width: 120px;">
+                                <div class="hint">Maximum simultaneous streams allowed by this provider. Used to warn when playing while downloading.</div>
+                            </div>
+                            <div class="form-group">
                                 <label>Dedicated Route <span style="color: #ff6b6b;">*</span></label>
                                 <input type="text" id="edit-source-route" value="${source.route || ''}" placeholder="e.g., smarters" required>
                                 <div class="hint">This source will be available at /<em>route</em>/player_api.php</div>
@@ -1405,7 +1410,8 @@
                 password: document.getElementById('edit-source-password').value,
                 prefix: document.getElementById('edit-source-prefix').value,
                 route: route,
-                enabled: document.getElementById('edit-source-enabled').checked
+                enabled: document.getElementById('edit-source-enabled').checked,
+                max_connections: parseInt(document.getElementById('edit-source-max-connections').value, 10) || 1
             };
             
             fetch(`/api/sources/${sourceId}`, {

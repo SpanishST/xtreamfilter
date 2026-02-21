@@ -1,10 +1,10 @@
 """Unit tests for app.services.monitor_service and monitor diff logic."""
 
-import json
 import os
 import tempfile
 
 from app.services.monitor_service import _safe_episode_num
+from app.database import DB_NAME, db_connect, init_db
 
 
 # ---------------------------------------------------------------
@@ -13,32 +13,32 @@ from app.services.monitor_service import _safe_episode_num
 
 class TestMonitoredDataModel:
 
-    def test_load_monitored_empty(self):
-        """Loading from non-existent file returns empty list."""
+    def _make_ms(self, d):
+        """Build a minimal MonitorService pointing at temp dir's SQLite DB."""
         from app.services.config_service import ConfigService
         from app.services.monitor_service import MonitorService
 
+        cfg = ConfigService(d)
+        cfg.load()
+        db_path = os.path.join(d, DB_NAME)
+        init_db(db_path)
+        ms = MonitorService.__new__(MonitorService)
+        ms._cfg = cfg
+        ms.db_path = db_path
+        ms._monitored_series = []
+        return ms
+
+    def test_load_monitored_empty(self):
+        """Loading from empty DB returns empty list."""
         with tempfile.TemporaryDirectory() as d:
-            cfg = ConfigService(d)
-            cfg.load()
-            ms = MonitorService.__new__(MonitorService)
-            ms._cfg = cfg
-            ms.monitored_file = os.path.join(d, "monitored_series.json")
-            ms._monitored_series = []
+            ms = self._make_ms(d)
             ms.load_monitored()
             assert ms._monitored_series == []
 
     def test_save_and_load_monitored(self):
-        """Round-trip save + load."""
-        from app.services.config_service import ConfigService
-        from app.services.monitor_service import MonitorService
-
+        """Round-trip save + load via SQLite."""
         with tempfile.TemporaryDirectory() as d:
-            cfg = ConfigService(d)
-            cfg.load()
-            ms = MonitorService.__new__(MonitorService)
-            ms._cfg = cfg
-            ms.monitored_file = os.path.join(d, "monitored_series.json")
+            ms = self._make_ms(d)
             ms._monitored_series = [
                 {
                     "id": "test-uuid-1",
@@ -62,12 +62,16 @@ class TestMonitoredDataModel:
             ]
             ms.save_monitored()
 
-            # Verify file
-            path = os.path.join(d, "monitored_series.json")
-            with open(path) as f:
-                saved = json.load(f)
-            assert len(saved["series"]) == 1
-            assert saved["series"][0]["series_name"] == "Breaking Bad"
+            # Verify row exists in DB
+            conn = db_connect(ms.db_path)
+            try:
+                rows = conn.execute("SELECT * FROM monitored_series").fetchall()
+                assert len(rows) == 1
+                assert rows[0]["series_name"] == "Breaking Bad"
+                ep_rows = conn.execute("SELECT * FROM known_episodes").fetchall()
+                assert len(ep_rows) == 2
+            finally:
+                conn.close()
 
             # Reload
             ms._monitored_series = []
@@ -75,22 +79,32 @@ class TestMonitoredDataModel:
             assert len(ms._monitored_series) == 1
             assert ms._monitored_series[0]["id"] == "test-uuid-1"
 
-    def test_load_monitored_corrupt_file(self):
-        from app.services.config_service import ConfigService
-        from app.services.monitor_service import MonitorService
-
+    def test_load_monitored_multiple_series(self):
+        """Multiple monitored series round-trip correctly."""
         with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "monitored_series.json")
-            with open(path, "w") as f:
-                f.write("not valid json{{{")
-            cfg = ConfigService(d)
-            cfg.load()
-            ms = MonitorService.__new__(MonitorService)
-            ms._cfg = cfg
-            ms.monitored_file = os.path.join(d, "monitored_series.json")
+            ms = self._make_ms(d)
+            ms._monitored_series = [
+                {
+                    "id": "uuid-a", "series_name": "Show A", "series_id": "1",
+                    "source_id": "src1", "source_name": "S1", "cover": "",
+                    "scope": "new_only", "season_filter": None, "enabled": True,
+                    "known_episodes": [], "downloaded_episodes": [],
+                    "created_at": "2026-01-01T00:00:00", "last_checked": None, "last_new_count": 0,
+                },
+                {
+                    "id": "uuid-b", "series_name": "Show B", "series_id": "2",
+                    "source_id": "src2", "source_name": "S2", "cover": "",
+                    "scope": "all", "season_filter": "1", "enabled": False,
+                    "known_episodes": [], "downloaded_episodes": [],
+                    "created_at": "2026-01-02T00:00:00", "last_checked": None, "last_new_count": 0,
+                },
+            ]
+            ms.save_monitored()
             ms._monitored_series = []
             ms.load_monitored()
-            assert ms._monitored_series == []
+            assert len(ms._monitored_series) == 2
+            names = {s["series_name"] for s in ms._monitored_series}
+            assert names == {"Show A", "Show B"}
 
 
 # ---------------------------------------------------------------

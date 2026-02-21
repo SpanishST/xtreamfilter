@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -12,6 +11,7 @@ from typing import TYPE_CHECKING
 import httpx
 from lxml import etree
 
+from app.database import DB_NAME, db_connect
 from app.services.filter_service import matches_filter
 
 if TYPE_CHECKING:
@@ -42,6 +42,7 @@ class EpgService:
         self.http_client = http_client
         self.cache_service = cache_service
         self.epg_cache_file = os.path.join(config_service.data_dir, "epg_cache.xml")
+        self.db_path = os.path.join(config_service.data_dir, DB_NAME)
 
         self._epg_cache: dict = {
             "data": None,
@@ -74,11 +75,16 @@ class EpgService:
             try:
                 with open(self.epg_cache_file, "rb") as f:
                     self._epg_cache["data"] = f.read()
-                meta_file = self.epg_cache_file + ".meta"
-                if os.path.exists(meta_file):
-                    with open(meta_file) as f:
-                        meta = json.load(f)
-                        self._epg_cache["last_refresh"] = meta.get("last_refresh")
+                # Load timestamp from SQLite (replaces .meta sidecar)
+                conn = db_connect(self.db_path)
+                try:
+                    row = conn.execute(
+                        "SELECT last_refresh FROM epg_meta WHERE id = 1"
+                    ).fetchone()
+                    if row:
+                        self._epg_cache["last_refresh"] = row["last_refresh"]
+                finally:
+                    conn.close()
                 logger.info(
                     f"Loaded EPG cache from disk. Last refresh: {self._epg_cache.get('last_refresh', 'Unknown')}"
                 )
@@ -91,9 +97,16 @@ class EpgService:
                 os.makedirs(os.path.dirname(self.epg_cache_file), exist_ok=True)
                 with open(self.epg_cache_file, "wb") as f:
                     f.write(self._epg_cache["data"])
-                meta_file = self.epg_cache_file + ".meta"
-                with open(meta_file, "w") as f:
-                    json.dump({"last_refresh": self._epg_cache.get("last_refresh")}, f)
+                # Persist timestamp to SQLite (replaces .meta sidecar)
+                conn = db_connect(self.db_path)
+                try:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO epg_meta (id, last_refresh) VALUES (1, ?)",
+                        (self._epg_cache.get("last_refresh"),),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
                 logger.info(f"EPG cache saved to disk at {datetime.now().isoformat()}")
         except Exception as e:
             logger.error(f"Failed to save EPG cache to disk: {e}")

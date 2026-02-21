@@ -18,6 +18,8 @@ from xml.dom import minidom
 
 import httpx
 
+from app.database import DB_NAME, db_connect
+
 from app.models.xtream import PLAYER_PROFILES
 
 if TYPE_CHECKING:
@@ -388,7 +390,7 @@ class CartService:
         self.http_client = http_client
         self.notification_service = notification_service
         self.xtream_service = xtream_service
-        self.cart_file = os.path.join(config_service.data_dir, "cart.json")
+        self.db_path = os.path.join(config_service.data_dir, DB_NAME)
 
         self._download_cart: list[dict] = []
         self._download_task: Optional[asyncio.Task] = None
@@ -398,6 +400,7 @@ class CartService:
             "bytes_downloaded": 0,
             "total_bytes": 0,
             "speed": 0,
+            "eta_speed": 0,
             "paused": False,
             "pause_remaining": 0,
         }
@@ -470,23 +473,102 @@ class CartService:
     # ------------------------------------------------------------------
 
     def load_cart(self) -> list:
-        if os.path.exists(self.cart_file):
-            try:
-                with open(self.cart_file) as f:
-                    data = json.load(f)
-                self._download_cart = data.get("items", [])
-                return self._download_cart
-            except (OSError, json.JSONDecodeError) as e:
-                logger.error(f"Error loading cart: {e}")
-        self._download_cart = []
-        return self._download_cart
+        conn = db_connect(self.db_path)
+        try:
+            rows = conn.execute(
+                "SELECT id, stream_id, source_id, content_type, name, series_name, "
+                "season, episode_num, episode_title, icon, grp, container_extension, "
+                "added_at, status, progress, error, file_path, file_size, temp_path "
+                "FROM cart_items ORDER BY added_at"
+            ).fetchall()
+            self._download_cart = [
+                {
+                    "id": r["id"],
+                    "stream_id": r["stream_id"],
+                    "source_id": r["source_id"],
+                    "content_type": r["content_type"],
+                    "name": r["name"],
+                    "series_name": r["series_name"],
+                    "season": r["season"],
+                    "episode_num": r["episode_num"],
+                    "episode_title": r["episode_title"],
+                    "icon": r["icon"],
+                    "group": r["grp"],
+                    "container_extension": r["container_extension"],
+                    "added_at": r["added_at"],
+                    "status": r["status"],
+                    "progress": r["progress"],
+                    "error": r["error"],
+                    "file_path": r["file_path"],
+                    "file_size": r["file_size"],
+                    "temp_path": r["temp_path"],
+                }
+                for r in rows
+            ]
+            return self._download_cart
+        except Exception as e:
+            logger.error(f"Error loading cart from DB: {e}")
+            self._download_cart = []
+            return self._download_cart
+        finally:
+            conn.close()
 
     def save_cart(self, items: list | None = None) -> None:
         if items is not None:
             self._download_cart = items
-        os.makedirs(os.path.dirname(self.cart_file), exist_ok=True)
-        with open(self.cart_file, "w") as f:
-            json.dump({"items": self._download_cart}, f, indent=2)
+        conn = db_connect(self.db_path)
+        try:
+            # Full sync: delete removed items, upsert the rest
+            current_ids = [i["id"] for i in self._download_cart if i.get("id")]
+            if current_ids:
+                placeholders = ",".join("?" * len(current_ids))
+                conn.execute(
+                    f"DELETE FROM cart_items WHERE id NOT IN ({placeholders})",
+                    current_ids,
+                )
+            else:
+                conn.execute("DELETE FROM cart_items")
+
+            rows = [
+                (
+                    i["id"],
+                    i.get("stream_id", ""),
+                    i.get("source_id", ""),
+                    i.get("content_type", ""),
+                    i.get("name"),
+                    i.get("series_name"),
+                    i.get("season"),
+                    i.get("episode_num"),
+                    i.get("episode_title"),
+                    i.get("icon"),
+                    i.get("group"),
+                    i.get("container_extension"),
+                    i.get("added_at"),
+                    i.get("status", "queued"),
+                    float(i.get("progress", 0)),
+                    i.get("error"),
+                    i.get("file_path"),
+                    i.get("file_size"),
+                    i.get("temp_path"),
+                )
+                for i in self._download_cart
+                if i.get("id")
+            ]
+            if rows:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO cart_items "
+                    "(id, stream_id, source_id, content_type, name, series_name, "
+                    "season, episode_num, episode_title, icon, grp, "
+                    "container_extension, added_at, status, progress, "
+                    "error, file_path, file_size, temp_path) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    rows,
+                )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Error saving cart to DB: {e}")
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # Path helpers
@@ -741,6 +823,7 @@ class CartService:
                 "bytes_downloaded": 0,
                 "total_bytes": 0,
                 "speed": 0,
+                "eta_speed": 0,
                 "paused": False,
                 "pause_remaining": 0,
             }
@@ -789,6 +872,8 @@ class CartService:
                 last_save = time.time()
                 speed_window_duration = 3.0
                 speed_samples: list[tuple[float, int]] = []
+                eta_speed_window_duration = 20.0
+                eta_speed_samples: list[tuple[float, int]] = []
                 window_start = time.time()
                 window_bytes = 0
                 last_pause_time = time.time()
@@ -884,8 +969,20 @@ class CartService:
                                         else:
                                             elapsed = now_speed - start_time
                                             speed = downloaded / elapsed if elapsed > 0 else 0
+                                        # ETA speed — longer window for stable remaining-time estimate
+                                        eta_speed_samples.append((now_speed, downloaded))
+                                        eta_cutoff = now_speed - eta_speed_window_duration
+                                        while eta_speed_samples and eta_speed_samples[0][0] < eta_cutoff:
+                                            eta_speed_samples.pop(0)
+                                        if len(eta_speed_samples) >= 2:
+                                            eta_dt = eta_speed_samples[-1][0] - eta_speed_samples[0][0]
+                                            eta_db = eta_speed_samples[-1][1] - eta_speed_samples[0][1]
+                                            eta_speed = eta_db / eta_dt if eta_dt > 0 else speed
+                                        else:
+                                            eta_speed = speed
                                         self._download_progress["bytes_downloaded"] = downloaded
                                         self._download_progress["speed"] = speed
+                                        self._download_progress["eta_speed"] = eta_speed
                                         item["progress"] = round((downloaded / total) * 100, 1) if total > 0 else 0
                                         if time.time() - last_save > 5:
                                             self.save_cart()

@@ -1,10 +1,14 @@
 """Browse API routes — channel listing, groups, search, stats, preview."""
 from __future__ import annotations
 
+import asyncio
+import functools
 import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
+
+from app.database import db_connect
 
 from app.dependencies import (
     get_cache_service,
@@ -103,6 +107,10 @@ async def api_browse(
     news_days: int = Query(0),
     category_id: str = Query(""),
     use_source_filters: bool = Query(False),
+    sort_by: str = Query(""),
+    sort_order: str = Query("desc"),
+    min_rating: float = Query(0),
+    max_added_days: int = Query(0),
     page: int = Query(1),
     per_page: int = Query(50),
     cfg: ConfigService = Depends(get_config_service),
@@ -118,14 +126,18 @@ async def api_browse(
     current_time = int(time.time())
     news_cutoff = current_time - (news_days * 86400) if news_days > 0 else 0
 
-    # Build category membership map
-    categories_data = cat_svc.load_categories()
+    # Build category membership map via direct SQL (avoids loading all categories JSON)
     category_membership: dict[tuple, list] = {}
-    for cat in categories_data.get("categories", []):
-        if cat.get("mode") == "manual":
-            for item in cat.get("items", []):
-                key = (item.get("content_type"), str(item.get("id")), item.get("source_id"))
-                category_membership.setdefault(key, []).append(cat.get("id"))
+    _cm_conn = db_connect(cat_svc.db_path)
+    try:
+        for _row in _cm_conn.execute(
+            "SELECT category_id, stream_id, source_id, content_type "
+            "FROM category_manual_items"
+        ).fetchall():
+            _key = (_row["content_type"], _row["stream_id"], _row["source_id"])
+            category_membership.setdefault(_key, []).append(_row["category_id"])
+    finally:
+        _cm_conn.close()
 
     # Determine which content types to query
     cat_data = None
@@ -197,6 +209,23 @@ async def api_browse(
             if group and grp != group:
                 continue
 
+            # Parse rating
+            raw_rating = s.get("rating", 0)
+            try:
+                rating_val = float(raw_rating) if raw_rating else 0.0
+            except (ValueError, TypeError):
+                rating_val = 0.0
+
+            # Apply rating filter
+            if min_rating > 0 and rating_val < min_rating:
+                continue
+
+            # Apply max_added_days filter
+            if max_added_days > 0:
+                added_cutoff = current_time - (max_added_days * 86400)
+                if added_ts < added_cutoff:
+                    continue
+
             item_data = {
                 "name": name,
                 "group": grp,
@@ -205,21 +234,48 @@ async def api_browse(
                 "source_id": src_id,
                 "source_name": src_name,
                 "added": added_ts,
+                "rating": rating_val,
                 "content_type": ct,
             }
+            if ct in ("vod", "series"):
+                raw_tmdb = s.get("tmdb_id") or s.get("tmdb")
+                item_data["tmdb_id"] = raw_tmdb if raw_tmdb else None
             if ct == "vod":
                 item_data["container_extension"] = s.get("container_extension", "mp4")
             items.append(item_data)
 
     total = len(items)
-    if news_days > 0:
+    reverse = sort_order == "desc"
+    if sort_by == "added":
+        items.sort(key=lambda x: x["added"], reverse=reverse)
+    elif sort_by == "rating":
+        items.sort(key=lambda x: x["rating"], reverse=reverse)
+    elif sort_by == "name":
+        items.sort(key=lambda x: x["name"].lower(), reverse=reverse)
+    elif news_days > 0:
         items.sort(key=lambda x: x["added"], reverse=True)
     else:
         items.sort(key=lambda x: (x["group"].lower(), x["name"].lower()))
 
+    # Group vod/series results always (TMDB-ID first, fuzzy fallback);
+    # also group when browsing a manual/smart category regardless of content type.
+    should_group = bool(category_id) or all(
+        ct in ("vod", "series") for ct in content_types_to_query
+    )
+
     grouped = False
-    if category_id:
-        grouped_items = group_similar_items(items, threshold=85)
+    if should_group:
+        loop = asyncio.get_event_loop()
+        grouped_items = await loop.run_in_executor(
+            None, functools.partial(group_similar_items, items, 85)
+        )
+        # Re-sort grouped items by group-level rating/added if sort requested
+        if sort_by == "added":
+            grouped_items.sort(key=lambda x: x["added"], reverse=reverse)
+        elif sort_by == "rating":
+            grouped_items.sort(key=lambda x: x["rating"], reverse=reverse)
+        elif sort_by == "name":
+            grouped_items.sort(key=lambda x: x["name"].lower(), reverse=reverse)
         for gi in grouped_items:
             for sub in gi["items"]:
                 key = (sub.get("content_type", type), sub["id"], sub["source_id"])

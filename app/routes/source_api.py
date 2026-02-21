@@ -35,6 +35,7 @@ async def add_source(request: Request, cfg: ConfigService = Depends(get_config_s
         "password": data.get("password", ""),
         "enabled": data.get("enabled", True),
         "prefix": data.get("prefix", ""),
+        "max_connections": int(data.get("max_connections", 1)),
         "filters": data.get("filters", dict(_DEFAULT_FILTERS)),
     }
     config.setdefault("sources", []).append(new_source)
@@ -61,6 +62,8 @@ async def update_source(source_id: str, request: Request, cfg: ConfigService = D
                     source[key] = data[key]
             if "prefix" in data:
                 source["prefix"] = data["prefix"] if data["prefix"] else ""
+            if "max_connections" in data:
+                source["max_connections"] = max(1, int(data["max_connections"]))
             config["sources"][i] = source
             cfg.save()
             return {"status": "ok", "source": source, "sources": config["sources"]}

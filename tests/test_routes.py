@@ -16,6 +16,7 @@ from app.services.category_service import CategoryService
 from app.services.cart_service import CartService
 from app.services.monitor_service import MonitorService
 from app.services.m3u_service import M3uService
+from app.database import DB_NAME, init_db
 
 
 def _build_app(data_dir: str):
@@ -30,6 +31,7 @@ def _build_app(data_dir: str):
 
     cfg = ConfigService(data_dir)
     cfg.load()
+    init_db(os.path.join(data_dir, DB_NAME))
     http = HttpClientService()
     cache = CacheService(cfg, http)
     epg_svc = EpgService(cfg, http, cache)

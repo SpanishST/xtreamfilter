@@ -23,6 +23,9 @@ from app.services.cart_service import CartService
 from app.services.monitor_service import MonitorService
 from app.services.m3u_service import M3uService
 
+from app.database import DB_NAME, init_db
+from app.migrate import run_migration_if_needed
+
 from app.routes import (
     ui,
     filter_api,
@@ -127,6 +130,11 @@ async def lifespan(app: FastAPI):
     """Initialise all services, attach them to app.state, start background work."""
     data_dir = os.environ.get("DATA_DIR", "/data" if os.path.exists("/data") else "./data")
     os.makedirs(data_dir, exist_ok=True)
+
+    # --- initialise SQLite DB (schema + JSON migration) ---
+    db_path = os.path.join(data_dir, DB_NAME)
+    init_db(db_path)
+    run_migration_if_needed(db_path, data_dir)
 
     # --- instantiate services ---
     cfg = ConfigService(data_dir)

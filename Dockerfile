@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg mkvtooln
 
 # Install dependencies
 # FastAPI with uvicorn for async support, httpx for async HTTP client, lxml for XML parsing
-RUN pip install --no-cache-dir fastapi uvicorn[standard] httpx jinja2 python-multipart lxml rapidfuzz packaging
+RUN pip install --no-cache-dir fastapi uvicorn[standard] httpx jinja2 python-multipart lxml rapidfuzz packaging aiosqlite
 
 # Copy application as a proper Python package
 COPY app/ /src/app/

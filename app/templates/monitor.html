@@ -94,6 +94,19 @@
         .check-status { display: flex; align-items: center; gap: 10px; font-size: 0.85em; color: #888; }
         .check-status .checking { color: #00d4ff; }
 
+        /* Edit modal form styles */
+        .edit-form .form-group { margin-bottom: 18px; }
+        .edit-form .form-group label { display: block; font-size: 0.85em; color: #888; margin-bottom: 8px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
+        .edit-form .scope-options { display: flex; gap: 8px; flex-wrap: wrap; }
+        .edit-form .scope-option { padding: 10px 16px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; cursor: pointer; text-align: center; transition: all 0.2s; flex: 1; min-width: 90px; }
+        .edit-form .scope-option:hover { background: rgba(255, 255, 255, 0.05); }
+        .edit-form .scope-option.selected { background: rgba(0, 212, 255, 0.15); border-color: #00d4ff; color: #00d4ff; }
+        .edit-form .scope-option .scope-title { font-weight: 600; font-size: 0.95em; margin-bottom: 3px; }
+        .edit-form .scope-option .scope-desc { font-size: 0.75em; color: #888; }
+        .edit-form .scope-option.selected .scope-desc { color: rgba(0,212,255,0.7); }
+        .edit-form input[type=number] { width: 100%; padding: 8px 12px; background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; color: #e0e0e0; font-size: 0.95em; outline: none; }
+        .edit-form input[type=number]:focus { border-color: #00d4ff; }
+
         @media (max-width: 768px) {
             .series-grid { grid-template-columns: 1fr; }
             .series-card { flex-direction: column; }
@@ -137,6 +150,60 @@
                 <div class="empty-state-icon">📡</div>
                 <h3>No monitored series</h3>
                 <p>Go to the <a href="/browse" style="color: #00d4ff;">Browse page</a>, find a series, and click the 📡 button to start monitoring.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Modal -->
+    <div class="modal-overlay" id="edit-modal">
+        <div class="modal" style="max-width: 480px;">
+            <div class="modal-header">
+                <h2 id="edit-modal-title">✏️ Edit Monitoring</h2>
+                <button class="modal-close" onclick="closeEditModal()">&times;</button>
+            </div>
+            <div class="modal-body edit-form">
+                <div class="form-group">
+                    <label>What to monitor</label>
+                    <div class="scope-options">
+                        <div class="scope-option" data-scope="new_only" onclick="selectEditScope('new_only')">
+                            <div class="scope-title">New Only</div>
+                            <div class="scope-desc">Future episodes</div>
+                        </div>
+                        <div class="scope-option" data-scope="all" onclick="selectEditScope('all')">
+                            <div class="scope-title">All</div>
+                            <div class="scope-desc">Every episode</div>
+                        </div>
+                        <div class="scope-option" data-scope="season" onclick="selectEditScope('season')">
+                            <div class="scope-title">Season</div>
+                            <div class="scope-desc">One season</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group" id="edit-season-group" style="display:none;">
+                    <label>Season number</label>
+                    <input type="number" id="edit-season-input" min="1" placeholder="e.g. 2">
+                </div>
+                <div class="form-group">
+                    <label>Action</label>
+                    <div class="scope-options">
+                        <div class="scope-option" data-action="both" onclick="selectEditAction('both')">
+                            <div class="scope-title">Both</div>
+                            <div class="scope-desc">Download + Notify</div>
+                        </div>
+                        <div class="scope-option" data-action="download" onclick="selectEditAction('download')">
+                            <div class="scope-title">Download</div>
+                            <div class="scope-desc">Download only</div>
+                        </div>
+                        <div class="scope-option" data-action="notify" onclick="selectEditAction('notify')">
+                            <div class="scope-title">Notify</div>
+                            <div class="scope-desc">Telegram only</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeEditModal()">Cancel</button>
+                <button class="btn btn-primary" id="edit-save-btn" onclick="saveEdit()">💾 Save</button>
             </div>
         </div>
     </div>
@@ -244,6 +311,7 @@
                     '<span class="toggle-slider"></span>' +
                     '</label>' +
                     '<button class="btn btn-secondary btn-small" onclick="previewEpisodes(\'' + entry.id + '\', \'' + escapeAttr(entry.series_name) + '\')">👁 Preview</button>' +
+                    '<button class="btn btn-secondary btn-small" onclick="openEditModal(\'' + entry.id + '\')">✏️ Edit</button>' +
                     '<button class="btn btn-danger btn-small" onclick="deleteMonitored(\'' + entry.id + '\', \'' + escapeAttr(entry.series_name) + '\')">🗑</button>' +
                     '</div>' +
                     '</div>' +
@@ -301,6 +369,88 @@
                 showToast('Error triggering check', 'error');
                 btn.disabled = false;
                 status.style.display = 'none';
+            }
+        }
+
+        let _editModalId = null;
+
+        function openEditModal(id) {
+            const entry = monitoredSeries.find(e => e.id === id);
+            if (!entry) return;
+            _editModalId = id;
+            document.getElementById('edit-modal-title').textContent = '✏️ Edit: ' + entry.series_name;
+
+            // Set scope
+            document.querySelectorAll('#edit-modal .scope-option[data-scope]').forEach(o => {
+                o.classList.toggle('selected', o.dataset.scope === (entry.scope || 'new_only'));
+            });
+            document.getElementById('edit-season-group').style.display = entry.scope === 'season' ? 'block' : 'none';
+            document.getElementById('edit-season-input').value = entry.season_filter || '';
+
+            // Set action
+            document.querySelectorAll('#edit-modal .scope-option[data-action]').forEach(o => {
+                o.classList.toggle('selected', o.dataset.action === (entry.action || 'both'));
+            });
+
+            document.getElementById('edit-modal').classList.add('show');
+        }
+
+        function closeEditModal() {
+            document.getElementById('edit-modal').classList.remove('show');
+            _editModalId = null;
+        }
+
+        function selectEditScope(scope) {
+            document.querySelectorAll('#edit-modal .scope-option[data-scope]').forEach(o => {
+                o.classList.toggle('selected', o.dataset.scope === scope);
+            });
+            document.getElementById('edit-season-group').style.display = scope === 'season' ? 'block' : 'none';
+        }
+
+        function selectEditAction(action) {
+            document.querySelectorAll('#edit-modal .scope-option[data-action]').forEach(o => {
+                o.classList.toggle('selected', o.dataset.action === action);
+            });
+        }
+
+        async function saveEdit() {
+            if (!_editModalId) return;
+            const scopeEl = document.querySelector('#edit-modal .scope-option[data-scope].selected');
+            const actionEl = document.querySelector('#edit-modal .scope-option[data-action].selected');
+            const scope = scopeEl ? scopeEl.dataset.scope : 'new_only';
+            const action = actionEl ? actionEl.dataset.action : 'both';
+            const seasonFilter = scope === 'season' ? document.getElementById('edit-season-input').value.trim() : null;
+
+            if (scope === 'season' && !seasonFilter) {
+                showToast('Please enter a season number', 'error');
+                return;
+            }
+
+            const saveBtn = document.getElementById('edit-save-btn');
+            const origHtml = saveBtn.innerHTML;
+            saveBtn.disabled = true;
+            saveBtn.innerHTML = '<span class="loading-spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px;"></span>Saving…';
+
+            try {
+                const resp = await fetch('/api/monitor/' + _editModalId, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ scope, season_filter: seasonFilter, action })
+                });
+                if (resp.ok) {
+                    showToast('Monitoring updated', 'success');
+                    closeEditModal();
+                    await loadMonitored();
+                } else {
+                    const d = await resp.json();
+                    showToast(d.error || 'Failed to save', 'error');
+                    saveBtn.disabled = false;
+                    saveBtn.innerHTML = origHtml;
+                }
+            } catch (e) {
+                showToast('Error saving', 'error');
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = origHtml;
             }
         }
 

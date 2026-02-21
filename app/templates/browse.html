@@ -83,7 +83,7 @@
         .category-dropdown-item:hover { background: rgba(255, 255, 255, 0.1); }
         .category-dropdown-item.in-category { color: #2ed573; }
         .category-dropdown-item .cat-check { width: 18px; text-align: center; }
-        .new-badge { position: absolute; top: 10px; left: 44px; background: linear-gradient(135deg, #2ed573, #1abc9c); color: #000; font-size: 0.7em; font-weight: 600; padding: 4px 10px; border-radius: 4px; text-transform: uppercase; z-index: 4; }
+        .new-badge { position: absolute; top: 10px; left: 10px; background: linear-gradient(135deg, #2ed573, #1abc9c); color: #000; font-size: 0.7em; font-weight: 600; padding: 4px 10px; border-radius: 4px; text-transform: uppercase; z-index: 4; }
         .pagination { display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 30px; flex-wrap: wrap; }
         .pagination button { padding: 10px 20px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; color: #fff; cursor: pointer; transition: all 0.2s; }
         .pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -242,9 +242,11 @@
         .player-epg-next .player-epg-label { background: rgba(255,255,255,0.08); color: #888; }
         .player-footer { padding: 8px 16px; background: rgba(0,0,0,0.4); display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
         .player-footer .btn { padding: 6px 12px; font-size: 0.8em; }
-        .play-btn { position: absolute; top: 4px; left: 4px; background: rgba(0,0,0,0.7); border: none; color: #fff; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; font-size: 0.9em; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.2s; z-index: 3; }
-        .content-card:hover .play-btn { opacity: 1; }
-        .play-btn:hover { background: rgba(0,212,255,0.8); transform: scale(1.1); }
+        .play-btn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(0.8); background: rgba(0,0,0,0.65); border: 2px solid rgba(255,255,255,0.7); color: #fff; width: 64px; height: 64px; border-radius: 50%; cursor: pointer; font-size: 1.6em; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.2s, transform 0.2s, background 0.2s; z-index: 3; padding-left: 4px; }
+        .content-card:hover .play-btn { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        .play-btn:hover { background: rgba(0,212,255,0.75); border-color: #00d4ff; transform: translate(-50%, -50%) scale(1.1); }
+        .tmdb-link { display: inline-flex; align-items: center; gap: 3px; font-size: 0.68em; font-weight: 600; color: #01b4e4; background: rgba(1, 180, 228, 0.12); border: 1px solid rgba(1, 180, 228, 0.3); border-radius: 4px; padding: 2px 6px; text-decoration: none; line-height: 1.3; transition: background 0.2s, border-color 0.2s; }
+        .tmdb-link:hover { background: rgba(1, 180, 228, 0.28); border-color: #01b4e4; color: #01b4e4; }
         .episode-play-btn { background: rgba(0,212,255,0.12); border: 1px solid rgba(0,212,255,0.3); color: #00d4ff; cursor: pointer; font-size: 1.05em; padding: 4px 10px; border-radius: 6px; transition: all 0.2s; flex-shrink: 0; }
         .episode-play-btn:hover { background: rgba(0,212,255,0.3); border-color: #00d4ff; transform: scale(1.05); }
         /* Custom VOD seek bar for transcoded streams */
@@ -1411,6 +1413,18 @@
             return '<span class="type-badge type-badge-' + ct + '">' + (typeLabels[ct] || ct) + '</span>';
         }
 
+        function parseTmdbId(raw) {
+            if (!raw) return null;
+            const s = String(raw).trim();
+            return s.startsWith('tmdb:') ? s.slice(5) : s || null;
+        }
+        function tmdbUrl(contentType, rawId) {
+            const id = parseTmdbId(rawId);
+            if (!id) return null;
+            const path = contentType === 'vod' ? 'movie' : 'tv';
+            return 'https://www.themoviedb.org/' + path + '/' + id;
+        }
+
         function renderSingleCard(item) {
             const itemType = item.content_type || contentType;
             const posterClass = itemType === 'live' ? 'card-poster-placeholder live' : 'card-poster-placeholder';
@@ -1440,6 +1454,9 @@
                 ? '<button class="add-monitor-btn" onclick="openMonitorModal(event, \'' + escapeAttr(item.source_id) + '\', \'' + escapeAttr(item.id) + '\', \'' + jsEscape(item.name) + '\', \'' + escapeAttr(item.icon || '') + '\', \'' + escapeAttr(item.source_name || '') + '\')" title="Monitor this series">📡</button>'
                 : '';
 
+            const tmdbHref = tmdbUrl(itemType, item.tmdb_id);
+            const tmdbLink = tmdbHref ? '<a class="tmdb-link" href="' + tmdbHref + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="View on TMDB">TMDB ↗</a>' : '';
+
             const playExt = item.container_extension || (itemType === 'live' ? 'ts' : 'mp4');
             const playBtn = (itemType === 'series')
                 ? '<button class="play-btn" onclick="event.stopPropagation(); _handleCartAdd(\'' + escapeAttr(item.source_id) + '\', \'' + escapeAttr(item.id) + '\', \'series\', \'' + jsEscape(item.name) + '\', \'' + escapeAttr(item.icon || '') + '\', \'' + escapeAttr(item.group || '') + '\', null, \'' + escapeAttr(playExt) + '\')" title="Browse episodes">▶</button>'
@@ -1453,15 +1470,16 @@
                 monitorBtn +
                 '<button class="add-category-btn' + (hasCats ? ' has-categories' : '') + '" onclick="toggleCategoryDropdown(event, \'' + item.source_id + '\', \'' + item.id + '\', \'' + itemType + '\')">+</button>' +
                 '<div class="category-dropdown" id="cat-dropdown-' + item.source_id + '-' + item.id + '"></div>' +
-                playBtn +
                 '<div class="card-poster-wrap">' +
                 posterHtml +
+                playBtn +
                 '<div class="card-info">' +
                 '<div class="card-title">' + escapeHtml(item.name) + (inCategoryView ? typeBadgeHtml(itemType) : '') + '</div>' +
                 '<div class="card-meta">' +
                 '<span class="source-badge" data-color="' + (sourceIndex % 5 || 5) + '">' + escapeHtml(sourceName) + '</span>' +
                 (item.group ? '<span class="card-group">' + escapeHtml(item.group) + '</span>' : '') +
                 (item.rating ? '<span class="card-rating"><span class="star">★</span> ' + item.rating.toFixed(1) + '</span>' : '') +
+                tmdbLink +
                 '</div>' +
                 catBadges +
                 (item.added ? '<div class="card-date">Added: ' + formatDate(item.added) + '</div>' : '') +
@@ -1578,19 +1596,23 @@
                 groupPlayBtn = '<button class="play-btn" onclick="event.stopPropagation(); openPlayer(\'' + escapeAttr(groupType) + '\', \'' + escapeAttr(firstItem.source_id) + '\', \'' + escapeAttr(firstItem.id) + '\', \'' + jsEscape(group.name) + '\', \'' + escapeAttr(group.icon || '') + '\', \'' + escapeAttr(firstItem.group || '') + '\', \'' + escapeAttr(groupPlayExt) + '\')" title="Play in browser">▶</button>';
             }
 
+            const groupTmdbHref = tmdbUrl(groupType, group.tmdb_id);
+            const groupTmdbLink = groupTmdbHref ? '<a class="tmdb-link" href="' + groupTmdbHref + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="View on TMDB">TMDB ↗</a>' : '';
+
             return '<div class="content-card no-cat-btn">' +
                 (isNew ? '<div class="new-badge">NEW</div>' : '') +
                 groupCartBtn +
                 groupMonitorBtn +
-                groupPlayBtn +
                 '<div class="card-poster-wrap">' +
                 posterHtml +
+                groupPlayBtn +
                 '<div class="card-info">' +
                 '<div class="card-title">' + escapeHtml(group.name) + (inCategoryView ? typeBadgeHtml(groupType) : '') +
                 '<span class="sources-badge">' + group.count + ' sources</span>' +
                 '</div>' +
                 '<div class="card-meta">' +
                 (group.rating ? '<span class="card-rating"><span class="star">★</span> ' + group.rating.toFixed(1) + '</span>' : '') +
+                groupTmdbLink +
                 '</div>' +
                 catBadges +
                 (group.added ? '<div class="card-date">Added: ' + formatDate(group.added) + '</div>' : '') +

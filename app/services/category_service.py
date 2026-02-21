@@ -175,7 +175,7 @@ class CategoryService:
                 cat_id, cat.get("name", ""), cat.get("icon", "📁"),
                 cat.get("mode", "manual"),
                 json.dumps(cat.get("content_types", ["live", "vod", "series"])),
-                cat.get("pattern_logic", "or"),
+                cat.get("pattern_logic", "and"),
                 int(cat.get("use_source_filters", False)),
                 int(cat.get("notify_telegram", False)),
                 int(cat.get("recently_added_days", 0)),
@@ -239,7 +239,7 @@ class CategoryService:
                     "categories": [{
                         "id": "favorites", "name": "Favorite streams", "icon": "❤️",
                         "mode": "manual", "content_types": ["live", "vod", "series"],
-                        "items": [], "patterns": [], "pattern_logic": "or",
+                        "items": [], "patterns": [], "pattern_logic": "and",
                         "use_source_filters": False, "notify_telegram": False,
                         "recently_added_days": 0, "cached_items": [], "last_refresh": None,
                     }]
@@ -479,7 +479,7 @@ class CategoryService:
                 except (json.JSONDecodeError, TypeError):
                     content_types = ["live", "vod", "series"]
 
-                pattern_logic = cat_row["pattern_logic"] or "or"
+                pattern_logic = cat_row["pattern_logic"] or "and"
                 use_source_filters = bool(cat_row["use_source_filters"])
 
                 # Build WHERE clause from patterns

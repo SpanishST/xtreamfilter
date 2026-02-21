@@ -42,7 +42,7 @@ class Category(BaseModel):
     content_types: list[str] = Field(default_factory=lambda: ["live", "vod", "series"])
     items: list[dict] = Field(default_factory=list)  # manual items (raw dicts for flexibility)
     patterns: list[PatternRule] = Field(default_factory=list)
-    pattern_logic: str = "or"  # "or" or "and"
+    pattern_logic: str = "and"  # "or" or "and"
     use_source_filters: bool = False
     notify_telegram: bool = False
     recently_added_days: int = 0

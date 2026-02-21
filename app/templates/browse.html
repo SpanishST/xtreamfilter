@@ -470,7 +470,7 @@
                         <label>Match logic:</label>
                         <select id="pattern-logic">
                             <option value="or">Match ANY pattern (OR)</option>
-                            <option value="and">Match ALL patterns (AND)</option>
+                            <option value="and" selected>Match ALL patterns (AND)</option>
                         </select>
                     </div>
                     <div class="form-group" style="margin-top: 15px;">
@@ -1807,7 +1807,7 @@
                         const isSelected = (cat.content_types || []).includes(cb.dataset.type);
                         cb.classList.toggle('selected', isSelected);
                     });
-                    document.getElementById('pattern-logic').value = cat.pattern_logic || 'or';
+                    document.getElementById('pattern-logic').value = cat.pattern_logic || 'and';
                     document.getElementById('use-source-filters').checked = cat.use_source_filters || false;
                     document.getElementById('notify-telegram').checked = cat.notify_telegram || false;
                     // Handle recently added filter
@@ -1824,7 +1824,7 @@
                 document.querySelectorAll('.content-type-checkbox').forEach(cb => {
                     cb.classList.add('selected');
                 });
-                document.getElementById('pattern-logic').value = 'or';
+                document.getElementById('pattern-logic').value = 'and';
                 document.getElementById('use-source-filters').checked = false;
                 document.getElementById('notify-telegram').checked = false;
                 document.getElementById('use-recently-added').checked = false;

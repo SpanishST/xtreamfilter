@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS custom_categories (
     icon                TEXT NOT NULL DEFAULT '📁',
     mode                TEXT NOT NULL DEFAULT 'manual',
     content_types       TEXT NOT NULL DEFAULT '["live","vod","series"]',
-    pattern_logic       TEXT NOT NULL DEFAULT 'or',
+    pattern_logic       TEXT NOT NULL DEFAULT 'and',
     use_source_filters  INTEGER NOT NULL DEFAULT 0,
     notify_telegram     INTEGER NOT NULL DEFAULT 0,
     recently_added_days INTEGER NOT NULL DEFAULT 0,

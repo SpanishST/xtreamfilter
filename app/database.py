@@ -208,7 +208,8 @@ CREATE TABLE IF NOT EXISTS cart_items (
     error               TEXT,
     file_path           TEXT,
     file_size           INTEGER,
-    temp_path           TEXT
+    temp_path           TEXT,
+    series_id           TEXT
 );
 
 -- ── Monitored series ──────────────────────────────────────────────────────
@@ -276,7 +277,24 @@ def init_db(db_path: str) -> None:
     conn = db_connect(db_path)
     try:
         conn.executescript(_SCHEMA)
+        # Idempotent column additions for databases that pre-date the column.
+        _apply_column_upgrades(conn)
         conn.commit()
         logger.info(f"Database initialised at {db_path}")
     finally:
         conn.close()
+
+
+_COLUMN_UPGRADES: list[tuple[str, str, str]] = [
+    # (table, column, definition)
+    ("cart_items", "series_id", "TEXT"),
+]
+
+
+def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
+    """Add columns that were introduced after initial schema creation."""
+    for table, column, definition in _COLUMN_UPGRADES:
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            logger.info(f"Schema upgrade: added {table}.{column}")

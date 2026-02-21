@@ -71,7 +71,10 @@ async def add_to_cart(
                 "source_id": source_id,
                 "content_type": "series",
                 "name": ep.get("title", "") or f"Episode {ep['episode_num']}",
-                "series_name": ep.get("series_name", series_name),
+                # Prefer the caller-supplied series_name (display/user name) over
+                # the stream's series_name which may contain provider-specific tags.
+                "series_name": series_name or ep.get("series_name", ""),
+                "series_id": series_id,
                 "season": ep["season"],
                 "episode_num": ep.get("episode_num", 0),
                 "episode_title": ep.get("title", ""),
@@ -104,6 +107,7 @@ async def add_to_cart(
             "content_type": content_type,
             "name": data.get("name", ""),
             "series_name": data.get("series_name"),
+            "series_id": data.get("series_id"),
             "season": data.get("season"),
             "episode_num": data.get("episode_num"),
             "episode_title": data.get("episode_title"),

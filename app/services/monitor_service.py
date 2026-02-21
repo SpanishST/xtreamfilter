@@ -490,7 +490,9 @@ class MonitorService:
                 "source_id": used_source_id,
                 "content_type": "series",
                 "name": ep.get("title", "") or f"Episode {ep.get('episode_num', '')}",
-                "series_name": ep.get("series_name", series_name),
+                # Always use the monitor entry's series_name (user-provided/display name)
+                # rather than the stream's series_name which may contain provider tags.
+                "series_name": series_name or ep.get("series_name", ""),
                 "series_id": used_series_id or series_id,
                 "season": ep.get("season"),
                 "episode_num": ep.get("episode_num", 0),
@@ -632,7 +634,7 @@ class MonitorService:
                 "source_id": used_source_id,
                 "content_type": "series",
                 "name": ep.get("title", "") or f"Episode {ep.get('episode_num', '')}",
-                "series_name": ep.get("series_name", series_name),
+                "series_name": series_name or ep.get("series_name", ""),
                 "series_id": used_series_id or series_id,
                 "season": ep.get("season"),
                 "episode_num": ep.get("episode_num", 0),

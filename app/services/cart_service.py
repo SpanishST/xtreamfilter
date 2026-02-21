@@ -477,7 +477,7 @@ class CartService:
         try:
             rows = conn.execute(
                 "SELECT id, stream_id, source_id, content_type, name, series_name, "
-                "season, episode_num, episode_title, icon, grp, container_extension, "
+                "series_id, season, episode_num, episode_title, icon, grp, container_extension, "
                 "added_at, status, progress, error, file_path, file_size, temp_path "
                 "FROM cart_items ORDER BY added_at"
             ).fetchall()
@@ -489,6 +489,7 @@ class CartService:
                     "content_type": r["content_type"],
                     "name": r["name"],
                     "series_name": r["series_name"],
+                    "series_id": r["series_id"],
                     "season": r["season"],
                     "episode_num": r["episode_num"],
                     "episode_title": r["episode_title"],
@@ -537,6 +538,7 @@ class CartService:
                     i.get("content_type", ""),
                     i.get("name"),
                     i.get("series_name"),
+                    i.get("series_id"),
                     i.get("season"),
                     i.get("episode_num"),
                     i.get("episode_title"),
@@ -558,10 +560,10 @@ class CartService:
                 conn.executemany(
                     "INSERT OR REPLACE INTO cart_items "
                     "(id, stream_id, source_id, content_type, name, series_name, "
-                    "season, episode_num, episode_title, icon, grp, "
+                    "series_id, season, episode_num, episode_title, icon, grp, "
                     "container_extension, added_at, status, progress, "
                     "error, file_path, file_size, temp_path) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     rows,
                 )
             conn.commit()
@@ -607,17 +609,23 @@ class CartService:
                 if series_id:
                     info = await self.xtream_service.fetch_series_info(source_id, series_id)
                     if info:
-                        meta_title = _str_val(
-                            info.get("name") or info.get("title")
-                        ).strip()
-                        if meta_title:
-                            year = _extract_year(info)
-                            if year and year not in meta_title:
-                                meta_title = f"{meta_title} ({year})"
-                            item["series_name"] = meta_title
-                            # Store for NFO generation
-                            item["_series_info"] = info
-                            logger.info(f"[META] Enriched series name: '{meta_title}'")
+                        # Always store series info for NFO generation.
+                        item["_series_info"] = info
+                        # Only override series_name when it is not already set.
+                        # The name stored in the cart item comes from the user
+                        # (browse page selection or monitor entry) and is the
+                        # canonical display name — the stream's info.name may
+                        # contain provider-specific tags or formatting.
+                        if not item.get("series_name"):
+                            meta_title = _str_val(
+                                info.get("name") or info.get("title")
+                            ).strip()
+                            if meta_title:
+                                year = _extract_year(info)
+                                if year and year not in meta_title:
+                                    meta_title = f"{meta_title} ({year})"
+                                item["series_name"] = meta_title
+                                logger.info(f"[META] Enriched series name: '{meta_title}'")
         except Exception as e:
             logger.debug(f"Could not enrich item name from metadata: {e}")
 

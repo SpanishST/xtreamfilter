@@ -594,6 +594,23 @@
         </div>
     </div>
 
+    <!-- Download Conflict Warning Modal -->
+    <div class="modal-overlay" id="dl-conflict-modal">
+        <div class="modal" style="max-width:480px;">
+            <div class="modal-header" style="border-color:rgba(255,165,0,0.3);">
+                <h2 style="color:#ffa502;">⚠️ Download Conflict</h2>
+                <button class="modal-close" onclick="_dlConflictRespond(false)">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p id="dl-conflict-msg" style="line-height:1.6;color:#ccc;"></p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="_dlConflictRespond(false)">Cancel</button>
+                <button class="btn" style="background:rgba(255,165,0,0.2);color:#ffa502;border:1px solid rgba(255,165,0,0.4);" onclick="_dlConflictRespond(true)">Play anyway</button>
+            </div>
+        </div>
+    </div>
+
     <!-- VOD Source Selector Modal -->
     <div class="modal-overlay" id="vod-source-modal">
         <div class="modal" style="max-width: 500px;">
@@ -679,6 +696,22 @@
         let _playerSeekBarInterval = null;
         let _playerAudioTrack = -1;   // -1 = default (first audio)
         let _playerAudioTracks = [];  // Array from ffprobe
+        let _dlConflictResolve = null; // pending promise resolver for conflict modal
+
+        function _dlConflictRespond(proceed) {
+            document.getElementById('dl-conflict-modal').classList.remove('show');
+            if (_dlConflictResolve) { _dlConflictResolve(proceed); _dlConflictResolve = null; }
+        }
+
+        function _showDlConflictModal(srcName, maxConn, activeDownloads) {
+            document.getElementById('dl-conflict-msg').innerHTML =
+                '<strong style="color:#fff;">' + escapeHtml(srcName) + '</strong> is limited to <strong style="color:#ffa502;">' +
+                maxConn + ' connection' + (maxConn > 1 ? 's' : '') + '</strong> and already has <strong style="color:#ffa502;">' +
+                activeDownloads + ' active download' + (activeDownloads > 1 ? 's' : '') + '</strong>.<br><br>' +
+                'Starting playback will use an additional connection and may cause the current download to fail.';
+            document.getElementById('dl-conflict-modal').classList.add('show');
+            return new Promise(resolve => { _dlConflictResolve = resolve; });
+        }
 
         function detectPlayerStrategy(contentType, fmt) {
             // Live streams are ALWAYS transcoded server-side via ffmpeg
@@ -696,6 +729,25 @@
                 sourceIndex = sources.findIndex(s => s.id === sourceId);
                 if (sourceIndex < 0) sourceIndex = 0;
             }
+
+            // Warn if an active download on this source may be interrupted
+            try {
+                const dlResp = await fetch('/api/cart/active-source-downloads');
+                if (dlResp.ok) {
+                    const dlData = await dlResp.json();
+                    const activeDownloads = dlData[sourceId] || 0;
+                    if (activeDownloads > 0) {
+                        const src = sources.find(s => s.id === sourceId);
+                        const maxConn = (src && src.max_connections != null) ? src.max_connections : 1;
+                        if (activeDownloads >= maxConn) {
+                            const srcName = src ? src.name : (sourceId || 'this source');
+                            const proceed = await _showDlConflictModal(srcName, maxConn, activeDownloads);
+                            if (!proceed) return;
+                        }
+                    }
+                }
+            } catch (_) { /* non-blocking — proceed on error */ }
+
             const fmt = (ext || (contentType === 'live' ? 'ts' : 'mp4')).toLowerCase();
 
             // Show the modal immediately

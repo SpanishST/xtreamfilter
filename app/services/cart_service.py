@@ -400,6 +400,7 @@ class CartService:
             "bytes_downloaded": 0,
             "total_bytes": 0,
             "speed": 0,
+            "eta_speed": 0,
             "paused": False,
             "pause_remaining": 0,
         }
@@ -822,6 +823,7 @@ class CartService:
                 "bytes_downloaded": 0,
                 "total_bytes": 0,
                 "speed": 0,
+                "eta_speed": 0,
                 "paused": False,
                 "pause_remaining": 0,
             }
@@ -870,6 +872,8 @@ class CartService:
                 last_save = time.time()
                 speed_window_duration = 3.0
                 speed_samples: list[tuple[float, int]] = []
+                eta_speed_window_duration = 20.0
+                eta_speed_samples: list[tuple[float, int]] = []
                 window_start = time.time()
                 window_bytes = 0
                 last_pause_time = time.time()
@@ -965,8 +969,20 @@ class CartService:
                                         else:
                                             elapsed = now_speed - start_time
                                             speed = downloaded / elapsed if elapsed > 0 else 0
+                                        # ETA speed — longer window for stable remaining-time estimate
+                                        eta_speed_samples.append((now_speed, downloaded))
+                                        eta_cutoff = now_speed - eta_speed_window_duration
+                                        while eta_speed_samples and eta_speed_samples[0][0] < eta_cutoff:
+                                            eta_speed_samples.pop(0)
+                                        if len(eta_speed_samples) >= 2:
+                                            eta_dt = eta_speed_samples[-1][0] - eta_speed_samples[0][0]
+                                            eta_db = eta_speed_samples[-1][1] - eta_speed_samples[0][1]
+                                            eta_speed = eta_db / eta_dt if eta_dt > 0 else speed
+                                        else:
+                                            eta_speed = speed
                                         self._download_progress["bytes_downloaded"] = downloaded
                                         self._download_progress["speed"] = speed
+                                        self._download_progress["eta_speed"] = eta_speed
                                         item["progress"] = round((downloaded / total) * 100, 1) if total > 0 else 0
                                         if time.time() - last_save > 5:
                                             self.save_cart()

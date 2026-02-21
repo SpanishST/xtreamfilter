@@ -225,6 +225,7 @@ def group_similar_items(items: list, threshold: int = 85, fuzzy_limit: int = 0) 
             "count": len(g["items"]),
             "rating": g["rating"],
             "added": g["added"],
+            "tmdb_id": g["tmdb_id"],
         }
         for g in groups
     ]

@@ -46,6 +46,7 @@ class Source(BaseModel):
     enabled: bool = True
     prefix: str = ""
     route: Optional[str] = None
+    max_connections: int = 1
     filters: SourceFilters = Field(default_factory=SourceFilters)
 
 

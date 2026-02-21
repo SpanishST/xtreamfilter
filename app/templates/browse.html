@@ -586,6 +586,12 @@
                         </div>
                     </div>
                 </div>
+                <div class="form-group" id="monitor-backfill-group" style="display:none;">
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                        <input type="checkbox" id="monitor-backfill-check" style="width:16px;height:16px;accent-color:#00d4ff;cursor:pointer;">
+                        <span>Download existing episodes now</span>
+                    </label>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeMonitorModal()">Cancel</button>
@@ -2350,6 +2356,9 @@
             // Reset action
             selectMonitorAction('both');
 
+            // Reset backfill checkbox
+            document.getElementById('monitor-backfill-check').checked = false;
+
             // Build source options
             const sourceContainer = document.getElementById('monitor-source-options');
             let sourceHtml = '<div class="source-option selected" data-source="any" onclick="selectMonitorSource(\'any\')">Any source (first found)</div>';
@@ -2401,11 +2410,10 @@
                     }
                 }
                 const seasonNums = Object.keys(mergedSeasons).sort((a, b) => parseInt(a) - parseInt(b));
-                if (seasonNums.length > 0) {
-                    seasonSelect.innerHTML = seasonNums.map(s => '<option value="' + s + '">Season ' + s + ' (' + mergedSeasons[s] + ' episodes)</option>').join('');
-                } else {
-                    seasonSelect.innerHTML = '<option value="">No seasons found</option>';
-                }
+                const optionsHtml = seasonNums.length > 0
+                    ? seasonNums.map(s => '<option value="' + s + '">Season ' + s + ' (' + mergedSeasons[s] + ' episodes)</option>').join('')
+                    : '<option value="">No seasons found</option>';
+                seasonSelect.innerHTML = optionsHtml;
             } catch (e) {
                 seasonSelect.innerHTML = '<option value="">Error loading seasons</option>';
             }
@@ -2417,6 +2425,11 @@
             });
             document.getElementById('monitor-season-group').style.display = scope === 'season' ? 'block' : 'none';
             _monitorModalData.scope = scope;
+            // Show the backfill checkbox only when scope is 'all' or 'season'
+            const action = _monitorModalData.action || 'both';
+            const showBackfill = scope !== 'new_only' && action !== 'notify';
+            document.getElementById('monitor-backfill-group').style.display = showBackfill ? 'block' : 'none';
+            if (!showBackfill) document.getElementById('monitor-backfill-check').checked = false;
         }
 
         function selectMonitorSource(sourceKey) {
@@ -2432,6 +2445,11 @@
                 o.classList.toggle('selected', o.dataset.action === action);
             });
             _monitorModalData.action = action;
+            // Hide backfill checkbox when action is notify-only (nothing to download)
+            const scope = _monitorModalData.scope || 'new_only';
+            const showBackfill = scope !== 'new_only' && action !== 'notify';
+            document.getElementById('monitor-backfill-group').style.display = showBackfill ? 'block' : 'none';
+            if (!showBackfill) document.getElementById('monitor-backfill-check').checked = false;
         }
 
         function closeMonitorModal() {
@@ -2444,6 +2462,10 @@
             const scope = d.scope || 'new_only';
             const selectedSource = d.selectedSource || 'any';
             const seasonFilter = scope === 'season' ? document.getElementById('monitor-season-select').value : null;
+            // Derive backfill from the checkbox + current scope
+            const doBackfill = document.getElementById('monitor-backfill-check').checked;
+            const backfill = doBackfill ? (scope === 'season' ? 'season' : 'all') : 'none';
+            const backfillSeason = backfill === 'season' ? seasonFilter : null;
 
             if (scope === 'season' && !seasonFilter) {
                 showToast('Please select a season', 'error');
@@ -2480,11 +2502,17 @@
                         scope: scope,
                         season_filter: seasonFilter,
                         action: d.action || 'both',
+                        backfill: backfill,
+                        backfill_season: backfillSeason || null,
                     })
                 });
                 const data = await resp.json();
                 if (resp.ok) {
-                    showToast('Monitoring started: ' + d.seriesName, 'success');
+                    let msg = 'Monitoring started: ' + d.seriesName;
+                    if (data.backfill_queued > 0) {
+                        msg += ' — ' + data.backfill_queued + ' episode(s) queued';
+                    }
+                    showToast(msg, 'success');
                     closeMonitorModal();
                 } else {
                     showToast(data.error || 'Failed to add monitoring', 'error');

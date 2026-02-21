@@ -63,6 +63,8 @@ async def add_monitored(
     scope = data.get("scope", "new_only")
     season_filter = data.get("season_filter")
     action = data.get("action", "both")
+    backfill = data.get("backfill", "none")          # "none" | "all" | "season"
+    backfill_season = data.get("backfill_season")    # season number string
 
     if not series_name:
         return JSONResponse(status_code=400, content={"error": "Series name is required"})
@@ -72,6 +74,10 @@ async def add_monitored(
         return JSONResponse(status_code=400, content={"error": "Invalid action (must be notify, download or both)"})
     if scope == "season" and not season_filter:
         return JSONResponse(status_code=400, content={"error": "season_filter required when scope is 'season'"})
+    if backfill not in ("none", "all", "season"):
+        return JSONResponse(status_code=400, content={"error": "Invalid backfill (must be none, all or season)"})
+    if backfill == "season" and not backfill_season:
+        return JSONResponse(status_code=400, content={"error": "backfill_season required when backfill is 'season'"})
 
     # Duplicate check
     for m in monitor._monitored_series:
@@ -136,7 +142,20 @@ async def add_monitored(
 
     monitor._monitored_series.append(entry)
     monitor.save_monitored()
-    return {"status": "ok", "entry": entry}
+
+    # Immediately queue existing episodes if a backfill option was requested
+    queued_count = 0
+    if backfill != "none":
+        queued_count = await monitor.backfill_episodes(
+            entry,
+            backfill=backfill,
+            backfill_season=str(backfill_season) if backfill_season else None,
+        )
+        if queued_count:
+            # Save again so downloaded_episodes list is persisted
+            monitor.save_monitored()
+
+    return {"status": "ok", "entry": entry, "backfill_queued": queued_count}
 
 
 @router.put("/api/monitor/{monitor_id}")

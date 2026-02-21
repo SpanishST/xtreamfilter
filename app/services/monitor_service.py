@@ -538,6 +538,164 @@ class MonitorService:
         return new_episodes
 
     # ------------------------------------------------------------------
+    # Backfill – immediate download of existing episodes on monitor add
+    # ------------------------------------------------------------------
+
+    async def backfill_episodes(
+        self,
+        entry: dict,
+        backfill: str,
+        backfill_season: str | None = None,
+    ) -> int:
+        """Queue existing episodes for immediate download when adding a monitor entry.
+
+        Args:
+            entry: The newly-created monitor entry dict (already saved).
+            backfill: ``"all"`` → every episode;
+                      ``"season"`` → only ``backfill_season``.
+            backfill_season: Season number string (required when backfill='season').
+
+        Returns:
+            Number of episodes queued.
+        """
+        if backfill not in ("all", "season"):
+            return 0
+
+        action = entry.get("action", "both")
+        if action not in ("download", "both"):
+            logger.info(
+                f"Series monitoring backfill: skipped for '{entry.get('series_name')}' "
+                f"(action={action})"
+            )
+            return 0
+
+        source_id = entry.get("source_id")
+        series_id = entry.get("series_id", "")
+        series_name = entry.get("series_name", "")
+
+        # --- Fetch episodes ------------------------------------------------
+        episodes: list = []
+        used_source_id: Optional[str] = None
+        used_series_id: Optional[str] = None
+
+        if source_id:
+            episodes = await self.xtream_service.fetch_series_episodes(source_id, series_id)
+            used_source_id = source_id
+            used_series_id = series_id
+        else:
+            matches = self.find_series_across_sources(
+                series_name,
+                tmdb_id=entry.get("tmdb_id") or entry.get("tmdb"),
+                imdb_id=entry.get("imdb_id") or entry.get("imdb"),
+            )
+            for m in matches:
+                eps = await self.xtream_service.fetch_series_episodes(
+                    m["source_id"], m["series_id"]
+                )
+                if eps:
+                    episodes = eps
+                    used_source_id = m["source_id"]
+                    used_series_id = str(m.get("series_id", ""))
+                    break
+                await asyncio.sleep(0.5)
+
+        if not episodes:
+            logger.warning(
+                f"Series monitoring backfill: no episodes found for '{series_name}'"
+            )
+            return 0
+
+        # --- Filter by season if requested ---------------------------------
+        if backfill == "season" and backfill_season:
+            episodes = [
+                ep for ep in episodes
+                if str(ep.get("season")) == str(backfill_season)
+            ]
+
+        # --- Queue each episode --------------------------------------------
+        queued_count = 0
+        for ep in episodes:
+            stream_id = str(ep.get("stream_id", ""))
+
+            # Skip if already in cart (queued/downloading)
+            if any(
+                i.get("source_id") == used_source_id
+                and i.get("stream_id") == stream_id
+                and i.get("status") in ("queued", "downloading")
+                for i in self.cart_service.cart
+            ):
+                continue
+
+            cart_item = {
+                "id": str(uuid.uuid4()),
+                "stream_id": stream_id,
+                "source_id": used_source_id,
+                "content_type": "series",
+                "name": ep.get("title", "") or f"Episode {ep.get('episode_num', '')}",
+                "series_name": ep.get("series_name", series_name),
+                "series_id": used_series_id or series_id,
+                "season": ep.get("season"),
+                "episode_num": ep.get("episode_num", 0),
+                "episode_title": ep.get("title", ""),
+                "episode_info": ep.get("info", {}),
+                "icon": entry.get("cover", ""),
+                "group": "",
+                "container_extension": ep.get("container_extension", "mp4"),
+                "added_at": datetime.now().isoformat(),
+                "status": "queued",
+                "progress": 0,
+                "error": None,
+                "file_path": None,
+                "file_size": None,
+            }
+
+            filepath = self.cart_service.build_download_filepath(cart_item)
+            if os.path.exists(filepath):
+                entry.setdefault("downloaded_episodes", []).append({
+                    "stream_id": stream_id,
+                    "source_id": used_source_id,
+                    "season": ep.get("season"),
+                    "episode_num": ep.get("episode_num", 0),
+                })
+                continue
+
+            self.cart_service.cart.append(cart_item)
+            entry.setdefault("downloaded_episodes", []).append({
+                "stream_id": stream_id,
+                "source_id": used_source_id,
+                "season": ep.get("season"),
+                "episode_num": ep.get("episode_num", 0),
+            })
+            queued_count += 1
+
+        if queued_count > 0:
+            self.cart_service.save_cart()
+            logger.info(
+                f"Series monitoring backfill: '{series_name}' — "
+                f"{queued_count} episodes queued for download"
+            )
+            # Auto-start download worker when inside the download window
+            queued = [i for i in self.cart_service.cart if i.get("status") == "queued"]
+            if queued and (
+                self.cart_service.download_task is None
+                or self.cart_service.download_task.done()
+            ):
+                if self.cart_service.is_in_download_window():
+                    download_path = self._cfg.download_path
+                    os.makedirs(download_path, exist_ok=True)
+                    self.cart_service.download_task = asyncio.create_task(
+                        self.cart_service.download_worker()
+                    )
+                    logger.info("Series monitoring backfill: auto-started download worker")
+                else:
+                    logger.info(
+                        f"Series monitoring backfill: {len(queued)} items queued "
+                        "but outside download window, waiting for schedule"
+                    )
+
+        return queued_count
+
+    # ------------------------------------------------------------------
     # Preview
     # ------------------------------------------------------------------
 

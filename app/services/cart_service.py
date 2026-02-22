@@ -651,21 +651,18 @@ class CartService:
                     if info:
                         # Always store series info for NFO generation.
                         item["_series_info"] = info
-                        # Only override series_name when it is not already set.
-                        # The name stored in the cart item comes from the user
-                        # (browse page selection or monitor entry) and is the
-                        # canonical display name — the stream's info.name may
-                        # contain provider-specific tags or formatting.
-                        if not item.get("series_name"):
-                            meta_title = _str_val(
-                                info.get("name") or info.get("title")
-                            ).strip()
-                            if meta_title:
-                                year = _extract_year(info)
-                                if year and year not in meta_title:
-                                    meta_title = f"{meta_title} ({year})"
-                                item["series_name"] = meta_title
-                                logger.info(f"[META] Enriched series name: '{meta_title}'")
+                        # Always prefer the metadata title over the source catalogue
+                        # name which often contains provider-specific prefixes/tags
+                        # (e.g. "AMZ - The Expanse (2015)" → "The Expanse (2015)").
+                        meta_title = _str_val(
+                            info.get("name") or info.get("title")
+                        ).strip()
+                        if meta_title:
+                            year = _extract_year(info)
+                            if year and year not in meta_title:
+                                meta_title = f"{meta_title} ({year})"
+                            item["series_name"] = meta_title
+                            logger.info(f"[META] Enriched series name: '{meta_title}'")
         except Exception as e:
             logger.debug(f"Could not enrich item name from metadata: {e}")
 

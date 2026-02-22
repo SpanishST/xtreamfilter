@@ -195,6 +195,8 @@ async def delete_monitored(monitor_id: str, monitor: MonitorService = Depends(ge
 
 @router.post("/api/monitor/check")
 async def trigger_monitor_check(monitor: MonitorService = Depends(get_monitor_service)):
+    if monitor._check_in_progress:
+        return JSONResponse(status_code=409, content={"status": "skipped", "message": "Monitoring check already in progress"})
     asyncio.create_task(monitor.check_monitored_series())
     return {"status": "ok", "message": "Monitoring check started"}
 

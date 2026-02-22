@@ -73,16 +73,23 @@ async def background_refresh_loop(
 
     while True:
         try:
+            cache_was_refreshed = False
             if not cache.is_cache_valid():
                 logger.info("Cache expired, triggering refresh…")
                 await cache.refresh_cache(on_cache_refreshed=_on_cache_refreshed)
+                cache_was_refreshed = True
             else:
                 logger.info(f"Cache still valid. Last refresh: {cache._api_cache.get('last_refresh', 'Never')}")
 
-            try:
-                await monitor.check_monitored_series()
-            except Exception as exc:
-                logger.error(f"Series monitoring error in background loop: {exc}")
+            if cache_was_refreshed:
+                try:
+                    await monitor.check_monitored_series()
+                except Exception as exc:
+                    logger.error(f"Series monitoring error in background loop: {exc}")
+
+            if not epg_svc.is_epg_cache_valid():
+                logger.info("EPG cache expired, triggering refresh…")
+                asyncio.create_task(epg_svc.refresh_epg_cache())
 
             await asyncio.sleep(cache.config_service.get_cache_ttl())
 
@@ -90,7 +97,7 @@ async def background_refresh_loop(
             logger.info("Background refresh task cancelled")
             break
         except Exception as exc:
-            logger.info(f"Background refresh error: {exc}")
+            logger.error(f"Background refresh error: {exc}")
             await asyncio.sleep(60)
 
 
@@ -104,14 +111,11 @@ async def download_schedule_loop(cart: CartService) -> None:
             schedule = cart.config_service.get_download_schedule()
             if schedule.get("enabled", False):
                 has_queued = any(i.get("status") == "queued" for i in cart.cart)
-                worker_idle = cart.download_task is None or cart.download_task.done()
-                if has_queued and worker_idle and cart.is_in_download_window():
-                    download_path = cart.config_service.download_path
-                    os.makedirs(download_path, exist_ok=True)
+                if has_queued and cart.is_in_download_window():
                     cart._force_started = False
-                    cart.download_task = asyncio.create_task(cart.download_worker())
-                    queued_count = len([i for i in cart.cart if i.get("status") == "queued"])
-                    logger.info(f"Download schedule: auto-started worker for {queued_count} queued items")
+                    if cart._try_start_worker():
+                        queued_count = len([i for i in cart.cart if i.get("status") == "queued"])
+                        logger.info(f"Download schedule: auto-started worker for {queued_count} queued items")
             await asyncio.sleep(60)
         except asyncio.CancelledError:
             logger.info("Download schedule loop cancelled")

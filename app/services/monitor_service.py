@@ -74,6 +74,7 @@ class MonitorService:
         self.xtream_service = xtream_service
         self.db_path = os.path.join(config_service.data_dir, DB_NAME)
         self._monitored_series: list[dict] = []
+        self._check_in_progress: bool = False
 
     # ------------------------------------------------------------------
     # Properties
@@ -364,6 +365,10 @@ class MonitorService:
 
     async def check_monitored_series(self) -> None:
         """Check all enabled monitored series for new episodes (called after cache refresh)."""
+        if self._check_in_progress:
+            logger.info("Series monitoring check already in progress, skipping")
+            return
+
         if not self._monitored_series:
             return
 
@@ -371,46 +376,48 @@ class MonitorService:
         if not enabled:
             return
 
+        self._check_in_progress = True
         logger.info(f"Series monitoring: checking {len(enabled)} monitored series...")
         all_notifications: list[tuple] = []
         any_queued = False
 
-        for entry in enabled:
-            try:
-                new_eps = await self._check_single_monitored(entry)
-                if new_eps:
-                    action = entry.get("action", "both")
-                    all_notifications.append((
-                        entry.get("series_name", "Unknown"),
-                        new_eps,
-                        entry.get("cover", ""),
-                        action,
-                    ))
-                    if action in ("download", "both"):
-                        any_queued = True
-            except Exception as e:
-                logger.error(f"Error checking monitored series '{entry.get('series_name', '?')}': {e}")
-            await asyncio.sleep(1)
+        try:
+            for entry in enabled:
+                try:
+                    new_eps = await self._check_single_monitored(entry)
+                    if new_eps:
+                        action = entry.get("action", "both")
+                        all_notifications.append((
+                            entry.get("series_name", "Unknown"),
+                            new_eps,
+                            entry.get("cover", ""),
+                            action,
+                        ))
+                        if action in ("download", "both"):
+                            any_queued = True
+                except Exception as e:
+                    logger.error(f"Error checking monitored series '{entry.get('series_name', '?')}': {e}")
+                await asyncio.sleep(1)
 
-        self.save_monitored()
+            self.save_monitored()
 
-        for series_name, new_eps, cover, action in all_notifications:
-            if action in ("notify", "both"):
-                await self.notification_service.send_monitor_notification(series_name, new_eps, cover, action)
+            for series_name, new_eps, cover, action in all_notifications:
+                if action in ("notify", "both"):
+                    await self.notification_service.send_monitor_notification(series_name, new_eps, cover, action)
 
-        if any_queued:
-            queued = [i for i in self.cart_service.cart if i.get("status") == "queued"]
-            if queued and (self.cart_service.download_task is None or self.cart_service.download_task.done()):
-                if self.cart_service.is_in_download_window():
-                    download_path = self._cfg.download_path
-                    os.makedirs(download_path, exist_ok=True)
-                    self.cart_service.download_task = asyncio.create_task(self.cart_service.download_worker())
-                    logger.info(f"Series monitoring: auto-started download worker for {len(queued)} queued items")
-                else:
-                    logger.info(f"Series monitoring: {len(queued)} items queued but outside download window, waiting for schedule")
+            if any_queued:
+                queued = [i for i in self.cart_service.cart if i.get("status") == "queued"]
+                if queued:
+                    if self.cart_service.is_in_download_window():
+                        if self.cart_service._try_start_worker():
+                            logger.info(f"Series monitoring: auto-started download worker for {len(queued)} queued items")
+                    else:
+                        logger.info(f"Series monitoring: {len(queued)} items queued but outside download window, waiting for schedule")
 
-        total_new = sum(len(eps) for _, eps, _, _ in all_notifications)
-        logger.info(f"Series monitoring: check complete. {total_new} new episodes found.")
+            total_new = sum(len(eps) for _, eps, _, _ in all_notifications)
+            logger.info(f"Series monitoring: check complete. {total_new} new episodes found.")
+        finally:
+            self._check_in_progress = False
 
     async def _check_single_monitored(self, entry: dict) -> list[dict]:
         """Check one monitored series entry. Returns new episode dicts."""
@@ -678,17 +685,10 @@ class MonitorService:
             )
             # Auto-start download worker when inside the download window
             queued = [i for i in self.cart_service.cart if i.get("status") == "queued"]
-            if queued and (
-                self.cart_service.download_task is None
-                or self.cart_service.download_task.done()
-            ):
+            if queued:
                 if self.cart_service.is_in_download_window():
-                    download_path = self._cfg.download_path
-                    os.makedirs(download_path, exist_ok=True)
-                    self.cart_service.download_task = asyncio.create_task(
-                        self.cart_service.download_worker()
-                    )
-                    logger.info("Series monitoring backfill: auto-started download worker")
+                    if self.cart_service._try_start_worker():
+                        logger.info("Series monitoring backfill: auto-started download worker")
                 else:
                     logger.info(
                         f"Series monitoring backfill: {len(queued)} items queued "

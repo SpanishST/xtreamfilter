@@ -845,11 +845,21 @@ class CartService:
     # Download worker
     # ------------------------------------------------------------------
 
+    def _try_start_worker(self) -> bool:
+        """Start the download worker if not already running. Returns True if started.
+
+        No ``await`` between the done-check and create_task — safe to call from
+        any asyncio code path without a lock (cooperative scheduler guarantees
+        nothing runs between two non-awaited statements in the same frame).
+        """
+        if self._download_task is not None and not self._download_task.done():
+            return False
+        self._download_task = asyncio.create_task(self.download_worker())
+        return True
+
     async def download_worker(self) -> None:
         """Background worker that processes the download queue sequentially."""
         self._download_cancel_event = asyncio.Event()
-        await self.http_client.close()
-        logger.info("Closed global HTTP client to free provider connection slots")
 
         while True:
             queued = [item for item in self._download_cart if item.get("status") == "queued"]

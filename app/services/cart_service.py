@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -359,6 +360,45 @@ def generate_episode_nfo(item: dict, ep_info: dict | None = None) -> str:
     return _xml_prettify(root)
 
 
+def safe_makedirs(path: str) -> None:
+    """Like os.makedirs(path, exist_ok=True) but tolerates ELOOP from CIFS mounts.
+
+    On CIFS/SMB shares the kernel driver can return ELOOP (errno 40) for
+    perfectly valid directories — in particular for directories that already
+    exist or whose names confuse the CIFS DFS resolver.  The standard
+    os.makedirs call fails in that case even though the target is reachable.
+
+    Work-around: when ELOOP is raised, create each path component one at a
+    time with os.mkdir, silently ignoring FileExistsError for components that
+    are already present.  Nothing is ever removed.
+    """
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as exc:
+        if exc.errno != errno.ELOOP:
+            raise
+        logger.debug(
+            f"[safe_makedirs] ELOOP on os.makedirs (CIFS quirk), "
+            f"falling back to component-wise mkdir for: {path}"
+        )
+        # Build the path component by component, tolerating already-existing dirs.
+        parts = os.path.normpath(path).split(os.sep)
+        current = os.sep
+        for part in parts:
+            if not part:
+                continue
+            current = os.path.join(current, part)
+            try:
+                os.mkdir(current)
+            except FileExistsError:
+                pass  # directory already exists — that's fine
+            except OSError as mkdir_exc:
+                if mkdir_exc.errno == errno.EEXIST:
+                    pass  # race-condition variant of FileExistsError
+                else:
+                    raise
+
+
 async def download_poster(url: str, dest_path: str) -> bool:
     """Download a poster image to the given path. Returns True on success."""
     if not url or not url.startswith("http"):
@@ -367,7 +407,7 @@ async def download_poster(url: str, dest_path: str) -> bool:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), follow_redirects=True) as client:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
             if resp.status_code == 200 and len(resp.content) > 100:
-                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                safe_makedirs(os.path.dirname(dest_path))
                 with open(dest_path, "wb") as f:
                     f.write(resp.content)
                 return True
@@ -857,8 +897,8 @@ class CartService:
             temp_path = os.path.join(temp_dir, temp_filename)
 
             try:
-                os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                os.makedirs(temp_dir, exist_ok=True)
+                safe_makedirs(os.path.dirname(file_path))
+                safe_makedirs(temp_dir)
                 throttle = self.config_service.get_download_throttle_settings()
                 bw_limit = throttle["bandwidth_limit"] * 1024
                 pause_interval = throttle["pause_interval"]
@@ -1096,7 +1136,7 @@ class CartService:
             return False
         dest_dir = os.path.dirname(file_path)
         try:
-            os.makedirs(dest_dir, exist_ok=True)
+            safe_makedirs(dest_dir)
         except Exception as e:
             item["status"] = "move_failed"
             item["error"] = f"Cannot create destination directory: {e}"
@@ -1237,7 +1277,7 @@ class CartService:
             if not series_info and series_id:
                 series_info = await self.xtream_service.fetch_series_info(source_id, series_id)
             if series_info:
-                os.makedirs(series_root, exist_ok=True)
+                safe_makedirs(series_root)
                 tvshow_content = generate_tvshow_nfo(series_info, name=series_name)
                 with open(tvshow_nfo_path, "w", encoding="utf-8") as f:
                     f.write(tvshow_content)

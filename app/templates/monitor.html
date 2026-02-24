@@ -66,9 +66,10 @@
         .toast-error { background: rgba(255, 71, 87, 0.9); color: #fff; font-weight: 500; }
 
         /* Preview Modal */
-        .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.8); display: none; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
+        .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.8); display: none; align-items: center; justify-content: center; z-index: 1000; padding: 12px; }
         .modal-overlay.show { display: flex; }
         .modal { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 16px; max-width: 600px; width: 100%; max-height: 90vh; overflow-y: auto; }
+        #edit-modal .modal { max-width: min(800px, 95vw); }
         .modal-header { padding: 20px; border-bottom: 1px solid rgba(255, 255, 255, 0.1); display: flex; justify-content: space-between; align-items: center; }
         .modal-header h2 { color: #00d4ff; font-size: 1.3em; }
         .modal-close { background: none; border: none; color: #888; font-size: 1.5em; cursor: pointer; }
@@ -108,7 +109,7 @@
         .edit-form input[type=number]:focus { border-color: #00d4ff; }
 
         /* Source checkboxes in edit modal */
-        .edit-form .source-list { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
+        .edit-form .source-list { display: flex; flex-direction: column; gap: 4px; max-height: 280px; overflow-y: auto; }
         .edit-form .source-check-item { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; cursor: pointer; transition: background 0.2s; }
         .edit-form .source-check-item:hover { background: rgba(255,255,255,0.05); }
         .edit-form .source-check-item input[type=checkbox] { width: 15px; height: 15px; flex-shrink: 0; accent-color: #a29bfe; cursor: pointer; }
@@ -168,7 +169,7 @@
 
     <!-- Edit Modal -->
     <div class="modal-overlay" id="edit-modal">
-        <div class="modal" style="max-width: 480px;">
+        <div class="modal">
             <div class="modal-header">
                 <h2 id="edit-modal-title">✏️ Edit Monitoring</h2>
                 <button class="modal-close" onclick="closeEditModal()">&times;</button>
@@ -219,8 +220,8 @@
                     </div>
                 </div>
                 <div class="form-group">
-                    <label>Download folder name <span style="color:#888;font-weight:normal;font-size:0.8em">(canonical name, used as download folder name)</span></label>
-                    <input type="text" id="edit-canonical-name" style="width:100%;padding:8px 10px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#fff;font-size:0.9em;box-sizing:border-box;" placeholder="Leave blank to use series name">
+                    <label>Monitoring title <span style="color:#888;font-weight:normal;font-size:0.8em">(editable — also used as download folder name)</span></label>
+                    <input type="text" id="edit-canonical-name" style="width:100%;padding:8px 10px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#fff;font-size:0.9em;box-sizing:border-box;" placeholder="Series title">
                 </div>
             </div>
             <div class="modal-footer">
@@ -332,7 +333,7 @@
                 html += '<div class="series-card' + disabledClass + '">' +
                     '<div class="series-cover">' + coverHtml + '</div>' +
                     '<div class="series-details">' +
-                    '<div class="series-name">' + escapeHtml(entry.series_name) + '</div>' +
+                    '<div class="series-name">' + escapeHtml(entry.canonical_name || entry.series_name) + '</div>' +
                     '<div class="series-meta">' +
                     '<span class="series-badge badge-scope">' + scopeLabel + '</span>' +
                     '<span class="series-badge ' + sourceBadgeClass + '"' + (sourceBadgeTitle ? ' title="' + escapeAttr(sourceBadgeTitle) + '"' : '') + '>' + escapeHtml(sourceLabel) + '</span>' +
@@ -417,7 +418,7 @@
             const entry = monitoredSeries.find(e => e.id === id);
             if (!entry) return;
             _editModalId = id;
-            document.getElementById('edit-modal-title').textContent = '✏️ Edit: ' + entry.series_name;
+            document.getElementById('edit-modal-title').textContent = '✏️ Edit: ' + (entry.canonical_name || entry.series_name);
 
             // Set scope
             document.querySelectorAll('#edit-modal .scope-option[data-scope]').forEach(o => {
@@ -434,8 +435,8 @@
             // Build source checkboxes
             _buildEditSourceList(entry);
 
-            // Pre-fill canonical name
-            document.getElementById('edit-canonical-name').value = entry.canonical_name || '';
+            // Pre-fill canonical name (falls back to raw series name so field is never blank)
+            document.getElementById('edit-canonical-name').value = entry.canonical_name || entry.series_name || '';
 
             document.getElementById('edit-modal').classList.add('show');
         }

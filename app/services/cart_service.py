@@ -650,6 +650,22 @@ class CartService:
             elif content_type == "series":
                 series_id = item.get("series_id", "")
                 if series_id:
+                    # If the monitor already stamped a canonical name, use it
+                    # directly and skip the API lookup for series_name entirely.
+                    locked_canon = item.get("_monitor_canonical")
+                    if locked_canon:
+                        item["series_name"] = locked_canon
+                        logger.info(f"[META] Using monitor-locked canonical name: '{locked_canon}'")
+                        # Still fetch series info for NFO generation, but don't
+                        # let it touch series_name.
+                        try:
+                            info = await self.xtream_service.fetch_series_info(source_id, series_id)
+                            if info:
+                                item["_series_info"] = info
+                        except Exception:
+                            pass
+                        return
+
                     info = await self.xtream_service.fetch_series_info(source_id, series_id)
                     if info:
                         # Always store series info for NFO generation.

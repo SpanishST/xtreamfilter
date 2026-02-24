@@ -573,13 +573,16 @@ class MonitorService:
                 ):
                     continue
 
+                _sname = series_name or ep.get("series_name", "")
                 cart_item = {
                     "id": str(uuid.uuid4()),
                     "stream_id": stream_id,
                     "source_id": src_source_id,
                     "content_type": "series",
                     "name": ep.get("title", "") or f"Episode {ep.get('episode_num', '')}",
-                    "series_name": series_name or ep.get("series_name", ""),
+                    "series_name": _sname,
+                    # Preserved so _enrich_item_name_from_metadata never overwrites it
+                    "_monitor_canonical": _sname if series_name else None,
                     "series_id": src_series_id or series_id,
                     "season": ep.get("season"),
                     "episode_num": ep.get("episode_num", 0),
@@ -736,13 +739,16 @@ class MonitorService:
                 ):
                     continue
 
+                _sname_bf = series_name or ep.get("series_name", "")
                 cart_item = {
                     "id": str(uuid.uuid4()),
                     "stream_id": stream_id,
                     "source_id": used_source_id,
                     "content_type": "series",
                     "name": ep.get("title", "") or f"Episode {ep.get('episode_num', '')}",
-                    "series_name": series_name or ep.get("series_name", ""),
+                    "series_name": _sname_bf,
+                    # Preserved so _enrich_item_name_from_metadata never overwrites it
+                    "_monitor_canonical": _sname_bf if series_name else None,
                     "series_id": used_series_id or series_id,
                     "season": ep.get("season"),
                     "episode_num": ep.get("episode_num", 0),

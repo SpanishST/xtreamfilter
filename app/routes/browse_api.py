@@ -213,7 +213,13 @@ async def api_browse(
                 continue
             if tmdb_search_id is not None:
                 raw_tmdb = s.get("tmdb_id") or s.get("tmdb")
-                if not raw_tmdb or str(raw_tmdb).strip() != tmdb_search_id:
+                if not raw_tmdb:
+                    continue
+                # Normalise: strip "tmdb:" prefix and whitespace before comparing
+                norm = str(raw_tmdb).strip().lower()
+                if norm.startswith("tmdb:"):
+                    norm = norm[5:].strip()
+                if norm != tmdb_search_id:
                     continue
             elif search_lower and search_lower not in name.lower() and search_lower not in grp.lower():
                 continue

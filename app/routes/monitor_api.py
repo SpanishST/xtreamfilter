@@ -1,16 +1,19 @@
-"""Series monitoring API routes."""
+"""Series and movie monitoring API routes."""
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
-from app.dependencies import get_monitor_service, get_xtream_service
+from app.database import DB_NAME, db_connect
+from app.dependencies import get_config_service, get_monitor_service, get_xtream_service
+from app.services.config_service import ConfigService
 from app.services.filter_service import normalize_name
-from app.services.monitor_service import MonitorService, _safe_episode_num
+from app.services.monitor_service import MonitorService, _normalize_imdb_id, _normalize_tmdb_id, _safe_episode_num  # noqa: F401 - _normalize_imdb_id used in series dup checks
 from app.services.xtream_service import XtreamService
 
 router = APIRouter(tags=["monitor"])
@@ -24,19 +27,6 @@ def _normalize_tmdb_id(value) -> str | None:
         raw = raw[5:].strip()
     if raw.isdigit():
         return raw
-    return None
-
-
-def _normalize_imdb_id(value) -> str | None:
-    if value is None:
-        return None
-    raw = str(value).strip().lower()
-    if raw.startswith("imdb:"):
-        raw = raw[5:].strip()
-    if raw.startswith("tt") and raw[2:].isdigit():
-        return raw
-    if raw.isdigit():
-        return f"tt{raw}"
     return None
 
 
@@ -282,7 +272,12 @@ async def delete_monitored(monitor_id: str, monitor: MonitorService = Depends(ge
 async def trigger_monitor_check(monitor: MonitorService = Depends(get_monitor_service)):
     if monitor._check_in_progress:
         return JSONResponse(status_code=409, content={"status": "skipped", "message": "Monitoring check already in progress"})
-    asyncio.create_task(monitor.check_monitored_series())
+
+    async def _run_both():
+        await monitor.check_monitored_series()
+        await monitor.check_monitored_movies()
+
+    asyncio.create_task(_run_both())
     return {"status": "ok", "message": "Monitoring check started"}
 
 
@@ -312,3 +307,233 @@ async def preview_monitor_episodes(
     xtream: XtreamService = Depends(get_xtream_service),
 ):
     return await monitor.preview_episodes(monitor_id)
+
+
+# ===========================================================================
+# Movie monitoring endpoints
+# ===========================================================================
+
+
+@router.get("/api/monitor/movies")
+async def list_monitored_movies(monitor: MonitorService = Depends(get_monitor_service)):
+    return {"movies": monitor._monitored_movies}
+
+
+@router.get("/api/monitor/movie-lookup")
+async def movie_lookup(
+    q: str = Query("", description="Movie name or tmdb:<id>"),
+    monitor: MonitorService = Depends(get_monitor_service),
+):
+    """Search the VOD cache for movies matching a name or TMDB ID.
+    The result powers the autocomplete in the 'Add movie monitor' form.
+    """
+    q = q.strip()
+    if not q:
+        return {"results": []}
+
+    tmdb_id: str | None = None
+    movie_name = q
+
+    if q.lower().startswith("tmdb:"):
+        raw = q[5:].strip()
+        if raw.isdigit():
+            tmdb_id = raw
+            movie_name = ""
+    elif q.isdigit() and len(q) >= 4:
+        # Bare numeric string — treat as TMDB ID
+        tmdb_id = q
+        movie_name = ""
+
+    matches = monitor.find_movie_across_sources(
+        movie_name,
+        tmdb_id=tmdb_id,
+        limit=30,
+    )
+
+    # Deduplicate by tmdb_id (prefer id-match) then by normalised name
+    seen_tmdb: set[str] = set()
+    seen_names: set[str] = set()
+    deduped: list[dict] = []
+    for m in matches:
+        tid = m.get("tmdb_id")
+        nkey = normalize_name(m["name"])
+        if tid:
+            if tid in seen_tmdb:
+                continue
+            seen_tmdb.add(tid)
+        else:
+            if nkey in seen_names:
+                continue
+            seen_names.add(nkey)
+        deduped.append({
+            "name": m["name"],
+            "tmdb_id": m.get("tmdb_id"),
+            "cover": m.get("cover", ""),
+            "source_id": m["source_id"],
+            "stream_id": m["stream_id"],
+            "container_extension": m.get("container_extension", "mkv"),
+            "matched_by": m.get("matched_by"),
+        })
+
+    return {"results": deduped[:20]}
+
+
+@router.get("/api/monitor/vod-categories")
+async def get_vod_categories(
+    config_svc: ConfigService = Depends(get_config_service),
+    monitor: MonitorService = Depends(get_monitor_service),
+):
+    """Return VOD categories per enabled source (used for per-source category filter UI)."""
+    cfg = config_svc.config
+    enabled_ids = [s["id"] for s in cfg.get("sources", []) if s.get("enabled", True)]
+    if not enabled_ids:
+        return {"by_source": {}}
+
+    conn = db_connect(os.path.join(config_svc.data_dir, DB_NAME))
+    try:
+        placeholders = ",".join("?" * len(enabled_ids))
+        rows = conn.execute(
+            f"SELECT source_id, category_id, category_name FROM source_categories "
+            f"WHERE content_type = 'vod' AND source_id IN ({placeholders}) "
+            f"ORDER BY source_id, category_name",
+            enabled_ids,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    by_source: dict[str, list] = {}
+    for row in rows:
+        sid = row["source_id"]
+        by_source.setdefault(sid, []).append({
+            "category_id": row["category_id"],
+            "category_name": row["category_name"] or row["category_id"],
+        })
+
+    # Build source info for the UI
+    source_info = [
+        {
+            "id": s["id"],
+            "name": s.get("name", s["id"]),
+            "vod_group_filters": s.get("filters", {}).get("vod", {}).get("groups", []),
+        }
+        for s in cfg.get("sources", [])
+        if s.get("enabled", True)
+    ]
+
+    return {"by_source": by_source, "sources": source_info}
+
+
+@router.post("/api/monitor/movies")
+async def add_monitored_movie(
+    request: Request,
+    monitor: MonitorService = Depends(get_monitor_service),
+):
+    data = await request.json()
+    movie_name = (data.get("movie_name") or "").strip()
+    tmdb_id = _normalize_tmdb_id(data.get("tmdb_id"))
+    cover = (data.get("cover") or "").strip()
+    canonical_name = (data.get("canonical_name") or "").strip() or None
+    action = data.get("action", "notify")
+    monitor_sources_raw: list[dict] = data.get("monitor_sources") or []
+
+    if not movie_name and not tmdb_id:
+        return JSONResponse(status_code=400, content={"error": "movie_name or tmdb_id is required"})
+    if action not in ("notify", "download", "both"):
+        return JSONResponse(status_code=400, content={"error": "Invalid action (must be notify, download or both)"})
+
+    # Validate sources
+    validated_sources: list[dict] = []
+    for ms in monitor_sources_raw:
+        sid = str(ms.get("source_id") or "").strip()
+        if sid:
+            cf = ms.get("category_filter") or []
+            if isinstance(cf, str):
+                cf = [cf] if cf else []
+            validated_sources.append({
+                "source_id": sid,
+                "source_name": str(ms.get("source_name") or "").strip() or None,
+                "category_filter": cf,
+            })
+
+    # Duplicate check (same TMDB id or same normalised name)
+    for m in monitor._monitored_movies:
+        existing_tmdb = m.get("tmdb_id")
+        existing_name_n = normalize_name(m.get("movie_name", ""))
+        if tmdb_id and existing_tmdb and tmdb_id == existing_tmdb:
+            return JSONResponse(status_code=409, content={"error": "A movie with this TMDB ID is already being monitored"})
+        if movie_name and existing_name_n and normalize_name(movie_name) == existing_name_n:
+            return JSONResponse(status_code=409, content={"error": "A movie with this title is already being monitored"})
+
+    entry = {
+        "id": str(uuid.uuid4()),
+        "movie_name": movie_name or f"TMDB:{tmdb_id}",
+        "canonical_name": canonical_name,
+        "tmdb_id": tmdb_id,
+        "cover": cover,
+        "action": action,
+        "enabled": True,
+        "status": "watching",
+        "monitor_sources": validated_sources,
+        "created_at": datetime.now().isoformat(),
+        "last_checked": None,
+    }
+
+    monitor._monitored_movies.append(entry)
+    monitor.save_monitored_movies()
+    return {"status": "ok", "entry": entry}
+
+
+@router.put("/api/monitor/movies/{movie_id}")
+async def update_monitored_movie(
+    movie_id: str,
+    request: Request,
+    monitor: MonitorService = Depends(get_monitor_service),
+):
+    data = await request.json()
+    for entry in monitor._monitored_movies:
+        if entry.get("id") != movie_id:
+            continue
+        if "enabled" in data:
+            entry["enabled"] = bool(data["enabled"])
+        if "action" in data and data["action"] in ("notify", "download", "both"):
+            entry["action"] = data["action"]
+        if "status" in data and data["status"] in ("watching", "found", "downloaded"):
+            entry["status"] = data["status"]
+        if "canonical_name" in data:
+            entry["canonical_name"] = (data["canonical_name"] or "").strip() or None
+        if "movie_name" in data and data["movie_name"].strip():
+            entry["movie_name"] = data["movie_name"].strip()
+        if "tmdb_id" in data:
+            entry["tmdb_id"] = _normalize_tmdb_id(data["tmdb_id"])
+        if "cover" in data:
+            entry["cover"] = (data["cover"] or "").strip()
+        if "monitor_sources" in data:
+            validated: list[dict] = []
+            for ms in (data.get("monitor_sources") or []):
+                sid = str(ms.get("source_id") or "").strip()
+                if sid:
+                    cf = ms.get("category_filter") or []
+                    if isinstance(cf, str):
+                        cf = [cf] if cf else []
+                    validated.append({
+                        "source_id": sid,
+                        "source_name": str(ms.get("source_name") or "").strip() or None,
+                        "category_filter": cf,
+                    })
+            entry["monitor_sources"] = validated
+        monitor.save_monitored_movies()
+        return {"status": "ok", "entry": entry}
+    return JSONResponse(status_code=404, content={"error": "Movie monitor entry not found"})
+
+
+@router.delete("/api/monitor/movies/{movie_id}")
+async def delete_monitored_movie(
+    movie_id: str,
+    monitor: MonitorService = Depends(get_monitor_service),
+):
+    original_len = len(monitor._monitored_movies)
+    monitor._monitored_movies[:] = [m for m in monitor._monitored_movies if m.get("id") != movie_id]
+    if len(monitor._monitored_movies) == original_len:
+        return JSONResponse(status_code=404, content={"error": "Movie monitor entry not found"})
+    monitor.save_monitored_movies()
+    return {"status": "ok"}

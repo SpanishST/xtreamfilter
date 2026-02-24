@@ -86,6 +86,10 @@ async def background_refresh_loop(
                     await monitor.check_monitored_series()
                 except Exception as exc:
                     logger.error(f"Series monitoring error in background loop: {exc}")
+                try:
+                    await monitor.check_monitored_movies()
+                except Exception as exc:
+                    logger.error(f"Movie monitoring error in background loop: {exc}")
 
             if not epg_svc.is_epg_cache_valid():
                 logger.info("EPG cache expired, triggering refresh…")
@@ -174,6 +178,7 @@ async def lifespan(app: FastAPI):
 
     monitor = MonitorService(cfg, cache, xtream, notif, cart)
     monitor.load_monitored()
+    monitor.load_monitored_movies()
     cart.monitor_service = monitor  # late bind for canonical name lookup
 
     m3u = M3uService(cfg, cache)

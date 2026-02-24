@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -74,6 +75,7 @@ class MonitorService:
         self.xtream_service = xtream_service
         self.db_path = os.path.join(config_service.data_dir, DB_NAME)
         self._monitored_series: list[dict] = []
+        self._monitored_movies: list[dict] = []
         self._check_in_progress: bool = False
 
     # ------------------------------------------------------------------
@@ -854,3 +856,377 @@ class MonitorService:
             "downloaded_count": len(downloaded_keys),
             "new_count": sum(1 for ep in episodes if ep.get("is_new")),
         }
+
+    # ======================================================================
+    # Movie monitoring
+    # ======================================================================
+
+    # ------------------------------------------------------------------
+    # Movie persistence
+    # ------------------------------------------------------------------
+
+    def load_monitored_movies(self) -> list:
+        """Load monitored movie rules from the database."""
+        conn = db_connect(self.db_path)
+        try:
+            movie_rows = conn.execute(
+                "SELECT id, movie_name, canonical_name, tmdb_id, cover, "
+                "action, enabled, status, created_at, last_checked "
+                "FROM monitored_movies ORDER BY created_at"
+            ).fetchall()
+
+            result: list[dict] = []
+            for mr in movie_rows:
+                mid = mr["id"]
+                try:
+                    msources = conn.execute(
+                        "SELECT source_id, source_name, category_filter "
+                        "FROM movie_monitor_sources WHERE movie_id = ? ORDER BY id",
+                        (mid,),
+                    ).fetchall()
+                    monitor_sources = []
+                    for ms in msources:
+                        raw_cf = ms["category_filter"]
+                        if raw_cf is None:
+                            cats: list[str] = []
+                        elif isinstance(raw_cf, str) and raw_cf.startswith("["):
+                            try:
+                                cats = json.loads(raw_cf)
+                            except Exception:
+                                cats = [raw_cf] if raw_cf else []
+                        elif isinstance(raw_cf, str) and raw_cf:
+                            cats = [raw_cf]   # backward compat: plain single string
+                        else:
+                            cats = []
+                        monitor_sources.append({
+                            "source_id": ms["source_id"],
+                            "source_name": ms["source_name"],
+                            "category_filter": cats,
+                        })
+                except Exception:
+                    monitor_sources = []
+
+                result.append({
+                    "id": mid,
+                    "movie_name": mr["movie_name"],
+                    "canonical_name": mr["canonical_name"],
+                    "tmdb_id": mr["tmdb_id"],
+                    "cover": mr["cover"],
+                    "action": mr["action"],
+                    "enabled": bool(mr["enabled"]),
+                    "status": mr["status"],
+                    "monitor_sources": monitor_sources,
+                    "created_at": mr["created_at"],
+                    "last_checked": mr["last_checked"],
+                })
+
+            self._monitored_movies = result
+            return self._monitored_movies
+        except Exception as e:
+            logger.error(f"Error loading monitored movies from DB: {e}")
+            self._monitored_movies = []
+            return self._monitored_movies
+        finally:
+            conn.close()
+
+    def save_monitored_movies(self, items: list | None = None) -> None:
+        """Persist the current monitored-movies list to the database."""
+        if items is not None:
+            self._monitored_movies = items
+        conn = db_connect(self.db_path)
+        try:
+            for entry in self._monitored_movies:
+                entry_id = entry.get("id")
+                if not entry_id:
+                    continue
+                conn.execute(
+                    """INSERT OR REPLACE INTO monitored_movies
+                       (id, movie_name, canonical_name, tmdb_id, cover,
+                        action, enabled, status, created_at, last_checked)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        entry_id,
+                        entry.get("movie_name", ""),
+                        entry.get("canonical_name") or None,
+                        entry.get("tmdb_id"),
+                        entry.get("cover"),
+                        entry.get("action", "notify"),
+                        int(entry.get("enabled", True)),
+                        entry.get("status", "watching"),
+                        entry.get("created_at"),
+                        entry.get("last_checked"),
+                    ),
+                )
+                conn.execute(
+                    "DELETE FROM movie_monitor_sources WHERE movie_id = ?", (entry_id,)
+                )
+                ms_rows = []
+                for ms in entry.get("monitor_sources", []):
+                    if not ms.get("source_id"):
+                        continue
+                    cf = ms.get("category_filter") or []
+                    if isinstance(cf, str):
+                        cf = [cf] if cf else []
+                    cf_json = json.dumps(cf) if cf else None
+                    ms_rows.append((entry_id, ms.get("source_id", ""), ms.get("source_name"), cf_json))
+                if ms_rows:
+                    conn.executemany(
+                        "INSERT OR IGNORE INTO movie_monitor_sources "
+                        "(movie_id, source_id, source_name, category_filter) VALUES (?,?,?,?)",
+                        ms_rows,
+                    )
+
+            current_ids = [e["id"] for e in self._monitored_movies if e.get("id")]
+            if current_ids:
+                placeholders = ",".join("?" * len(current_ids))
+                conn.execute(
+                    f"DELETE FROM monitored_movies WHERE id NOT IN ({placeholders})", current_ids
+                )
+            else:
+                conn.execute("DELETE FROM monitored_movies")
+
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Error saving monitored movies to DB: {e}")
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Movie cross-source lookup
+    # ------------------------------------------------------------------
+
+    def find_movie_across_sources(
+        self,
+        movie_name: str,
+        tmdb_id: str | None = None,
+        source_ids: list[str] | None = None,
+        category_filters: dict[str, list[str]] | None = None,
+        limit: int = 0,
+    ) -> list[dict]:
+        """Find VOD movies across enabled sources.
+
+        Args:
+            movie_name: Title to fuzzy-match against (used when IDs are absent).
+            tmdb_id: TMDB ID for exact matching (higher priority).
+            source_ids: Restrict search to these source IDs (None = all enabled sources).
+            category_filters: Optional per-source category_id list filter
+                ({source_id: [category_id, ...]}). Empty list or missing key = no filter.
+            limit: If > 0, return at most this many results.
+
+        Returns:
+            List of match dicts sorted by score (id-match first, then fuzzy).
+        """
+        config = self._cfg.config
+        enabled_sources = {s["id"]: s for s in config.get("sources", []) if s.get("enabled", True)}
+        target_source_ids = [
+            sid for sid in (source_ids or list(enabled_sources.keys()))
+            if sid in enabled_sources
+        ]
+        if not target_source_ids:
+            return []
+
+        target_tmdb_id = _normalize_tmdb_id(tmdb_id)
+        target_normalized = normalize_name(movie_name)
+        if not target_tmdb_id and not target_normalized:
+            return []
+
+        conn = db_connect(self.db_path)
+        try:
+            placeholders = ",".join("?" * len(target_source_ids))
+            rows = conn.execute(
+                f"SELECT source_id, stream_id, name, category_id, data "
+                f"FROM streams WHERE content_type = 'vod' AND source_id IN ({placeholders})",
+                target_source_ids,
+            ).fetchall()
+        finally:
+            conn.close()
+
+        matches: list[dict] = []
+        for row in rows:
+            src_id = row["source_id"]
+
+            # Per-source category filter (list of allowed category IDs)
+            if category_filters:
+                allowed_cats = category_filters.get(src_id) or []
+                if allowed_cats and str(row["category_id"] or "") not in [str(c) for c in allowed_cats]:
+                    continue
+
+            try:
+                data = json.loads(row["data"]) if row["data"] else {}
+            except Exception:
+                data = {}
+
+            s_tmdb_id = _normalize_tmdb_id(data.get("tmdb_id") or data.get("tmdb"))
+            s_name = row["name"] or data.get("name", "")
+            s_normalized = normalize_name(s_name)
+
+            matched_by_id = bool(target_tmdb_id and s_tmdb_id and s_tmdb_id == target_tmdb_id)
+
+            cover = (
+                data.get("stream_icon") or data.get("movie_image")
+                or data.get("cover") or data.get("backdrop_path") or ""
+            )
+
+            if matched_by_id:
+                matches.append({
+                    "source_id": src_id,
+                    "stream_id": str(row["stream_id"]),
+                    "name": s_name,
+                    "cover": cover,
+                    "container_extension": data.get("container_extension", "mkv"),
+                    "tmdb_id": s_tmdb_id,
+                    "category_id": row["category_id"],
+                    "score": 100,
+                    "matched_by": "id",
+                })
+                continue
+
+            if target_normalized and s_normalized:
+                score = fuzz.token_sort_ratio(target_normalized, s_normalized)
+                if score >= 85:
+                    matches.append({
+                        "source_id": src_id,
+                        "stream_id": str(row["stream_id"]),
+                        "name": s_name,
+                        "cover": cover,
+                        "container_extension": data.get("container_extension", "mkv"),
+                        "tmdb_id": s_tmdb_id,
+                        "category_id": row["category_id"],
+                        "score": score,
+                        "matched_by": "fuzzy",
+                    })
+
+        source_order = {s["id"]: i for i, s in enumerate(config.get("sources", []))}
+        matches.sort(key=lambda m: (
+            0 if m.get("matched_by") == "id" else 1,
+            -m["score"],
+            source_order.get(m["source_id"], 999),
+        ))
+        if limit > 0:
+            matches = matches[:limit]
+        return matches
+
+    # ------------------------------------------------------------------
+    # Movie check logic
+    # ------------------------------------------------------------------
+
+    async def check_monitored_movies(self) -> None:
+        """Check all enabled watched movies for availability (called after cache refresh)."""
+        watching = [
+            m for m in self._monitored_movies
+            if m.get("enabled", True) and m.get("status") == "watching"
+        ]
+        if not watching:
+            return
+
+        logger.info(f"Movie monitoring: checking {len(watching)} watched movie(s)...")
+        all_notifications: list[tuple] = []
+        any_queued = False
+
+        for entry in watching:
+            try:
+                found_item = await self._check_single_movie(entry)
+                if found_item:
+                    action = entry.get("action", "notify")
+                    all_notifications.append((
+                        entry.get("canonical_name") or entry.get("movie_name", "Unknown"),
+                        found_item,
+                        entry.get("cover", ""),
+                        action,
+                    ))
+                    if action in ("download", "both"):
+                        any_queued = True
+            except Exception as e:
+                logger.error(f"Error checking monitored movie '{entry.get('movie_name', '?')}': {e}")
+            await asyncio.sleep(0.5)
+
+        self.save_monitored_movies()
+
+        for movie_name, found_item, cover, action in all_notifications:
+            if action in ("notify", "both"):
+                await self.notification_service.send_movie_monitor_notification(movie_name, found_item, cover, action)
+
+        if any_queued:
+            queued = [i for i in self.cart_service.cart if i.get("status") == "queued"]
+            if queued:
+                if self.cart_service.is_in_download_window():
+                    if self.cart_service._try_start_worker():
+                        logger.info(f"Movie monitoring: auto-started download worker for {len(queued)} queued item(s)")
+                else:
+                    logger.info(f"Movie monitoring: {len(queued)} item(s) queued but outside download window")
+
+        logger.info(f"Movie monitoring: check complete. {len(all_notifications)} movie(s) newly found.")
+
+    async def _check_single_movie(self, entry: dict) -> dict | None:
+        """Check one monitored movie. Returns a cart-item dict if the movie is now found."""
+        movie_name = entry.get("canonical_name") or entry.get("movie_name", "")
+        tmdb_id = entry.get("tmdb_id")
+        imdb_id = entry.get("imdb_id")
+        monitor_sources: list[dict] = entry.get("monitor_sources") or []
+
+        source_ids = [ms["source_id"] for ms in monitor_sources if ms.get("source_id")] or None
+        category_filters: dict[str, list[str]] = {}
+        for ms in monitor_sources:
+            if ms.get("source_id"):
+                cats = ms.get("category_filter") or []
+                if isinstance(cats, str):
+                    cats = [cats] if cats else []
+                if cats:
+                    category_filters[ms["source_id"]] = cats
+
+        matches = self.find_movie_across_sources(
+            movie_name,
+            tmdb_id=tmdb_id,
+            imdb_id=imdb_id,
+            source_ids=source_ids,
+            category_filters=category_filters if category_filters else None,
+        )
+
+        entry["last_checked"] = datetime.now().isoformat()
+
+        if not matches:
+            return None
+
+        best = matches[0]
+        action = entry.get("action", "notify")
+        should_download = action in ("download", "both")
+
+        cart_item = {
+            "id": str(uuid.uuid4()),
+            "stream_id": best["stream_id"],
+            "source_id": best["source_id"],
+            "content_type": "vod",
+            "name": entry.get("canonical_name") or entry.get("movie_name") or best["name"],
+            "icon": entry.get("cover") or best.get("cover", ""),
+            "grp": "",
+            "container_extension": best.get("container_extension", "mkv"),
+            "added_at": datetime.now().isoformat(),
+            "status": "queued",
+            "progress": 0,
+            "error": None,
+            "file_path": None,
+            "file_size": None,
+        }
+
+        if should_download:
+            already_in_cart = any(
+                i.get("source_id") == best["source_id"]
+                and i.get("stream_id") == best["stream_id"]
+                and i.get("status") in ("queued", "downloading", "completed")
+                for i in self.cart_service.cart
+            )
+            if not already_in_cart:
+                filepath = self.cart_service.build_download_filepath(cart_item)
+                if os.path.exists(filepath):
+                    entry["status"] = "downloaded"
+                    logger.info(f"Movie monitoring: '{movie_name}' already on disk, marking downloaded")
+                    return cart_item
+                self.cart_service.cart.append(cart_item)
+                self.cart_service.save_cart()
+            entry["status"] = "downloaded"
+            logger.info(f"Movie monitoring: '{movie_name}' found and queued for download")
+        else:
+            entry["status"] = "found"
+            logger.info(f"Movie monitoring: '{movie_name}' found (notify only)")
+
+        return cart_item

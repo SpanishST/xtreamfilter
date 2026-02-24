@@ -280,6 +280,37 @@ CREATE TABLE IF NOT EXISTS monitor_sources (
 CREATE INDEX IF NOT EXISTS idx_monitor_sources_series
     ON monitor_sources (series_id);
 
+-- ── Monitored movies ──────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS monitored_movies (
+    id              TEXT PRIMARY KEY,
+    movie_name      TEXT NOT NULL,
+    canonical_name  TEXT,
+    tmdb_id         TEXT,
+    imdb_id         TEXT,
+    cover           TEXT,
+    action          TEXT NOT NULL DEFAULT 'notify',
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    status          TEXT NOT NULL DEFAULT 'watching',
+    created_at      TEXT,
+    last_checked    TEXT
+);
+
+-- One source slot per monitored-movie rule.
+-- category_filter is the Xtream category_id to restrict VOD search on that source.
+CREATE TABLE IF NOT EXISTS movie_monitor_sources (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    movie_id        TEXT NOT NULL
+                    REFERENCES monitored_movies(id) ON DELETE CASCADE,
+    source_id       TEXT NOT NULL,
+    source_name     TEXT,
+    category_filter TEXT,
+    UNIQUE (movie_id, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_movie_monitor_sources_movie
+    ON movie_monitor_sources (movie_id);
+
 -- ── EPG meta ──────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS epg_meta (

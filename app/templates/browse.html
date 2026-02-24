@@ -1380,6 +1380,11 @@
 
         function debounceSearch() {
             clearTimeout(searchTimeout);
+            // Auto-switch to Films tab when a tmdb: search is typed
+            const val = document.getElementById('search-input').value.trim().toLowerCase();
+            if (val.startsWith('tmdb:') && contentType === 'live') {
+                setContentType('vod');
+            }
             searchTimeout = setTimeout(() => { currentPage = 1; applyFilters(); }, 300);
         }
 

@@ -125,6 +125,10 @@ async def api_browse(
     if search_lower.startswith("tmdb:"):
         tmdb_search_id = search_lower[5:].strip()
         search_lower = ""  # disable name search
+        # TMDB IDs only appear on vod/series — force search over both
+        content_types_to_query_override = ["vod", "series"]
+    else:
+        content_types_to_query_override = None
 
     sources_config = {}
     if use_source_filters:
@@ -159,6 +163,9 @@ async def api_browse(
 
     # When viewing a category, query all content types that have items; otherwise just the requested type
     content_types_to_query = list(category_item_sets.keys()) if category_id and category_item_sets else [type]
+    # Override: TMDB search always covers vod+series regardless of current tab
+    if content_types_to_query_override:
+        content_types_to_query = content_types_to_query_override
 
     TYPE_MAP = {
         "live": ("live_streams", "live_categories"),

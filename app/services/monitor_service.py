@@ -96,7 +96,7 @@ class MonitorService:
         conn = db_connect(self.db_path)
         try:
             series_rows = conn.execute(
-                "SELECT id, series_name, series_id, source_id, source_name, "
+                "SELECT id, series_name, canonical_name, series_id, source_id, source_name, "
                 "source_category, cover, scope, season_filter, action, enabled, "
                 "created_at, last_checked, last_new_count, tmdb_id, imdb_id "
                 "FROM monitored_series ORDER BY created_at"
@@ -118,13 +118,35 @@ class MonitorService:
                     (sid,),
                 ).fetchall()
 
+                # Load multi-source slots (new table; may not exist on old DBs yet)
+                try:
+                    msources = conn.execute(
+                        "SELECT source_id, series_ref, source_name, category, series_name "
+                        "FROM monitor_sources WHERE series_id = ? ORDER BY id",
+                        (sid,),
+                    ).fetchall()
+                    monitor_sources = [
+                        {
+                            "source_id": ms["source_id"],
+                            "series_ref": ms["series_ref"],
+                            "source_name": ms["source_name"],
+                            "category": ms["category"],
+                            "series_name": ms["series_name"],
+                        }
+                        for ms in msources
+                    ]
+                except Exception:
+                    monitor_sources = []
+
                 result.append({
                     "id": sid,
                     "series_name": sr["series_name"],
+                    "canonical_name": sr["canonical_name"],
                     "series_id": sr["series_id"],
                     "source_id": sr["source_id"],
                     "source_name": sr["source_name"],
                     "source_category": sr["source_category"],
+                    "monitor_sources": monitor_sources,
                     "cover": sr["cover"],
                     "scope": sr["scope"],
                     "season_filter": sr["season_filter"],
@@ -169,14 +191,15 @@ class MonitorService:
 
                 conn.execute(
                     """INSERT OR REPLACE INTO monitored_series
-                       (id, series_name, series_id, source_id, source_name,
+                       (id, series_name, canonical_name, series_id, source_id, source_name,
                         source_category, cover, scope, season_filter, action,
                         enabled, created_at, last_checked, last_new_count,
                         tmdb_id, imdb_id)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         entry_id,
                         entry.get("series_name", ""),
+                        entry.get("canonical_name") or None,
                         entry.get("series_id", ""),
                         entry.get("source_id"),
                         entry.get("source_name"),
@@ -227,6 +250,31 @@ class MonitorService:
                         "VALUES (?,?,?,?,?)",
                         dl_rows,
                     )
+
+                # Persist multi-source slots
+                try:
+                    conn.execute(
+                        "DELETE FROM monitor_sources WHERE series_id = ?", (entry_id,)
+                    )
+                    ms_rows = [
+                        (entry_id,
+                         ms.get("source_id", ""),
+                         ms.get("series_ref", ""),
+                         ms.get("source_name"),
+                         ms.get("category"),
+                         ms.get("series_name"))
+                        for ms in entry.get("monitor_sources", [])
+                        if ms.get("source_id") and ms.get("series_ref")
+                    ]
+                    if ms_rows:
+                        conn.executemany(
+                            "INSERT OR IGNORE INTO monitor_sources "
+                            "(series_id, source_id, series_ref, source_name, category, series_name) "
+                            "VALUES (?,?,?,?,?,?)",
+                            ms_rows,
+                        )
+                except Exception as ms_err:
+                    logger.warning(f"Could not persist monitor_sources: {ms_err}")
 
             # Remove deleted entries
             current_ids = [e["id"] for e in self._monitored_series if e.get("id")]
@@ -281,6 +329,25 @@ class MonitorService:
                 changed = True
         if changed:
             self.save_monitored()
+
+    # ------------------------------------------------------------------
+    # Canonical-name resolution (TMDB/IMDB cross-source key)
+    # ------------------------------------------------------------------
+
+    def resolve_canonical_name(self, tmdb_id: str | None, imdb_id: str | None) -> str | None:
+        """Return the user-set canonical_name for a monitored series matching the given
+        TMDB or IMDB id, or None if no match is found."""
+        if not tmdb_id and not imdb_id:
+            return None
+        for entry in self._monitored_series:
+            canon = entry.get("canonical_name")
+            if not canon:
+                continue
+            if tmdb_id and _normalize_tmdb_id(entry.get("tmdb_id")) == tmdb_id:
+                return canon
+            if imdb_id and _normalize_imdb_id(entry.get("imdb_id")) == imdb_id:
+                return canon
+        return None
 
     # ------------------------------------------------------------------
     # Cross-source lookup
@@ -421,16 +488,28 @@ class MonitorService:
 
     async def _check_single_monitored(self, entry: dict) -> list[dict]:
         """Check one monitored series entry. Returns new episode dicts."""
-        series_name = entry.get("series_name", "")
+        series_name = entry.get("canonical_name") or entry.get("series_name", "")
         source_id = entry.get("source_id")
         series_id = entry.get("series_id", "")
         scope = entry.get("scope", "new_only")
         season_filter = entry.get("season_filter")
+        monitor_sources: list[dict] = entry.get("monitor_sources") or []
 
+        # Build list of (source_id, series_id) pairs to fetch
         sources_to_try: list[dict] = []
-        if source_id:
+        if monitor_sources:
+            # Explicit multi-source list set by the user
+            for ms in monitor_sources:
+                if ms.get("source_id") and ms.get("series_ref"):
+                    sources_to_try.append({
+                        "source_id": ms["source_id"],
+                        "series_id": ms["series_ref"],
+                    })
+        elif source_id:
+            # Legacy: single explicit source
             sources_to_try = [{"source_id": source_id, "series_id": series_id}]
         else:
+            # Fuzzy cross-source fallback (pre-multi-source behaviour)
             matches = self.find_series_across_sources(
                 series_name,
                 tmdb_id=entry.get("tmdb_id") or entry.get("tmdb"),
@@ -444,25 +523,11 @@ class MonitorService:
                 entry["last_new_count"] = 0
                 return []
 
-        episodes: list = []
-        used_source_id: Optional[str] = None
-        used_series_id: Optional[str] = None
-        for src in sources_to_try:
-            eps = await self.xtream_service.fetch_series_episodes(src["source_id"], src["series_id"])
-            if eps:
-                episodes = eps
-                used_source_id = src["source_id"]
-                used_series_id = str(src.get("series_id", ""))
-                break
-            await asyncio.sleep(0.5)
-
-        if not episodes:
-            entry["last_checked"] = datetime.now().isoformat()
-            entry["last_new_count"] = 0
-            return []
-
-        if scope == "season" and season_filter:
-            episodes = [ep for ep in episodes if str(ep.get("season")) == str(season_filter)]
+        # When multiple sources are configured, check ALL of them so we don't
+        # miss an episode that appears on one source before the others.
+        # We de-duplicate new episodes by (season, episode_num).
+        all_new_episodes: list[dict] = []
+        seen_ep_keys_global: set[tuple] = set()
 
         known_keys = {
             (str(k.get("season", "")), _safe_episode_num(k.get("episode_num")))
@@ -476,65 +541,89 @@ class MonitorService:
         action = entry.get("action", "both")
         should_download = action in ("download", "both")
 
-        new_episodes: list[dict] = []
-        for ep in episodes:
-            ep_key = (str(ep.get("season", "")), _safe_episode_num(ep.get("episode_num")))
-            if ep_key in already_seen:
+        any_source_had_episodes = False
+
+        for src in sources_to_try:
+            src_source_id = src["source_id"]
+            src_series_id = str(src["series_id"])
+
+            episodes = await self.xtream_service.fetch_series_episodes(src_source_id, src_series_id)
+            if not episodes:
+                await asyncio.sleep(0.5)
                 continue
 
-            stream_id = str(ep.get("stream_id", ""))
-            if should_download and any(
-                i.get("source_id") == used_source_id
-                and i.get("stream_id") == stream_id
-                and i.get("status") in ("queued", "downloading")
-                for i in self.cart_service.cart
-            ):
-                continue
+            any_source_had_episodes = True
 
-            cart_item = {
-                "id": str(uuid.uuid4()),
-                "stream_id": stream_id,
-                "source_id": used_source_id,
-                "content_type": "series",
-                "name": ep.get("title", "") or f"Episode {ep.get('episode_num', '')}",
-                # Always use the monitor entry's series_name (user-provided/display name)
-                # rather than the stream's series_name which may contain provider tags.
-                "series_name": series_name or ep.get("series_name", ""),
-                "series_id": used_series_id or series_id,
-                "season": ep.get("season"),
-                "episode_num": ep.get("episode_num", 0),
-                "episode_title": ep.get("title", ""),
-                "episode_info": ep.get("info", {}),
-                "icon": entry.get("cover", ""),
-                "group": "",
-                "container_extension": ep.get("container_extension", "mp4"),
-                "added_at": datetime.now().isoformat(),
-                "status": "queued",
-                "progress": 0,
-                "error": None,
-                "file_path": None,
-                "file_size": None,
-            }
+            if scope == "season" and season_filter:
+                episodes = [ep for ep in episodes if str(ep.get("season")) == str(season_filter)]
 
-            if should_download:
-                filepath = self.cart_service.build_download_filepath(cart_item)
-                if os.path.exists(filepath):
-                    entry.setdefault("downloaded_episodes", []).append({
-                        "stream_id": stream_id,
-                        "source_id": used_source_id,
-                        "season": ep.get("season"),
-                        "episode_num": ep.get("episode_num", 0),
-                    })
+            for ep in episodes:
+                ep_key = (str(ep.get("season", "")), _safe_episode_num(ep.get("episode_num")))
+                if ep_key in already_seen or ep_key in seen_ep_keys_global:
                     continue
-                self.cart_service.cart.append(cart_item)
 
-            new_episodes.append(cart_item)
-            entry.setdefault("downloaded_episodes", []).append({
-                "stream_id": stream_id,
-                "source_id": used_source_id,
-                "season": ep.get("season"),
-                "episode_num": ep.get("episode_num", 0),
-            })
+                stream_id = str(ep.get("stream_id", ""))
+                if should_download and any(
+                    i.get("source_id") == src_source_id
+                    and i.get("stream_id") == stream_id
+                    and i.get("status") in ("queued", "downloading")
+                    for i in self.cart_service.cart
+                ):
+                    continue
+
+                cart_item = {
+                    "id": str(uuid.uuid4()),
+                    "stream_id": stream_id,
+                    "source_id": src_source_id,
+                    "content_type": "series",
+                    "name": ep.get("title", "") or f"Episode {ep.get('episode_num', '')}",
+                    "series_name": series_name or ep.get("series_name", ""),
+                    "series_id": src_series_id or series_id,
+                    "season": ep.get("season"),
+                    "episode_num": ep.get("episode_num", 0),
+                    "episode_title": ep.get("title", ""),
+                    "episode_info": ep.get("info", {}),
+                    "icon": entry.get("cover", ""),
+                    "group": "",
+                    "container_extension": ep.get("container_extension", "mp4"),
+                    "added_at": datetime.now().isoformat(),
+                    "status": "queued",
+                    "progress": 0,
+                    "error": None,
+                    "file_path": None,
+                    "file_size": None,
+                }
+
+                if should_download:
+                    filepath = self.cart_service.build_download_filepath(cart_item)
+                    if os.path.exists(filepath):
+                        entry.setdefault("downloaded_episodes", []).append({
+                            "stream_id": stream_id,
+                            "source_id": src_source_id,
+                            "season": ep.get("season"),
+                            "episode_num": ep.get("episode_num", 0),
+                        })
+                        seen_ep_keys_global.add(ep_key)
+                        continue
+                    self.cart_service.cart.append(cart_item)
+
+                all_new_episodes.append(cart_item)
+                seen_ep_keys_global.add(ep_key)
+                entry.setdefault("downloaded_episodes", []).append({
+                    "stream_id": stream_id,
+                    "source_id": src_source_id,
+                    "season": ep.get("season"),
+                    "episode_num": ep.get("episode_num", 0),
+                })
+
+            await asyncio.sleep(0.5)
+
+        if not any_source_had_episodes:
+            entry["last_checked"] = datetime.now().isoformat()
+            entry["last_new_count"] = 0
+            return []
+
+        new_episodes = all_new_episodes
 
         if new_episodes and should_download:
             self.cart_service.save_cart()
@@ -580,17 +669,20 @@ class MonitorService:
 
         source_id = entry.get("source_id")
         series_id = entry.get("series_id", "")
-        series_name = entry.get("series_name", "")
+        series_name = entry.get("canonical_name") or entry.get("series_name", "")
+        monitor_sources: list[dict] = entry.get("monitor_sources") or []
 
-        # --- Fetch episodes ------------------------------------------------
-        episodes: list = []
-        used_source_id: Optional[str] = None
-        used_series_id: Optional[str] = None
-
-        if source_id:
-            episodes = await self.xtream_service.fetch_series_episodes(source_id, series_id)
-            used_source_id = source_id
-            used_series_id = series_id
+        # --- Build list of source/series pairs to fetch --------------------
+        sources_to_try: list[dict] = []
+        if monitor_sources:
+            for ms in monitor_sources:
+                if ms.get("source_id") and ms.get("series_ref"):
+                    sources_to_try.append({
+                        "source_id": ms["source_id"],
+                        "series_id": ms["series_ref"],
+                    })
+        elif source_id:
+            sources_to_try = [{"source_id": source_id, "series_id": series_id}]
         else:
             matches = self.find_series_across_sources(
                 series_name,
@@ -598,84 +690,95 @@ class MonitorService:
                 imdb_id=entry.get("imdb_id") or entry.get("imdb"),
             )
             for m in matches:
-                eps = await self.xtream_service.fetch_series_episodes(
-                    m["source_id"], m["series_id"]
-                )
-                if eps:
-                    episodes = eps
-                    used_source_id = m["source_id"]
-                    used_series_id = str(m.get("series_id", ""))
-                    break
-                await asyncio.sleep(0.5)
+                sources_to_try.append({"source_id": m["source_id"], "series_id": m["series_id"]})
 
-        if not episodes:
+        if not sources_to_try:
             logger.warning(
-                f"Series monitoring backfill: no episodes found for '{series_name}'"
+                f"Series monitoring backfill: no sources found for '{series_name}'"
             )
             return 0
 
-        # --- Filter by season if requested ---------------------------------
-        if backfill == "season" and backfill_season:
-            episodes = [
-                ep for ep in episodes
-                if str(ep.get("season")) == str(backfill_season)
-            ]
-
-        # --- Queue each episode --------------------------------------------
+        # --- Collect episodes from all applicable sources ------------------
+        seen_ep_keys: set[tuple] = set()
         queued_count = 0
-        for ep in episodes:
-            stream_id = str(ep.get("stream_id", ""))
 
-            # Skip if already in cart (queued/downloading)
-            if any(
-                i.get("source_id") == used_source_id
-                and i.get("stream_id") == stream_id
-                and i.get("status") in ("queued", "downloading")
-                for i in self.cart_service.cart
-            ):
+        for src in sources_to_try:
+            used_source_id = src["source_id"]
+            used_series_id = str(src["series_id"])
+
+            episodes = await self.xtream_service.fetch_series_episodes(used_source_id, used_series_id)
+            if not episodes:
+                await asyncio.sleep(0.5)
                 continue
 
-            cart_item = {
-                "id": str(uuid.uuid4()),
-                "stream_id": stream_id,
-                "source_id": used_source_id,
-                "content_type": "series",
-                "name": ep.get("title", "") or f"Episode {ep.get('episode_num', '')}",
-                "series_name": series_name or ep.get("series_name", ""),
-                "series_id": used_series_id or series_id,
-                "season": ep.get("season"),
-                "episode_num": ep.get("episode_num", 0),
-                "episode_title": ep.get("title", ""),
-                "episode_info": ep.get("info", {}),
-                "icon": entry.get("cover", ""),
-                "group": "",
-                "container_extension": ep.get("container_extension", "mp4"),
-                "added_at": datetime.now().isoformat(),
-                "status": "queued",
-                "progress": 0,
-                "error": None,
-                "file_path": None,
-                "file_size": None,
-            }
+            # Filter by season if requested
+            if backfill == "season" and backfill_season:
+                episodes = [
+                    ep for ep in episodes
+                    if str(ep.get("season")) == str(backfill_season)
+                ]
 
-            filepath = self.cart_service.build_download_filepath(cart_item)
-            if os.path.exists(filepath):
+            for ep in episodes:
+                ep_key = (str(ep.get("season", "")), _safe_episode_num(ep.get("episode_num")))
+                if ep_key in seen_ep_keys:
+                    continue
+
+                stream_id = str(ep.get("stream_id", ""))
+
+                # Skip if already in cart (queued/downloading)
+                if any(
+                    i.get("source_id") == used_source_id
+                    and i.get("stream_id") == stream_id
+                    and i.get("status") in ("queued", "downloading")
+                    for i in self.cart_service.cart
+                ):
+                    continue
+
+                cart_item = {
+                    "id": str(uuid.uuid4()),
+                    "stream_id": stream_id,
+                    "source_id": used_source_id,
+                    "content_type": "series",
+                    "name": ep.get("title", "") or f"Episode {ep.get('episode_num', '')}",
+                    "series_name": series_name or ep.get("series_name", ""),
+                    "series_id": used_series_id or series_id,
+                    "season": ep.get("season"),
+                    "episode_num": ep.get("episode_num", 0),
+                    "episode_title": ep.get("title", ""),
+                    "episode_info": ep.get("info", {}),
+                    "icon": entry.get("cover", ""),
+                    "group": "",
+                    "container_extension": ep.get("container_extension", "mp4"),
+                    "added_at": datetime.now().isoformat(),
+                    "status": "queued",
+                    "progress": 0,
+                    "error": None,
+                    "file_path": None,
+                    "file_size": None,
+                }
+
+                filepath = self.cart_service.build_download_filepath(cart_item)
+                if os.path.exists(filepath):
+                    entry.setdefault("downloaded_episodes", []).append({
+                        "stream_id": stream_id,
+                        "source_id": used_source_id,
+                        "season": ep.get("season"),
+                        "episode_num": ep.get("episode_num", 0),
+                    })
+                    seen_ep_keys.add(ep_key)
+                    continue
+
+                self.cart_service.cart.append(cart_item)
                 entry.setdefault("downloaded_episodes", []).append({
                     "stream_id": stream_id,
                     "source_id": used_source_id,
                     "season": ep.get("season"),
                     "episode_num": ep.get("episode_num", 0),
                 })
-                continue
+                seen_ep_keys.add(ep_key)
+                queued_count += 1
 
-            self.cart_service.cart.append(cart_item)
-            entry.setdefault("downloaded_episodes", []).append({
-                "stream_id": stream_id,
-                "source_id": used_source_id,
-                "season": ep.get("season"),
-                "episode_num": ep.get("episode_num", 0),
-            })
-            queued_count += 1
+            await asyncio.sleep(0.5)
 
         if queued_count > 0:
             self.cart_service.save_cart()

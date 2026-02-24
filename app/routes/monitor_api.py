@@ -57,9 +57,12 @@ async def add_monitored(
     source_id = data.get("source_id") or None
     source_name = data.get("source_name") or None
     source_category = data.get("source_category") or None
+    # New: list of {source_id, series_ref, source_name, category} for multi-source monitoring
+    monitor_sources: list[dict] = data.get("monitor_sources") or []
     cover = data.get("cover", "")
     tmdb_id = _normalize_tmdb_id(data.get("tmdb_id") or data.get("tmdb"))
     imdb_id = _normalize_imdb_id(data.get("imdb_id") or data.get("imdb"))
+    canonical_name = (data.get("canonical_name") or "").strip() or None
     scope = data.get("scope", "new_only")
     season_filter = data.get("season_filter")
     action = data.get("action", "both")
@@ -79,11 +82,45 @@ async def add_monitored(
     if backfill == "season" and not backfill_season:
         return JSONResponse(status_code=400, content={"error": "backfill_season required when backfill is 'season'"})
 
+    # Validate monitor_sources items
+    validated_sources: list[dict] = []
+    for ms in monitor_sources:
+        ms_source_id = str(ms.get("source_id") or "").strip()
+        ms_series_ref = str(ms.get("series_ref") or "").strip()
+        if ms_source_id and ms_series_ref:
+            validated_sources.append({
+                "source_id": ms_source_id,
+                "series_ref": ms_series_ref,
+                "source_name": str(ms.get("source_name") or "").strip() or None,
+                "category": str(ms.get("category") or "").strip() or None,
+                "series_name": str(ms.get("series_name") or "").strip() or None,
+            })
+
     # Duplicate check
     for m in monitor._monitored_series:
         if source_id:
             if m.get("source_id") == source_id and m.get("series_id") == series_id:
                 return JSONResponse(status_code=409, content={"error": "This series is already being monitored from this source"})
+        elif validated_sources:
+            # Multi-source: check if the same set of sources is already monitored for the same series
+            existing_tmdb_id = _normalize_tmdb_id(m.get("tmdb_id") or m.get("tmdb"))
+            existing_imdb_id = _normalize_imdb_id(m.get("imdb_id") or m.get("imdb"))
+            same_id = (
+                (tmdb_id and existing_tmdb_id and tmdb_id == existing_tmdb_id)
+                or (imdb_id and existing_imdb_id and imdb_id == existing_imdb_id)
+            )
+            same_name = normalize_name(m.get("series_name", "")) == normalize_name(series_name)
+            if same_id or same_name:
+                existing_sources = {
+                    (ms.get("source_id"), ms.get("series_ref"))
+                    for ms in m.get("monitor_sources", [])
+                }
+                overlap = any(
+                    (vs["source_id"], vs["series_ref"]) in existing_sources
+                    for vs in validated_sources
+                )
+                if overlap:
+                    return JSONResponse(status_code=409, content={"error": "One or more selected sources are already monitored for this series"})
         else:
             existing_tmdb_id = _normalize_tmdb_id(m.get("tmdb_id") or m.get("tmdb"))
             existing_imdb_id = _normalize_imdb_id(m.get("imdb_id") or m.get("imdb"))
@@ -95,11 +132,37 @@ async def add_monitored(
             if not m.get("source_id") and (same_id or same_name):
                 return JSONResponse(status_code=409, content={"error": "This series is already being monitored (any source)"})
 
-    # Build known episodes snapshot
+    # Build known episodes snapshot across all selected sources
     known_episodes: list[dict] = []
     if scope in ("new_only", "season"):
-        if source_id:
+        if validated_sources:
+            seen_ep_keys: set[tuple] = set()
+            for ms in validated_sources:
+                eps = await xtream.fetch_series_episodes(ms["source_id"], ms["series_ref"])
+                for ep in eps:
+                    if scope == "season" and str(ep.get("season")) != str(season_filter):
+                        continue
+                    ep_key = (str(ep.get("season", "")), _safe_episode_num(ep.get("episode_num")))
+                    if ep_key in seen_ep_keys:
+                        continue
+                    seen_ep_keys.add(ep_key)
+                    known_episodes.append({
+                        "stream_id": str(ep.get("stream_id", "")),
+                        "source_id": ms["source_id"],
+                        "season": str(ep.get("season", "")),
+                        "episode_num": _safe_episode_num(ep.get("episode_num")),
+                    })
+        elif source_id:
             episodes = await xtream.fetch_series_episodes(source_id, series_id)
+            for ep in episodes:
+                if scope == "season" and str(ep.get("season")) != str(season_filter):
+                    continue
+                known_episodes.append({
+                    "stream_id": str(ep.get("stream_id", "")),
+                    "source_id": source_id or "",
+                    "season": str(ep.get("season", "")),
+                    "episode_num": _safe_episode_num(ep.get("episode_num")),
+                })
         else:
             matches = monitor.find_series_across_sources(series_name, tmdb_id=tmdb_id, imdb_id=imdb_id)
             episodes = []
@@ -108,24 +171,25 @@ async def add_monitored(
                 if eps:
                     episodes = eps
                     break
-
-        for ep in episodes:
-            if scope == "season" and str(ep.get("season")) != str(season_filter):
-                continue
-            known_episodes.append({
-                "stream_id": str(ep.get("stream_id", "")),
-                "source_id": source_id or "",
-                "season": str(ep.get("season", "")),
-                "episode_num": _safe_episode_num(ep.get("episode_num")),
-            })
+            for ep in episodes:
+                if scope == "season" and str(ep.get("season")) != str(season_filter):
+                    continue
+                known_episodes.append({
+                    "stream_id": str(ep.get("stream_id", "")),
+                    "source_id": source_id or "",
+                    "season": str(ep.get("season", "")),
+                    "episode_num": _safe_episode_num(ep.get("episode_num")),
+                })
 
     entry = {
         "id": str(uuid.uuid4()),
         "series_name": series_name,
+        "canonical_name": canonical_name,
         "series_id": series_id,
         "source_id": source_id,
         "source_name": source_name,
         "source_category": source_category,
+        "monitor_sources": validated_sources,
         "cover": cover,
         "tmdb_id": tmdb_id,
         "imdb_id": imdb_id,
@@ -178,6 +242,27 @@ async def update_monitored(monitor_id: str, request: Request, monitor: MonitorSe
                 entry["imdb_id"] = _normalize_imdb_id(data.get("imdb_id") or data.get("imdb"))
             if "action" in data and data["action"] in ("notify", "download", "both"):
                 entry["action"] = data["action"]
+            if "canonical_name" in data:
+                entry["canonical_name"] = (data["canonical_name"] or "").strip() or None
+            if "monitor_sources" in data:
+                validated: list[dict] = []
+                for ms in (data.get("monitor_sources") or []):
+                    ms_sid = str(ms.get("source_id") or "").strip()
+                    ms_ref = str(ms.get("series_ref") or "").strip()
+                    if ms_sid and ms_ref:
+                        validated.append({
+                            "source_id": ms_sid,
+                            "series_ref": ms_ref,
+                            "source_name": str(ms.get("source_name") or "").strip() or None,
+                            "category": str(ms.get("category") or "").strip() or None,
+                            "series_name": str(ms.get("series_name") or "").strip() or None,
+                        })
+                entry["monitor_sources"] = validated
+                # Clear legacy source fields when switching to explicit multi-source list
+                if validated:
+                    entry["source_id"] = None
+                    entry["source_name"] = None
+                    entry["source_category"] = None
             monitor.save_monitored()
             return {"status": "ok", "entry": entry}
     return JSONResponse(status_code=404, content={"error": "Monitored entry not found"})
@@ -199,6 +284,25 @@ async def trigger_monitor_check(monitor: MonitorService = Depends(get_monitor_se
         return JSONResponse(status_code=409, content={"status": "skipped", "message": "Monitoring check already in progress"})
     asyncio.create_task(monitor.check_monitored_series())
     return {"status": "ok", "message": "Monitoring check started"}
+
+
+@router.get("/api/monitor/series-meta/{source_id}/{series_id}")
+async def get_series_meta(
+    source_id: str,
+    series_id: str,
+    xtream: XtreamService = Depends(get_xtream_service),
+):
+    """Fetch TMDB metadata for a series to pre-fill the canonical name."""
+    info = await xtream.fetch_series_info(source_id, series_id)
+    if not info:
+        return JSONResponse(status_code=404, content={"error": "Series info not found"})
+    name = (info.get("name") or info.get("title") or "").strip()
+    return {
+        "name": name,
+        "tmdb_id": _normalize_tmdb_id(info.get("tmdb_id") or info.get("tmdb")),
+        "imdb_id": _normalize_imdb_id(info.get("imdb_id") or info.get("imdb")),
+        "plot": (info.get("plot") or "").strip(),
+    }
 
 
 @router.get("/api/monitor/{monitor_id}/episodes")

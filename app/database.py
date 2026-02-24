@@ -217,6 +217,7 @@ CREATE TABLE IF NOT EXISTS cart_items (
 CREATE TABLE IF NOT EXISTS monitored_series (
     id              TEXT PRIMARY KEY,
     series_name     TEXT NOT NULL,
+    canonical_name  TEXT,
     series_id       TEXT NOT NULL,
     source_id       TEXT,
     source_name     TEXT,
@@ -261,6 +262,24 @@ CREATE TABLE IF NOT EXISTS downloaded_episodes (
 CREATE INDEX IF NOT EXISTS idx_dl_eps_series
     ON downloaded_episodes (series_id);
 
+-- Multiple source+category slots per monitored series entry.
+-- When this table has rows for a given series_id, the monitoring check
+-- iterates over these sources instead of performing a fuzzy cross-source search.
+CREATE TABLE IF NOT EXISTS monitor_sources (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    series_id   TEXT NOT NULL
+                REFERENCES monitored_series(id) ON DELETE CASCADE,
+    source_id   TEXT NOT NULL,
+    series_ref  TEXT NOT NULL,
+    source_name TEXT,
+    category    TEXT,
+    series_name TEXT,
+    UNIQUE (series_id, source_id, series_ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_monitor_sources_series
+    ON monitor_sources (series_id);
+
 -- ── EPG meta ──────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS epg_meta (
@@ -288,6 +307,8 @@ def init_db(db_path: str) -> None:
 _COLUMN_UPGRADES: list[tuple[str, str, str]] = [
     # (table, column, definition)
     ("cart_items", "series_id", "TEXT"),
+    ("monitor_sources", "series_name", "TEXT"),
+    ("monitored_series", "canonical_name", "TEXT"),
 ]
 
 

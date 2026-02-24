@@ -107,6 +107,18 @@
         .edit-form input[type=number] { width: 100%; padding: 8px 12px; background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; color: #e0e0e0; font-size: 0.95em; outline: none; }
         .edit-form input[type=number]:focus { border-color: #00d4ff; }
 
+        /* Source checkboxes in edit modal */
+        .edit-form .source-list { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
+        .edit-form .source-check-item { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; cursor: pointer; transition: background 0.2s; }
+        .edit-form .source-check-item:hover { background: rgba(255,255,255,0.05); }
+        .edit-form .source-check-item input[type=checkbox] { width: 15px; height: 15px; flex-shrink: 0; accent-color: #a29bfe; cursor: pointer; }
+        .edit-form .source-check-item .src-name { font-weight: 500; color: #e0e0e0; font-size: 0.88em; white-space: nowrap; margin-left: 4px; }
+        .edit-form .source-check-item .src-cat { font-size: 0.78em; color: #a29bfe; white-space: nowrap; }
+        .edit-form .source-check-item .src-series { font-size: 0.78em; color: #00d4ff; font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1 1 0; min-width: 0; }
+        .edit-form .source-select-all { display: flex; align-items: center; gap: 8px; padding: 4px 12px; margin-bottom: 2px; cursor: pointer; user-select: none; }
+        .edit-form .source-select-all input[type=checkbox] { width: 14px; height: 14px; flex-shrink: 0; accent-color: #a29bfe; cursor: pointer; }
+        .edit-form .source-select-all span { font-size: 0.78em; color: #a29bfe; font-weight: 500; }
+
         @media (max-width: 768px) {
             .series-grid { grid-template-columns: 1fr; }
             .series-card { flex-direction: column; }
@@ -200,6 +212,16 @@
                         </div>
                     </div>
                 </div>
+                <div class="form-group">
+                    <label>Sources</label>
+                    <div class="source-list" id="edit-source-options">
+                        <!-- populated by JS -->
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Download folder name <span style="color:#888;font-weight:normal;font-size:0.8em">(canonical name, used as download folder name)</span></label>
+                    <input type="text" id="edit-canonical-name" style="width:100%;padding:8px 10px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#fff;font-size:0.9em;box-sizing:border-box;" placeholder="Leave blank to use series name">
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeEditModal()">Cancel</button>
@@ -271,10 +293,27 @@
                     : entry.scope === 'season' ? 'Season ' + (entry.season_filter || '?')
                     : 'New only';
 
-                const sourceLabel = entry.source_id
-                    ? (entry.source_name || entry.source_id) + (entry.source_category ? ' (' + entry.source_category + ')' : '')
-                    : 'Any source';
-                const sourceBadgeClass = entry.source_id ? 'badge-source' : 'badge-any-source';
+                // Source label — support multi-source entries
+                let sourceLabel, sourceBadgeClass, sourceBadgeTitle = '';
+                const mSources = entry.monitor_sources || [];
+                if (mSources.length > 1) {
+                    sourceLabel = mSources.length + ' sources';
+                    sourceBadgeClass = 'badge-any-source';
+                    sourceBadgeTitle = mSources.map(ms =>
+                        (ms.source_name || ms.source_id) + (ms.category ? ' (' + ms.category + ')' : '')
+                    ).join(', ');
+                } else if (mSources.length === 1) {
+                    sourceLabel = (mSources[0].source_name || mSources[0].source_id) +
+                        (mSources[0].category ? ' (' + mSources[0].category + ')' : '');
+                    sourceBadgeClass = 'badge-source';
+                } else if (entry.source_id) {
+                    sourceLabel = (entry.source_name || entry.source_id) +
+                        (entry.source_category ? ' (' + entry.source_category + ')' : '');
+                    sourceBadgeClass = 'badge-source';
+                } else {
+                    sourceLabel = 'Any source';
+                    sourceBadgeClass = 'badge-any-source';
+                }
 
                 const actionVal = entry.action || 'both';
                 const actionLabel = actionVal === 'notify' ? '🔔 Notify only'
@@ -296,7 +335,7 @@
                     '<div class="series-name">' + escapeHtml(entry.series_name) + '</div>' +
                     '<div class="series-meta">' +
                     '<span class="series-badge badge-scope">' + scopeLabel + '</span>' +
-                    '<span class="series-badge ' + sourceBadgeClass + '">' + escapeHtml(sourceLabel) + '</span>' +
+                    '<span class="series-badge ' + sourceBadgeClass + '"' + (sourceBadgeTitle ? ' title="' + escapeAttr(sourceBadgeTitle) + '"' : '') + '>' + escapeHtml(sourceLabel) + '</span>' +
                     '<span class="series-badge badge-action">' + actionLabel + '</span>' +
                     newBadge +
                     '</div>' +
@@ -392,6 +431,12 @@
                 o.classList.toggle('selected', o.dataset.action === (entry.action || 'both'));
             });
 
+            // Build source checkboxes
+            _buildEditSourceList(entry);
+
+            // Pre-fill canonical name
+            document.getElementById('edit-canonical-name').value = entry.canonical_name || '';
+
             document.getElementById('edit-modal').classList.add('show');
         }
 
@@ -413,6 +458,65 @@
             });
         }
 
+        function _buildEditSourceList(entry) {
+            const container = document.getElementById('edit-source-options');
+
+            // Build flat list: prefer monitor_sources, fall back to legacy source_id
+            const mSources = entry.monitor_sources || [];
+            const effectiveSources = mSources.length > 0
+                ? mSources
+                : (entry.source_id ? [{
+                    source_id: entry.source_id,
+                    series_ref: entry.series_id || '',
+                    source_name: entry.source_name || entry.source_id,
+                    category: entry.source_category || '',
+                    series_name: '',
+                  }] : []);
+
+            if (effectiveSources.length === 0) {
+                container.innerHTML = '<span style="color:#888;font-size:0.85em;padding:6px 12px;">No explicit sources — monitoring searches all sources automatically.</span>';
+                return;
+            }
+
+            // Select-all toggle (pure UI helper)
+            let html = '<label class="source-select-all">' +
+                '<input type="checkbox" id="edit-src-all" checked onchange="_onEditSelectAllToggle(this)">' +
+                '<span>Select / deselect all</span>' +
+                '</label>';
+
+            for (const ms of effectiveSources) {
+                const cat = ms.category || '';
+                const sn = ms.series_name || '';
+                html += '<label class="source-check-item">' +
+                    '<input type="checkbox" class="edit-src-specific" checked' +
+                    ' data-source-id="' + escapeAttr(ms.source_id) + '"' +
+                    ' data-series-ref="' + escapeAttr(ms.series_ref) + '"' +
+                    ' data-source-name="' + escapeAttr(ms.source_name || '') + '"' +
+                    ' data-category="' + escapeAttr(cat) + '"' +
+                    ' data-series-name="' + escapeAttr(sn) + '"' +
+                    ' onchange="_onEditSrcChange()">' +
+                    '<span class="src-name">' + escapeHtml(ms.source_name || ms.source_id) + '</span>' +
+                    (cat ? '<span class="src-cat">' + escapeHtml(cat) + '</span>' : '') +
+                    (sn ? '<span class="src-series">' + escapeHtml(sn) + '</span>' : '') +
+                    '</label>';
+            }
+
+            container.innerHTML = html;
+        }
+
+        function _onEditSelectAllToggle(checkbox) {
+            document.querySelectorAll('#edit-source-options .edit-src-specific').forEach(cb => {
+                cb.checked = checkbox.checked;
+            });
+        }
+
+        function _onEditSrcChange() {
+            const all = document.querySelectorAll('#edit-source-options .edit-src-specific');
+            const allChecked = Array.from(all).every(cb => cb.checked);
+            const selectAll = document.getElementById('edit-src-all');
+            if (selectAll) selectAll.checked = allChecked;
+        }
+
         async function saveEdit() {
             if (!_editModalId) return;
             const scopeEl = document.querySelector('#edit-modal .scope-option[data-scope].selected');
@@ -426,6 +530,20 @@
                 return;
             }
 
+            // Collect sources — always stored individually
+            const checkedSrcs = Array.from(document.querySelectorAll('#edit-source-options .edit-src-specific:checked'));
+            if (checkedSrcs.length === 0 && document.querySelector('#edit-source-options .edit-src-specific')) {
+                showToast('Please select at least one source', 'error');
+                return;
+            }
+            const monitorSources = checkedSrcs.map(cb => ({
+                source_id: cb.dataset.sourceId,
+                series_ref: cb.dataset.seriesRef,
+                source_name: cb.dataset.sourceName || '',
+                category: cb.dataset.category || '',
+                series_name: cb.dataset.seriesName || '',
+            }));
+
             const saveBtn = document.getElementById('edit-save-btn');
             const origHtml = saveBtn.innerHTML;
             saveBtn.disabled = true;
@@ -435,7 +553,7 @@
                 const resp = await fetch('/api/monitor/' + _editModalId, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ scope, season_filter: seasonFilter, action })
+                    body: JSON.stringify({ scope, season_filter: seasonFilter, action, monitor_sources: monitorSources, canonical_name: document.getElementById('edit-canonical-name').value.trim() || null })
                 });
                 if (resp.ok) {
                     showToast('Monitoring updated', 'success');

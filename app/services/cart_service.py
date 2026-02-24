@@ -20,6 +20,7 @@ from xml.dom import minidom
 import httpx
 
 from app.database import DB_NAME, db_connect
+from app.services.monitor_service import _normalize_imdb_id, _normalize_tmdb_id
 
 from app.models.xtream import PLAYER_PROFILES
 
@@ -431,6 +432,8 @@ class CartService:
         self.notification_service = notification_service
         self.xtream_service = xtream_service
         self.db_path = os.path.join(config_service.data_dir, DB_NAME)
+        # Late-bound by main.py after MonitorService is constructed
+        self.monitor_service = None
 
         self._download_cart: list[dict] = []
         self._download_task: Optional[asyncio.Task] = None
@@ -651,18 +654,28 @@ class CartService:
                     if info:
                         # Always store series info for NFO generation.
                         item["_series_info"] = info
-                        # Always prefer the metadata title over the source catalogue
-                        # name which often contains provider-specific prefixes/tags
-                        # (e.g. "AMZ - The Expanse (2015)" → "The Expanse (2015)").
-                        meta_title = _str_val(
-                            info.get("name") or info.get("title")
-                        ).strip()
-                        if meta_title:
-                            year = _extract_year(info)
-                            if year and year not in meta_title:
-                                meta_title = f"{meta_title} ({year})"
-                            item["series_name"] = meta_title
-                            logger.info(f"[META] Enriched series name: '{meta_title}'")
+                        # If this series is being monitored, prefer the user-set
+                        # canonical_name (looked up via TMDB/IMDB id) so all
+                        # episodes from all sources land in the same directory.
+                        meta_tmdb = _normalize_tmdb_id(info.get("tmdb_id") or info.get("tmdb"))
+                        meta_imdb = _normalize_imdb_id(info.get("imdb_id") or info.get("imdb"))
+                        monitor_canon = None
+                        if self.monitor_service is not None:
+                            monitor_canon = self.monitor_service.resolve_canonical_name(meta_tmdb, meta_imdb)
+                        if monitor_canon:
+                            item["series_name"] = monitor_canon
+                            logger.info(f"[META] Using monitored canonical name: '{monitor_canon}'")
+                        else:
+                            # Fall back to metadata title (strips provider prefixes)
+                            meta_title = _str_val(
+                                info.get("name") or info.get("title")
+                            ).strip()
+                            if meta_title:
+                                year = _extract_year(info)
+                                if year and year not in meta_title:
+                                    meta_title = f"{meta_title} ({year})"
+                                item["series_name"] = meta_title
+                                logger.info(f"[META] Enriched series name: '{meta_title}'")
         except Exception as e:
             logger.debug(f"Could not enrich item name from metadata: {e}")
 

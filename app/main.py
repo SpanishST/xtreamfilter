@@ -174,6 +174,7 @@ async def lifespan(app: FastAPI):
 
     monitor = MonitorService(cfg, cache, xtream, notif, cart)
     monitor.load_monitored()
+    cart.monitor_service = monitor  # late bind for canonical name lookup
 
     m3u = M3uService(cfg, cache)
 

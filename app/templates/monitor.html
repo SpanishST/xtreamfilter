@@ -631,6 +631,9 @@
             const entry = monitoredSeries.find(e => e.id === id);
             if (!entry) return;
             _editModalId = id;
+            // Always reset save button in case a previous save left it disabled
+            const _sb = document.getElementById('edit-save-btn');
+            if (_sb) { _sb.disabled = false; _sb.innerHTML = '💾 Save'; }
             document.getElementById('edit-modal-title').textContent = '✏️ Edit: ' + (entry.canonical_name || entry.series_name);
 
             // Set scope
@@ -771,6 +774,8 @@
                 });
                 if (resp.ok) {
                     showToast('Monitoring updated', 'success');
+                    saveBtn.disabled = false;
+                    saveBtn.innerHTML = origHtml;
                     closeEditModal();
                     await loadMonitored();
                 } else {

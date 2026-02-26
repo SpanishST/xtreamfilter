@@ -95,9 +95,10 @@
         .loading { text-align: center; padding: 60px 20px; color: #888; }
         .loading-spinner { display: inline-block; width: 40px; height: 40px; border: 3px solid rgba(0, 212, 255, 0.1); border-radius: 50%; border-top-color: #00d4ff; animation: spin 1s linear infinite; margin-bottom: 15px; }
         @keyframes spin { to { transform: rotate(360deg); } }
-        .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.8); display: none; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
+        .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.8); display: none; align-items: center; justify-content: center; z-index: 1000; padding: 12px; }
         .modal-overlay.show { display: flex; }
         .modal { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 16px; max-width: 600px; width: 100%; max-height: 90vh; overflow-y: auto; }
+        #monitor-modal .modal { max-width: min(800px, 95vw); }
         .modal-header { padding: 20px; border-bottom: 1px solid rgba(255, 255, 255, 0.1); display: flex; justify-content: space-between; align-items: center; }
         .modal-header h2 { color: #00d4ff; font-size: 1.3em; }
         .modal-close { background: none; border: none; color: #888; font-size: 1.5em; cursor: pointer; }
@@ -185,10 +186,22 @@
         .monitor-form .scope-option .scope-title { font-weight: 600; font-size: 0.95em; margin-bottom: 3px; }
         .monitor-form .scope-option .scope-desc { font-size: 0.75em; color: #888; }
         .monitor-form select { width: 100%; padding: 10px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; background: rgba(0, 0, 0, 0.3); color: #fff; font-size: 0.95em; }
-        .monitor-form .source-options { display: flex; gap: 8px; flex-wrap: wrap; }
-        .monitor-form .source-option { padding: 10px 16px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; cursor: pointer; transition: all 0.2s; flex: 1; min-width: 120px; text-align: center; }
-        .monitor-form .source-option:hover { background: rgba(255, 255, 255, 0.05); }
-        .monitor-form .source-option.selected { background: rgba(162, 155, 254, 0.15); border-color: #a29bfe; color: #a29bfe; }
+        /* Multi-source checkbox list */
+        .monitor-form .source-list { display: flex; flex-direction: column; gap: 4px; max-height: 280px; overflow-y: auto; }
+        .monitor-form .source-check-item { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; cursor: pointer; transition: background 0.2s; }
+        .monitor-form .source-check-item:hover { background: rgba(255,255,255,0.05); }
+        .monitor-form .source-check-item input[type=checkbox] { width: 15px; height: 15px; flex-shrink: 0; accent-color: #a29bfe; cursor: pointer; }
+        .monitor-form .source-check-item .src-name { font-weight: 500; color: #e0e0e0; font-size: 0.88em; white-space: nowrap; margin-left: 4px; }
+        .monitor-form .source-check-item .src-cat { font-size: 0.78em; color: #a29bfe; white-space: nowrap; }
+        .monitor-form .source-check-item .src-series { font-size: 0.78em; color: #00d4ff; font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1 1 0; min-width: 0; }
+        .monitor-form .source-select-all { display: flex; align-items: center; gap: 8px; padding: 4px 12px; margin-bottom: 2px; cursor: pointer; user-select: none; }
+        .monitor-form .source-select-all input[type=checkbox] { width: 14px; height: 14px; flex-shrink: 0; accent-color: #a29bfe; cursor: pointer; }
+        .monitor-form .source-select-all span { font-size: 0.78em; color: #a29bfe; font-weight: 500; }
+        /* "All" scope coverage info box */
+        .monitor-form .all-scope-info { margin-top: 8px; padding: 8px 12px; background: rgba(0,212,255,0.06); border: 1px solid rgba(0,212,255,0.2); border-radius: 8px; font-size: 0.8em; color: #888; }
+        .monitor-form .all-scope-info strong { color: #00d4ff; display: block; margin-bottom: 4px; }
+        .monitor-form .all-scope-info ul { margin: 0; padding-left: 14px; }
+        .monitor-form .all-scope-info li { margin-bottom: 2px; }
         /* Episode selector modal */
         .episode-list { max-height: 400px; overflow-y: auto; }
         .season-group { margin-bottom: 15px; }
@@ -286,7 +299,7 @@
                 <div class="control-group search-input">
                     <label>Search</label>
                     <div style="display: flex; gap: 8px;">
-                        <input type="text" id="search-input" placeholder="Search films, series, channels..." onkeypress="if(event.key==='Enter')applyFilters()">
+                        <input type="text" id="search-input" placeholder="Search films, series, channels... or tmdb:12345" onkeypress="if(event.key==='Enter')applyFilters()">
                         <button class="btn btn-primary" onclick="currentPage=1;applyFilters()" style="white-space: nowrap;">🔍 Search</button>
                     </div>
                 </div>
@@ -470,7 +483,7 @@
                         <label>Match logic:</label>
                         <select id="pattern-logic">
                             <option value="or">Match ANY pattern (OR)</option>
-                            <option value="and">Match ALL patterns (AND)</option>
+                            <option value="and" selected>Match ALL patterns (AND)</option>
                         </select>
                     </div>
                     <div class="form-group" style="margin-top: 15px;">
@@ -534,7 +547,7 @@
 
     <!-- Series Monitor Modal -->
     <div class="modal-overlay" id="monitor-modal">
-        <div class="modal" style="max-width: 500px;">
+        <div class="modal">
             <div class="modal-header">
                 <h2 id="monitor-modal-title">📡 Monitor Series</h2>
                 <button class="modal-close" onclick="closeMonitorModal()">&times;</button>
@@ -563,10 +576,8 @@
                 </div>
                 <div class="form-group">
                     <label>Source</label>
-                    <div class="source-options" id="monitor-source-options">
-                        <div class="source-option selected" data-source="any" onclick="selectMonitorSource('any')">
-                            Any source (first found)
-                        </div>
+                    <div class="source-list" id="monitor-source-options">
+                        <!-- populated by JS -->
                     </div>
                 </div>
                 <div class="form-group">
@@ -585,6 +596,16 @@
                             <div class="scope-desc">Telegram only</div>
                         </div>
                     </div>
+                </div>
+                <div class="form-group" id="monitor-backfill-group" style="display:none;">
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                        <input type="checkbox" id="monitor-backfill-check" style="width:16px;height:16px;accent-color:#00d4ff;cursor:pointer;">
+                        <span>Download existing episodes now</span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label>Monitoring title <span style="color:#888;font-weight:normal;font-size:0.8em">(from metadata — editable, also used as download folder name)</span></label>
+                    <input type="text" id="monitor-canonical-name" style="width:100%;padding:8px 10px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#fff;font-size:0.9em;box-sizing:border-box;" placeholder="Loading…">
                 </div>
             </div>
             <div class="modal-footer">
@@ -1359,6 +1380,11 @@
 
         function debounceSearch() {
             clearTimeout(searchTimeout);
+            // Auto-switch to Films tab when a tmdb: search is typed
+            const val = document.getElementById('search-input').value.trim().toLowerCase();
+            if (val.startsWith('tmdb:') && contentType === 'live') {
+                setContentType('vod');
+            }
             searchTimeout = setTimeout(() => { currentPage = 1; applyFilters(); }, 300);
         }
 
@@ -1596,6 +1622,7 @@
                             source_name: sub.source_name || 'Unknown',
                             series_id: sub.id,
                             category: sub.group || '',
+                            series_name: sub.name || '',
                         });
                     }
                 }
@@ -1807,7 +1834,7 @@
                         const isSelected = (cat.content_types || []).includes(cb.dataset.type);
                         cb.classList.toggle('selected', isSelected);
                     });
-                    document.getElementById('pattern-logic').value = cat.pattern_logic || 'or';
+                    document.getElementById('pattern-logic').value = cat.pattern_logic || 'and';
                     document.getElementById('use-source-filters').checked = cat.use_source_filters || false;
                     document.getElementById('notify-telegram').checked = cat.notify_telegram || false;
                     // Handle recently added filter
@@ -1824,7 +1851,7 @@
                 document.querySelectorAll('.content-type-checkbox').forEach(cb => {
                     cb.classList.add('selected');
                 });
-                document.getElementById('pattern-logic').value = 'or';
+                document.getElementById('pattern-logic').value = 'and';
                 document.getElementById('use-source-filters').checked = false;
                 document.getElementById('notify-telegram').checked = false;
                 document.getElementById('use-recently-added').checked = false;
@@ -2282,6 +2309,7 @@
                             stream_id: cb.dataset.streamId,
                             content_type: 'series',
                             add_mode: 'episode',
+                            series_id: d.seriesId,
                             name: cb.dataset.title || 'Episode ' + cb.dataset.epNum,
                             series_name: d.seriesName,
                             season: cb.dataset.season,
@@ -2327,7 +2355,7 @@
         // ============================================
         let _monitorModalData = {};
 
-        function openMonitorModal(event, sourceId, seriesId, seriesName, icon, sourceName, allSources) {
+        async function openMonitorModal(event, sourceId, seriesId, seriesName, icon, sourceName, allSources) {
             event.stopPropagation();
             event.preventDefault();
 
@@ -2338,45 +2366,148 @@
                 icon: icon || '',
                 sourceName: sourceName || '',
                 allSources: allSources || null,
+                existingId: null,
             };
 
             const modal = document.getElementById('monitor-modal');
             document.getElementById('monitor-modal-title').textContent = '📡 Monitor: ' + seriesName;
+            const confirmBtn = document.querySelector('#monitor-modal .modal-footer .btn-primary');
 
-            // Reset scope
-            selectMonitorScope('new_only');
-            document.getElementById('monitor-season-group').style.display = 'none';
-
-            // Reset action
-            selectMonitorAction('both');
-
-            // Build source options
-            const sourceContainer = document.getElementById('monitor-source-options');
-            let sourceHtml = '<div class="source-option selected" data-source="any" onclick="selectMonitorSource(\'any\')">Any source (first found)</div>';
-
-            if (allSources && allSources.length > 0) {
-                for (const s of allSources) {
-                    const sourceKey = s.source_id + '|' + s.series_id;
-                    const catLabel = s.category ? ' <span style="opacity:0.5;font-size:0.85em">(' + escapeHtml(s.category) + ')</span>' : '';
-                    sourceHtml += '<div class="source-option" data-source-key="' + escapeAttr(sourceKey) + '" data-source="' + escapeAttr(s.source_id) + '" data-series-id="' + escapeAttr(s.series_id) + '" data-source-name="' + escapeAttr(s.source_name) + '" data-category="' + escapeAttr(s.category || '') + '" onclick="selectMonitorSource(\'' + escapeAttr(sourceKey) + '\')">' + escapeHtml(s.source_name) + catLabel + '</div>';
+            // Check if this series already has an active monitoring entry
+            let existingEntry = null;
+            try {
+                const resp = await fetch('/api/monitor');
+                if (resp.ok) {
+                    const apiData = await resp.json();
+                    const normName = seriesName.toLowerCase().trim();
+                    for (const e of (apiData.series || [])) {
+                        // Match by source_id+series_ref inside monitor_sources
+                        if ((e.monitor_sources || []).some(ms => ms.source_id === sourceId && ms.series_ref === seriesId)) {
+                            existingEntry = e; break;
+                        }
+                        // Match by legacy source_id+series_id fields
+                        if (sourceId && e.source_id === sourceId && e.series_id === seriesId) {
+                            existingEntry = e; break;
+                        }
+                        // Fall back to series name match
+                        if ((e.series_name || '').toLowerCase().trim() === normName) {
+                            existingEntry = e; break;
+                        }
+                    }
                 }
-            } else if (sourceId) {
-                const sourceKey = sourceId + '|' + seriesId;
-                sourceHtml += '<div class="source-option" data-source-key="' + escapeAttr(sourceKey) + '" data-source="' + escapeAttr(sourceId) + '" data-series-id="' + escapeAttr(seriesId) + '" data-source-name="' + escapeAttr(sourceName || '') + '" data-category="" onclick="selectMonitorSource(\'' + escapeAttr(sourceKey) + '\')">' + escapeHtml(sourceName || sourceId) + '</div>';
-            }
-            sourceContainer.innerHTML = sourceHtml;
+            } catch (_) {}
 
-            // Load season list for season scope (aggregate from all sources)
+            if (existingEntry) {
+                _monitorModalData.existingId = existingEntry.id;
+                selectMonitorScope(existingEntry.scope || 'new_only');
+                selectMonitorAction(existingEntry.action || 'both');
+                const doBackfill = existingEntry.backfill && existingEntry.backfill !== 'none';
+                document.getElementById('monitor-backfill-check').checked = doBackfill;
+                document.getElementById('monitor-canonical-name').value = existingEntry.canonical_name || existingEntry.series_name || seriesName;
+                if (existingEntry.scope === 'season' && existingEntry.season_filter) {
+                    document.getElementById('monitor-season-select').value = existingEntry.season_filter;
+                }
+                if (confirmBtn) confirmBtn.innerHTML = '✏️ Update Monitoring';
+                _buildMonitorSourceList(sourceId, seriesId, sourceName, allSources, existingEntry.monitor_sources || []);
+            } else {
+                selectMonitorScope('new_only');
+                document.getElementById('monitor-season-group').style.display = 'none';
+                selectMonitorAction('both');
+                document.getElementById('monitor-backfill-check').checked = false;
+                document.getElementById('monitor-canonical-name').value = seriesName;
+                _fetchAndFillCanonicalName(sourceId, seriesId, allSources);
+                if (confirmBtn) confirmBtn.innerHTML = '📡 Start Monitoring';
+                _buildMonitorSourceList(sourceId, seriesId, sourceName, allSources, null);
+            }
+
+            // Load season list for season scope
             _loadSeasonsList(sourceId, seriesId, allSources);
 
             modal.classList.add('show');
+        }
+
+        // existingSources: null = new monitoring (all pre-checked); array = only check matching sources
+        function _buildMonitorSourceList(sourceId, seriesId, sourceName, allSources, existingSources) {
+            const container = document.getElementById('monitor-source-options');
+
+            // Build the flat list of sources to display
+            const sources = [];
+            if (allSources && allSources.length > 0) {
+                for (const s of allSources) {
+                    sources.push({
+                        key: s.source_id + '|' + s.series_id,
+                        source_id: s.source_id,
+                        series_ref: s.series_id,
+                        source_name: s.source_name || s.source_id,
+                        category: s.category || '',
+                        series_name: s.series_name || '',
+                    });
+                }
+            } else if (sourceId) {
+                sources.push({
+                    key: sourceId + '|' + seriesId,
+                    source_id: sourceId,
+                    series_ref: seriesId,
+                    source_name: sourceName || sourceId,
+                    category: '',
+                    series_name: '',
+                });
+            }
+
+            if (sources.length === 0) {
+                container.innerHTML = '<span style="color:#888;font-size:0.85em;padding:6px 12px;">No sources available — monitoring will search all sources automatically.</span>';
+                return;
+            }
+
+            // Determine which sources should be pre-checked
+            const isChecked = (s) => {
+                if (existingSources === null || existingSources === undefined) return true;
+                return existingSources.some(ms => ms.source_id === s.source_id && ms.series_ref === s.series_ref);
+            };
+            const allChecked = sources.every(s => isChecked(s));
+
+            // Select-all toggle (pure UI helper)
+            let html = '<label class="source-select-all">' +
+                '<input type="checkbox" id="monitor-src-all"' + (allChecked ? ' checked' : '') + ' onchange="_onMonitorSelectAllToggle(this)">' +
+                '<span>Select / deselect all</span>' +
+                '</label>';
+
+            for (const s of sources) {
+                const checked = isChecked(s);
+                html += '<label class="source-check-item" id="src-item-' + escapeAttr(s.key.replace(/[^a-zA-Z0-9]/g,'_')) + '">' +
+                    '<input type="checkbox" class="monitor-src-specific"' + (checked ? ' checked' : '') +
+                    ' data-source-id="' + escapeAttr(s.source_id) + '"' +
+                    ' data-series-ref="' + escapeAttr(s.series_ref) + '"' +
+                    ' data-source-name="' + escapeAttr(s.source_name) + '"' +
+                    ' data-category="' + escapeAttr(s.category) + '"' +
+                    ' data-series-name="' + escapeAttr(s.series_name) + '"' +
+                    ' onchange="_onMonitorSrcChange()">' +
+                    '<span class="src-name">' + escapeHtml(s.source_name) + '</span>' +
+                    (s.category ? '<span class="src-cat">' + escapeHtml(s.category) + '</span>' : '') +
+                    (s.series_name ? '<span class="src-series">' + escapeHtml(s.series_name) + '</span>' : '') +
+                    '</label>';
+            }
+
+            container.innerHTML = html;
+        }
+
+        function _onMonitorSelectAllToggle(checkbox) {
+            document.querySelectorAll('#monitor-source-options .monitor-src-specific').forEach(cb => {
+                cb.checked = checkbox.checked;
+            });
+        }
+
+        function _onMonitorSrcChange() {
+            const all = document.querySelectorAll('#monitor-source-options .monitor-src-specific');
+            const allChecked = Array.from(all).every(cb => cb.checked);
+            const selectAll = document.getElementById('monitor-src-all');
+            if (selectAll) selectAll.checked = allChecked;
         }
 
         async function _loadSeasonsList(sourceId, seriesId, allSources) {
             const seasonSelect = document.getElementById('monitor-season-select');
             seasonSelect.innerHTML = '<option value="">Loading...</option>';
 
-            // Build list of source/series pairs to query
             const pairs = [];
             if (allSources && allSources.length > 0) {
                 for (const s of allSources) pairs.push({ sourceId: s.source_id, seriesId: s.series_id });
@@ -2386,11 +2517,9 @@
             if (pairs.length === 0) return;
 
             try {
-                // Fetch episodes from all sources in parallel
                 const results = await Promise.allSettled(
                     pairs.map(p => fetch('/api/cart/series-episodes/' + p.sourceId + '/' + p.seriesId).then(r => r.json()))
                 );
-                // Merge seasons: keep the max episode count per season across sources
                 const mergedSeasons = {};
                 for (const r of results) {
                     if (r.status !== 'fulfilled' || !r.value.seasons) continue;
@@ -2401,11 +2530,9 @@
                     }
                 }
                 const seasonNums = Object.keys(mergedSeasons).sort((a, b) => parseInt(a) - parseInt(b));
-                if (seasonNums.length > 0) {
-                    seasonSelect.innerHTML = seasonNums.map(s => '<option value="' + s + '">Season ' + s + ' (' + mergedSeasons[s] + ' episodes)</option>').join('');
-                } else {
-                    seasonSelect.innerHTML = '<option value="">No seasons found</option>';
-                }
+                seasonSelect.innerHTML = seasonNums.length > 0
+                    ? seasonNums.map(s => '<option value="' + s + '">Season ' + s + ' (' + mergedSeasons[s] + ' episodes)</option>').join('')
+                    : '<option value="">No seasons found</option>';
             } catch (e) {
                 seasonSelect.innerHTML = '<option value="">Error loading seasons</option>';
             }
@@ -2417,14 +2544,10 @@
             });
             document.getElementById('monitor-season-group').style.display = scope === 'season' ? 'block' : 'none';
             _monitorModalData.scope = scope;
-        }
-
-        function selectMonitorSource(sourceKey) {
-            document.querySelectorAll('#monitor-modal .source-option').forEach(o => {
-                const key = o.dataset.sourceKey || o.dataset.source;
-                o.classList.toggle('selected', key === sourceKey);
-            });
-            _monitorModalData.selectedSource = sourceKey;
+            const action = _monitorModalData.action || 'both';
+            const showBackfill = scope !== 'new_only' && action !== 'notify';
+            document.getElementById('monitor-backfill-group').style.display = showBackfill ? 'block' : 'none';
+            if (!showBackfill) document.getElementById('monitor-backfill-check').checked = false;
         }
 
         function selectMonitorAction(action) {
@@ -2432,6 +2555,26 @@
                 o.classList.toggle('selected', o.dataset.action === action);
             });
             _monitorModalData.action = action;
+            const scope = _monitorModalData.scope || 'new_only';
+            const showBackfill = scope !== 'new_only' && action !== 'notify';
+            document.getElementById('monitor-backfill-group').style.display = showBackfill ? 'block' : 'none';
+            if (!showBackfill) document.getElementById('monitor-backfill-check').checked = false;
+        }
+
+        async function _fetchAndFillCanonicalName(sourceId, seriesId, allSources) {
+            const input = document.getElementById('monitor-canonical-name');
+            let sid = sourceId, ref = seriesId;
+            if (!sid && allSources && allSources.length > 0) {
+                sid = allSources[0].source_id;
+                ref = allSources[0].series_id;
+            }
+            if (!sid || !ref) return;
+            try {
+                const resp = await fetch('/api/monitor/series-meta/' + encodeURIComponent(sid) + '/' + encodeURIComponent(ref));
+                if (!resp.ok) return;
+                const meta = await resp.json();
+                if (meta.name) input.value = meta.name;
+            } catch (e) { /* silent — initial value already set */ }
         }
 
         function closeMonitorModal() {
@@ -2442,57 +2585,116 @@
         async function confirmMonitor() {
             const d = _monitorModalData;
             const scope = d.scope || 'new_only';
-            const selectedSource = d.selectedSource || 'any';
             const seasonFilter = scope === 'season' ? document.getElementById('monitor-season-select').value : null;
+            const doBackfill = document.getElementById('monitor-backfill-check').checked;
+            const backfill = doBackfill ? (scope === 'season' ? 'season' : 'all') : 'none';
+            const backfillSeason = backfill === 'season' ? seasonFilter : null;
 
             if (scope === 'season' && !seasonFilter) {
                 showToast('Please select a season', 'error');
                 return;
             }
 
-            let sourceId = null;
-            let sourceName = null;
-            let sourceCategory = null;
-            let seriesId = d.seriesId;
+            // Collect all checked sources — sources are always stored individually
+            const checkedSrcs = Array.from(
+                document.querySelectorAll('#monitor-source-options .monitor-src-specific:checked')
+            );
+            if (checkedSrcs.length === 0 && document.querySelector('#monitor-source-options .monitor-src-specific')) {
+                showToast('Please select at least one source', 'error');
+                return;
+            }
 
-            if (selectedSource !== 'any') {
-                // selectedSource is a composite key "source_id|series_id" or just a source_id
-                const sourceOption = document.querySelector('#monitor-modal .source-option.selected');
-                if (sourceOption) {
-                    sourceId = sourceOption.dataset.source;
-                    sourceName = sourceOption.dataset.sourceName || sourceOption.textContent.trim();
-                    sourceCategory = sourceOption.dataset.category || null;
-                    if (sourceOption.dataset.seriesId) seriesId = sourceOption.dataset.seriesId;
-                }
+            const monitorSources = checkedSrcs.map(cb => ({
+                source_id: cb.dataset.sourceId,
+                series_ref: cb.dataset.seriesRef,
+                source_name: cb.dataset.sourceName || '',
+                category: cb.dataset.category || '',
+                series_name: cb.dataset.seriesName || '',
+            }));
+
+            // Derive legacy fields from the first source for backward compat
+            let sourceId = monitorSources.length === 1 ? monitorSources[0].source_id : null;
+            let sourceName = monitorSources.length === 1 ? monitorSources[0].source_name : null;
+            let sourceCategory = monitorSources.length === 1 ? (monitorSources[0].category || null) : null;
+            let seriesId = monitorSources.length === 1 ? monitorSources[0].series_ref : d.seriesId;
+
+            const confirmBtn = document.querySelector('#monitor-modal .modal-footer .btn-primary');
+            const originalBtnHtml = confirmBtn ? confirmBtn.innerHTML : null;
+            if (confirmBtn) {
+                confirmBtn.disabled = true;
+                confirmBtn.innerHTML = '<span class="loading-spinner" style="width:16px;height:16px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px;"></span>Saving…';
             }
 
             try {
-                const resp = await fetch('/api/monitor', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        series_name: d.seriesName,
-                        series_id: seriesId,
-                        source_id: sourceId,
-                        source_name: sourceName,
-                        source_category: sourceCategory,
-                        cover: d.icon,
-                        scope: scope,
-                        season_filter: seasonFilter,
-                        action: d.action || 'both',
-                    })
-                });
-                const data = await resp.json();
-                if (resp.ok) {
-                    showToast('Monitoring started: ' + d.seriesName, 'success');
-                    closeMonitorModal();
+                let resp, data;
+                if (d.existingId) {
+                    // Update existing monitoring entry
+                    resp = await fetch('/api/monitor/' + d.existingId, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            scope: scope,
+                            season_filter: seasonFilter,
+                            action: d.action || 'both',
+                            canonical_name: document.getElementById('monitor-canonical-name').value.trim() || null,
+                            monitor_sources: monitorSources,
+                        })
+                    });
+                    data = await resp.json();
+                    if (resp.ok) {
+                        showToast('Monitoring updated: ' + d.seriesName, 'success');
+                        closeMonitorModal();
+                    } else {
+                        showToast(data.error || 'Failed to update monitoring', 'error');
+                        if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.innerHTML = originalBtnHtml; }
+                    }
                 } else {
-                    showToast(data.error || 'Failed to add monitoring', 'error');
+                    // Create new monitoring entry
+                    resp = await fetch('/api/monitor', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            series_name: d.seriesName,
+                            canonical_name: document.getElementById('monitor-canonical-name').value.trim() || null,
+                            series_id: seriesId,
+                            source_id: sourceId,
+                            source_name: sourceName,
+                            source_category: sourceCategory,
+                            monitor_sources: monitorSources,
+                            cover: d.icon,
+                            scope: scope,
+                            season_filter: seasonFilter,
+                            action: d.action || 'both',
+                            backfill: backfill,
+                            backfill_season: backfillSeason || null,
+                        })
+                    });
+                    data = await resp.json();
+                    if (resp.ok) {
+                        let msg = 'Monitoring started: ' + d.seriesName;
+                        if (data.backfill_queued > 0) {
+                            msg += ' — ' + data.backfill_queued + ' episode(s) queued';
+                        }
+                        showToast(msg, 'success');
+                        closeMonitorModal();
+                    } else {
+                        showToast(data.error || 'Failed to add monitoring', 'error');
+                        if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.innerHTML = originalBtnHtml; }
+                    }
                 }
             } catch (e) {
-                showToast('Error adding monitoring', 'error');
+                showToast('Error saving monitoring', 'error');
+                if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.innerHTML = originalBtnHtml; }
             }
         }
     </script>
+
+    <footer style="text-align:center; padding: 20px; margin-top: 40px; color: #555; font-size: 0.85em; border-top: 1px solid rgba(255,255,255,0.07);">
+        <a href="https://github.com/SpanishST/xtreamfilter" target="_blank" rel="noopener noreferrer"
+           style="color: #00d4ff; text-decoration: none; opacity: 0.5; transition: opacity 0.2s;"
+           onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">
+            ★ XtreamFilter on GitHub
+        </a>
+    </footer>
 </body>
 </html>

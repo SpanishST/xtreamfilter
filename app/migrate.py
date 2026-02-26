@@ -202,7 +202,7 @@ def _migrate_categories(conn: sqlite3.Connection, data_dir: str) -> int:
                 cat.get("icon", "📁"),
                 cat.get("mode", "manual"),
                 json.dumps(cat.get("content_types", ["live", "vod", "series"])),
-                cat.get("pattern_logic", "or"),
+                cat.get("pattern_logic", "and"),
                 int(cat.get("use_source_filters", False)),
                 int(cat.get("notify_telegram", False)),
                 int(cat.get("recently_added_days", 0)),

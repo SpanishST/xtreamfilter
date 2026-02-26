@@ -43,7 +43,7 @@ class NotificationService:
         return bot_token, chat_id
 
     @staticmethod
-    def _format_bytes(b: int) -> str:
+    def _format_bytes(b: float) -> str:
         if not b or b == 0:
             return "0 B"
         for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -207,18 +207,18 @@ class NotificationService:
 
             if len(groups_with_covers) >= 2:
                 media_items = groups_with_covers[:10]
+                caption = f"🆕 <b>{category_name}</b> - {unique_count} new unique title(s)\n\n"
+                for gr in grouped:
+                    line = self._format_grouped_item_line(gr)
+                    if len(caption) + len(line) < 1024:
+                        caption += line
+                    else:
+                        break
+                caption = caption.rstrip()
                 media = []
                 for i, g in enumerate(media_items):
                     media_obj: dict = {"type": "photo", "media": g["cover"]}
                     if i == 0:
-                        caption = f"🆕 <b>{category_name}</b> - {unique_count} new unique title(s)\n\n"
-                        for gr in grouped:
-                            line = self._format_grouped_item_line(gr)
-                            if len(caption) + len(line) < 1024:
-                                caption += line
-                            else:
-                                break
-                        caption = caption.rstrip()
                         media_obj["caption"] = caption
                         media_obj["parse_mode"] = "HTML"
                     media.append(media_obj)
@@ -392,6 +392,41 @@ class NotificationService:
             logger.info(f"Telegram monitoring notification sent for '{series_name}'")
         except Exception as e:
             logger.error(f"Failed to send monitoring notification: {e}")
+
+    async def send_movie_monitor_notification(self, movie_name: str, item: dict, cover: str, action: str = "both") -> None:
+        """Send a Telegram notification when a monitored movie becomes available."""
+        creds = self._get_telegram_credentials()
+        if not creds:
+            return
+        bot_token, chat_id = creds
+        dedupe_payload = {
+            "movie": movie_name,
+            "action": action,
+            "stream_id": item.get("stream_id", ""),
+            "source_id": item.get("source_id", ""),
+        }
+        if not await self._should_send_deduped("movie_monitor", dedupe_payload, ttl_seconds=3600):
+            logger.info(f"Skipped duplicate movie monitor notification for '{movie_name}'")
+            return
+        if action in ("download", "both"):
+            text = f"🎬 <b>Movie Monitor</b> — <b>{movie_name}</b>\n\nThe movie is now available and has been queued for download!"
+        else:
+            text = f"🎬 <b>Movie Monitor</b> — <b>{movie_name}</b>\n\nThe movie is now available in your catalogue."
+        try:
+            client = await self.http_client.get_client()
+            if cover:
+                url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+                payload = {"chat_id": chat_id, "photo": cover, "caption": text, "parse_mode": "HTML"}
+                response = await client.post(url, json=payload)
+                if response.status_code != 200:
+                    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                    await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+            else:
+                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+            logger.info(f"Telegram movie monitor notification sent for '{movie_name}'")
+        except Exception as e:
+            logger.error(f"Failed to send movie monitor notification: {e}")
 
     # ------------------------------------------------------------------
     # Test notification

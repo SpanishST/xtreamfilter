@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS custom_categories (
     icon                TEXT NOT NULL DEFAULT '📁',
     mode                TEXT NOT NULL DEFAULT 'manual',
     content_types       TEXT NOT NULL DEFAULT '["live","vod","series"]',
-    pattern_logic       TEXT NOT NULL DEFAULT 'or',
+    pattern_logic       TEXT NOT NULL DEFAULT 'and',
     use_source_filters  INTEGER NOT NULL DEFAULT 0,
     notify_telegram     INTEGER NOT NULL DEFAULT 0,
     recently_added_days INTEGER NOT NULL DEFAULT 0,
@@ -208,7 +208,8 @@ CREATE TABLE IF NOT EXISTS cart_items (
     error               TEXT,
     file_path           TEXT,
     file_size           INTEGER,
-    temp_path           TEXT
+    temp_path           TEXT,
+    series_id           TEXT
 );
 
 -- ── Monitored series ──────────────────────────────────────────────────────
@@ -216,6 +217,7 @@ CREATE TABLE IF NOT EXISTS cart_items (
 CREATE TABLE IF NOT EXISTS monitored_series (
     id              TEXT PRIMARY KEY,
     series_name     TEXT NOT NULL,
+    canonical_name  TEXT,
     series_id       TEXT NOT NULL,
     source_id       TEXT,
     source_name     TEXT,
@@ -260,6 +262,55 @@ CREATE TABLE IF NOT EXISTS downloaded_episodes (
 CREATE INDEX IF NOT EXISTS idx_dl_eps_series
     ON downloaded_episodes (series_id);
 
+-- Multiple source+category slots per monitored series entry.
+-- When this table has rows for a given series_id, the monitoring check
+-- iterates over these sources instead of performing a fuzzy cross-source search.
+CREATE TABLE IF NOT EXISTS monitor_sources (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    series_id   TEXT NOT NULL
+                REFERENCES monitored_series(id) ON DELETE CASCADE,
+    source_id   TEXT NOT NULL,
+    series_ref  TEXT NOT NULL,
+    source_name TEXT,
+    category    TEXT,
+    series_name TEXT,
+    UNIQUE (series_id, source_id, series_ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_monitor_sources_series
+    ON monitor_sources (series_id);
+
+-- ── Monitored movies ──────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS monitored_movies (
+    id              TEXT PRIMARY KEY,
+    movie_name      TEXT NOT NULL,
+    canonical_name  TEXT,
+    tmdb_id         TEXT,
+    imdb_id         TEXT,
+    cover           TEXT,
+    action          TEXT NOT NULL DEFAULT 'notify',
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    status          TEXT NOT NULL DEFAULT 'watching',
+    created_at      TEXT,
+    last_checked    TEXT
+);
+
+-- One source slot per monitored-movie rule.
+-- category_filter is the Xtream category_id to restrict VOD search on that source.
+CREATE TABLE IF NOT EXISTS movie_monitor_sources (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    movie_id        TEXT NOT NULL
+                    REFERENCES monitored_movies(id) ON DELETE CASCADE,
+    source_id       TEXT NOT NULL,
+    source_name     TEXT,
+    category_filter TEXT,
+    UNIQUE (movie_id, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_movie_monitor_sources_movie
+    ON movie_monitor_sources (movie_id);
+
 -- ── EPG meta ──────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS epg_meta (
@@ -276,7 +327,26 @@ def init_db(db_path: str) -> None:
     conn = db_connect(db_path)
     try:
         conn.executescript(_SCHEMA)
+        # Idempotent column additions for databases that pre-date the column.
+        _apply_column_upgrades(conn)
         conn.commit()
         logger.info(f"Database initialised at {db_path}")
     finally:
         conn.close()
+
+
+_COLUMN_UPGRADES: list[tuple[str, str, str]] = [
+    # (table, column, definition)
+    ("cart_items", "series_id", "TEXT"),
+    ("monitor_sources", "series_name", "TEXT"),
+    ("monitored_series", "canonical_name", "TEXT"),
+]
+
+
+def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
+    """Add columns that were introduced after initial schema creation."""
+    for table, column, definition in _COLUMN_UPGRADES:
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            logger.info(f"Schema upgrade: added {table}.{column}")

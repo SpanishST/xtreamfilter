@@ -119,6 +119,17 @@ async def api_browse(
 ):
     per_page = min(per_page, 200)
     search_lower = search.lower()
+
+    # Handle tmdb:XXXX search prefix
+    tmdb_search_id: Optional[str] = None
+    if search_lower.startswith("tmdb:"):
+        tmdb_search_id = search_lower[5:].strip()
+        search_lower = ""  # disable name search
+        # TMDB IDs only appear on vod/series — force search over both
+        content_types_to_query_override = ["vod", "series"]
+    else:
+        content_types_to_query_override = None
+
     sources_config = {}
     if use_source_filters:
         sources_config = {s.get("id"): s for s in cfg.config.get("sources", [])}
@@ -152,6 +163,9 @@ async def api_browse(
 
     # When viewing a category, query all content types that have items; otherwise just the requested type
     content_types_to_query = list(category_item_sets.keys()) if category_id and category_item_sets else [type]
+    # Override: TMDB search always covers vod+series regardless of current tab
+    if content_types_to_query_override:
+        content_types_to_query = content_types_to_query_override
 
     TYPE_MAP = {
         "live": ("live_streams", "live_categories"),
@@ -204,7 +218,17 @@ async def api_browse(
                 continue
             if category_id and (item_id, src_id) not in cat_item_set:
                 continue
-            if search_lower and search_lower not in name.lower() and search_lower not in grp.lower():
+            if tmdb_search_id is not None:
+                raw_tmdb = s.get("tmdb_id") or s.get("tmdb")
+                if not raw_tmdb:
+                    continue
+                # Normalise: strip "tmdb:" prefix and whitespace before comparing
+                norm = str(raw_tmdb).strip().lower()
+                if norm.startswith("tmdb:"):
+                    norm = norm[5:].strip()
+                if norm != tmdb_search_id:
+                    continue
+            elif search_lower and search_lower not in name.lower() and search_lower not in grp.lower():
                 continue
             if group and grp != group:
                 continue

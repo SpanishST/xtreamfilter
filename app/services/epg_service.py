@@ -50,6 +50,10 @@ class EpgService:
             "refresh_in_progress": False,
         }
         self._epg_cache_lock = asyncio.Lock()
+        # Cached parsed lxml root — avoids re-parsing the full XML on every
+        # get_now_next() call.  Invalidated whenever _epg_cache["data"] changes.
+        self._epg_parsed_root = None
+        self._epg_parsed_data_id: int | None = None
 
     # ------------------------------------------------------------------
     # Validity
@@ -268,6 +272,9 @@ class EpgService:
             async with self._epg_cache_lock:
                 self._epg_cache["data"] = merged_data
                 self._epg_cache["last_refresh"] = datetime.now().isoformat()
+                # Invalidate the parsed tree cache so get_now_next() re-parses
+                self._epg_parsed_root = None
+                self._epg_parsed_data_id = None
 
             self.save_epg_cache_to_disk()
             logger.info(
@@ -342,9 +349,14 @@ class EpgService:
             return result
 
         try:
-            parser = etree.XMLParser(recover=True)
-            tree = etree.parse(io.BytesIO(data), parser)
-            root = tree.getroot()
+            # Reuse the cached parsed tree when EPG data hasn't changed.
+            # id() changes whenever _epg_cache["data"] is replaced (e.g. after
+            # a refresh), so this is a safe identity-based invalidation check.
+            if self._epg_parsed_root is None or self._epg_parsed_data_id != id(data):
+                parser = etree.XMLParser(recover=True)
+                self._epg_parsed_root = etree.parse(io.BytesIO(data), parser).getroot()
+                self._epg_parsed_data_id = id(data)
+            root = self._epg_parsed_root
 
             now = datetime.now(timezone.utc)
             channel_id_lower = channel_id.lower()

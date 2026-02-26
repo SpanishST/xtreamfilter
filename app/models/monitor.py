@@ -18,6 +18,16 @@ class KnownEpisode(BaseModel):
     episode_num: int = 0
 
 
+class MonitorSource(BaseModel):
+    """A (source, series_ref, category) slot inside a MonitoredSeries."""
+    model_config = ConfigDict(extra="allow")
+
+    source_id: str = ""
+    series_ref: str = ""        # the series_id on that specific source
+    source_name: Optional[str] = None
+    category: Optional[str] = None
+
+
 class MonitoredSeries(BaseModel):
     """A monitored series entry."""
     model_config = ConfigDict(extra="allow")
@@ -25,9 +35,12 @@ class MonitoredSeries(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     series_name: str = ""
     series_id: str = ""
+    # Legacy single-source fields (kept for backward compatibility)
     source_id: Optional[str] = None
     source_name: Optional[str] = None
     source_category: Optional[str] = None
+    # Multi-source list (new)
+    monitor_sources: list[dict] = Field(default_factory=list)
     cover: str = ""
     scope: str = "new_only"  # "all", "season", "new_only"
     season_filter: Optional[str] = None
@@ -45,3 +58,33 @@ class MonitorData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     series: list[dict] = Field(default_factory=list)
+
+
+class MovieMonitorSource(BaseModel):
+    """A source slot inside a MonitoredMovie rule."""
+    model_config = ConfigDict(extra="allow")
+
+    source_id: str = ""
+    source_name: Optional[str] = None
+    # Optional list of Xtream category_ids to restrict VOD search on this source
+    category_filter: list[str] = Field(default_factory=list)
+
+
+class MonitoredMovie(BaseModel):
+    """A monitored movie entry (watches for a film to appear in VOD catalogue)."""
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    movie_name: str = ""
+    canonical_name: Optional[str] = None
+    tmdb_id: Optional[str] = None
+    cover: str = ""
+    action: str = "notify"          # "notify", "download", "both"
+    enabled: bool = True
+    # "watching"   → not yet found in any source
+    # "found"      → found, notify-only action taken
+    # "downloaded" → found and queued for download
+    status: str = "watching"
+    monitor_sources: list[dict] = Field(default_factory=list)
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+    last_checked: Optional[str] = None

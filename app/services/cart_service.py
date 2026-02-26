@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ from xml.dom import minidom
 import httpx
 
 from app.database import DB_NAME, db_connect
+from app.services.monitor_service import _normalize_imdb_id, _normalize_tmdb_id
 
 from app.models.xtream import PLAYER_PROFILES
 
@@ -359,6 +361,45 @@ def generate_episode_nfo(item: dict, ep_info: dict | None = None) -> str:
     return _xml_prettify(root)
 
 
+def safe_makedirs(path: str) -> None:
+    """Like os.makedirs(path, exist_ok=True) but tolerates ELOOP from CIFS mounts.
+
+    On CIFS/SMB shares the kernel driver can return ELOOP (errno 40) for
+    perfectly valid directories — in particular for directories that already
+    exist or whose names confuse the CIFS DFS resolver.  The standard
+    os.makedirs call fails in that case even though the target is reachable.
+
+    Work-around: when ELOOP is raised, create each path component one at a
+    time with os.mkdir, silently ignoring FileExistsError for components that
+    are already present.  Nothing is ever removed.
+    """
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as exc:
+        if exc.errno != errno.ELOOP:
+            raise
+        logger.debug(
+            f"[safe_makedirs] ELOOP on os.makedirs (CIFS quirk), "
+            f"falling back to component-wise mkdir for: {path}"
+        )
+        # Build the path component by component, tolerating already-existing dirs.
+        parts = os.path.normpath(path).split(os.sep)
+        current = os.sep
+        for part in parts:
+            if not part:
+                continue
+            current = os.path.join(current, part)
+            try:
+                os.mkdir(current)
+            except FileExistsError:
+                pass  # directory already exists — that's fine
+            except OSError as mkdir_exc:
+                if mkdir_exc.errno == errno.EEXIST:
+                    pass  # race-condition variant of FileExistsError
+                else:
+                    raise
+
+
 async def download_poster(url: str, dest_path: str) -> bool:
     """Download a poster image to the given path. Returns True on success."""
     if not url or not url.startswith("http"):
@@ -367,7 +408,7 @@ async def download_poster(url: str, dest_path: str) -> bool:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), follow_redirects=True) as client:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
             if resp.status_code == 200 and len(resp.content) > 100:
-                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                safe_makedirs(os.path.dirname(dest_path))
                 with open(dest_path, "wb") as f:
                     f.write(resp.content)
                 return True
@@ -391,6 +432,8 @@ class CartService:
         self.notification_service = notification_service
         self.xtream_service = xtream_service
         self.db_path = os.path.join(config_service.data_dir, DB_NAME)
+        # Late-bound by main.py after MonitorService is constructed
+        self.monitor_service = None
 
         self._download_cart: list[dict] = []
         self._download_task: Optional[asyncio.Task] = None
@@ -477,7 +520,7 @@ class CartService:
         try:
             rows = conn.execute(
                 "SELECT id, stream_id, source_id, content_type, name, series_name, "
-                "season, episode_num, episode_title, icon, grp, container_extension, "
+                "series_id, season, episode_num, episode_title, icon, grp, container_extension, "
                 "added_at, status, progress, error, file_path, file_size, temp_path "
                 "FROM cart_items ORDER BY added_at"
             ).fetchall()
@@ -489,6 +532,7 @@ class CartService:
                     "content_type": r["content_type"],
                     "name": r["name"],
                     "series_name": r["series_name"],
+                    "series_id": r["series_id"],
                     "season": r["season"],
                     "episode_num": r["episode_num"],
                     "episode_title": r["episode_title"],
@@ -537,6 +581,7 @@ class CartService:
                     i.get("content_type", ""),
                     i.get("name"),
                     i.get("series_name"),
+                    i.get("series_id"),
                     i.get("season"),
                     i.get("episode_num"),
                     i.get("episode_title"),
@@ -558,10 +603,10 @@ class CartService:
                 conn.executemany(
                     "INSERT OR REPLACE INTO cart_items "
                     "(id, stream_id, source_id, content_type, name, series_name, "
-                    "season, episode_num, episode_title, icon, grp, "
+                    "series_id, season, episode_num, episode_title, icon, grp, "
                     "container_extension, added_at, status, progress, "
                     "error, file_path, file_size, temp_path) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     rows,
                 )
             conn.commit()
@@ -605,19 +650,48 @@ class CartService:
             elif content_type == "series":
                 series_id = item.get("series_id", "")
                 if series_id:
+                    # If the monitor already stamped a canonical name, use it
+                    # directly and skip the API lookup for series_name entirely.
+                    locked_canon = item.get("_monitor_canonical")
+                    if locked_canon:
+                        item["series_name"] = locked_canon
+                        logger.info(f"[META] Using monitor-locked canonical name: '{locked_canon}'")
+                        # Still fetch series info for NFO generation, but don't
+                        # let it touch series_name.
+                        try:
+                            info = await self.xtream_service.fetch_series_info(source_id, series_id)
+                            if info:
+                                item["_series_info"] = info
+                        except Exception:
+                            pass
+                        return
+
                     info = await self.xtream_service.fetch_series_info(source_id, series_id)
                     if info:
-                        meta_title = _str_val(
-                            info.get("name") or info.get("title")
-                        ).strip()
-                        if meta_title:
-                            year = _extract_year(info)
-                            if year and year not in meta_title:
-                                meta_title = f"{meta_title} ({year})"
-                            item["series_name"] = meta_title
-                            # Store for NFO generation
-                            item["_series_info"] = info
-                            logger.info(f"[META] Enriched series name: '{meta_title}'")
+                        # Always store series info for NFO generation.
+                        item["_series_info"] = info
+                        # If this series is being monitored, prefer the user-set
+                        # canonical_name (looked up via TMDB/IMDB id) so all
+                        # episodes from all sources land in the same directory.
+                        meta_tmdb = _normalize_tmdb_id(info.get("tmdb_id") or info.get("tmdb"))
+                        meta_imdb = _normalize_imdb_id(info.get("imdb_id") or info.get("imdb"))
+                        monitor_canon = None
+                        if self.monitor_service is not None:
+                            monitor_canon = self.monitor_service.resolve_canonical_name(meta_tmdb, meta_imdb)
+                        if monitor_canon:
+                            item["series_name"] = monitor_canon
+                            logger.info(f"[META] Using monitored canonical name: '{monitor_canon}'")
+                        else:
+                            # Fall back to metadata title (strips provider prefixes)
+                            meta_title = _str_val(
+                                info.get("name") or info.get("title")
+                            ).strip()
+                            if meta_title:
+                                year = _extract_year(info)
+                                if year and year not in meta_title:
+                                    meta_title = f"{meta_title} ({year})"
+                                item["series_name"] = meta_title
+                                logger.info(f"[META] Enriched series name: '{meta_title}'")
         except Exception as e:
             logger.debug(f"Could not enrich item name from metadata: {e}")
 
@@ -800,11 +874,21 @@ class CartService:
     # Download worker
     # ------------------------------------------------------------------
 
+    def _try_start_worker(self) -> bool:
+        """Start the download worker if not already running. Returns True if started.
+
+        No ``await`` between the done-check and create_task — safe to call from
+        any asyncio code path without a lock (cooperative scheduler guarantees
+        nothing runs between two non-awaited statements in the same frame).
+        """
+        if self._download_task is not None and not self._download_task.done():
+            return False
+        self._download_task = asyncio.create_task(self.download_worker())
+        return True
+
     async def download_worker(self) -> None:
         """Background worker that processes the download queue sequentially."""
         self._download_cancel_event = asyncio.Event()
-        await self.http_client.close()
-        logger.info("Closed global HTTP client to free provider connection slots")
 
         while True:
             queued = [item for item in self._download_cart if item.get("status") == "queued"]
@@ -849,8 +933,8 @@ class CartService:
             temp_path = os.path.join(temp_dir, temp_filename)
 
             try:
-                os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                os.makedirs(temp_dir, exist_ok=True)
+                safe_makedirs(os.path.dirname(file_path))
+                safe_makedirs(temp_dir)
                 throttle = self.config_service.get_download_throttle_settings()
                 bw_limit = throttle["bandwidth_limit"] * 1024
                 pause_interval = throttle["pause_interval"]
@@ -1088,7 +1172,7 @@ class CartService:
             return False
         dest_dir = os.path.dirname(file_path)
         try:
-            os.makedirs(dest_dir, exist_ok=True)
+            safe_makedirs(dest_dir)
         except Exception as e:
             item["status"] = "move_failed"
             item["error"] = f"Cannot create destination directory: {e}"
@@ -1229,7 +1313,7 @@ class CartService:
             if not series_info and series_id:
                 series_info = await self.xtream_service.fetch_series_info(source_id, series_id)
             if series_info:
-                os.makedirs(series_root, exist_ok=True)
+                safe_makedirs(series_root)
                 tvshow_content = generate_tvshow_nfo(series_info, name=series_name)
                 with open(tvshow_nfo_path, "w", encoding="utf-8") as f:
                     f.write(tvshow_content)

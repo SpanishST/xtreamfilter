@@ -1312,6 +1312,9 @@
         async function openAddMovieModal() {
             _clearMovieSelection();
             document.getElementById('add-movie-canonical').value = '';
+            // Reset save button in case a previous save left it disabled
+            const _sb = document.getElementById('add-movie-save-btn');
+            if (_sb) { _sb.disabled = false; _sb.innerHTML = '💾 Save'; }
             // Reset to "download" action
             selectAddMovieAction('download');
             // Default: apply source filter rules = checked
@@ -1372,6 +1375,7 @@
                 const data = await resp.json();
                 if (resp.ok) {
                     showToast('Movie monitor added: ' + (data.entry?.canonical_name || data.entry?.movie_name || movie_name), 'success');
+                    btn.disabled = false; btn.innerHTML = orig;
                     closeAddMovieModal();
                     // Switch to movies tab and refresh
                     switchTab('movies');
@@ -1393,6 +1397,9 @@
             const entry = monitoredMovies.find(m => m.id === id);
             if (!entry) return;
             _editMovieId = id;
+            // Reset save button in case a previous save left it disabled
+            const _sb = document.getElementById('edit-movie-save-btn');
+            if (_sb) { _sb.disabled = false; _sb.innerHTML = '💾 Save'; }
             document.getElementById('edit-movie-modal-title').textContent = '✏️ Edit: ' + (entry.canonical_name || entry.movie_name);
             document.getElementById('edit-movie-canonical').value = entry.canonical_name || '';
             selectEditMovieAction(entry.action || 'download');
@@ -1437,6 +1444,7 @@
                 });
                 if (resp.ok) {
                     showToast('Movie monitor updated', 'success');
+                    btn.disabled = false; btn.innerHTML = orig;
                     closeEditMovieModal();
                     await loadMovies();
                 } else {

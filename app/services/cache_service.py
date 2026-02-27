@@ -384,16 +384,22 @@ class CacheService:
     # Cache validity
     # ------------------------------------------------------------------
 
-    def is_cache_valid(self) -> bool:
+    def get_cache_age(self) -> float:
+        """Return the age of the cache in seconds, or infinity if unknown."""
         last_refresh = self._api_cache.get("last_refresh")
         if not last_refresh:
-            return False
+            return float("inf")
         try:
             last_time = datetime.fromisoformat(last_refresh)
-            age = (datetime.now() - last_time).total_seconds()
-            return age < self.config_service.get_cache_ttl()
+            return (datetime.now() - last_time).total_seconds()
         except (ValueError, TypeError):
+            return float("inf")
+
+    def is_cache_valid(self) -> bool:
+        age = self.get_cache_age()
+        if age == float("inf"):
             return False
+        return age < self.config_service.get_cache_ttl()
 
     # ------------------------------------------------------------------
     # Data accessors

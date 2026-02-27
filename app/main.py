@@ -95,7 +95,14 @@ async def background_refresh_loop(
                 logger.info("EPG cache expired, triggering refresh…")
                 asyncio.create_task(epg_svc.refresh_epg_cache())
 
-            await asyncio.sleep(cache.config_service.get_cache_ttl())
+            # Sleep until the cache is about to expire, not a full TTL from now.
+            # This prevents worst-case 2×TTL drift when the loop checks just
+            # before the cache expires and then sleeps a full TTL.
+            ttl = cache.config_service.get_cache_ttl()
+            remaining = ttl - cache.get_cache_age()
+            sleep_secs = max(30, remaining)
+            logger.debug(f"Background loop sleeping {sleep_secs:.0f}s (remaining TTL: {remaining:.0f}s)")
+            await asyncio.sleep(sleep_secs)
 
         except asyncio.CancelledError:
             logger.info("Background refresh task cancelled")

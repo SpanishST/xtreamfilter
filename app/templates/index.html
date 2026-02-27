@@ -1463,8 +1463,10 @@
                     
                     // Status indicator
                     let status = '⏳';
+                    let statusTitle = '';
                     if (data.refresh_in_progress) {
                         status = '🔄';
+                        statusTitle = 'Refresh in progress…';
                         document.getElementById('refresh-cache-btn').disabled = true;
                         document.getElementById('refresh-cache-btn').textContent = '⏳ Refreshing...';
                         document.getElementById('cancel-refresh-btn').style.display = 'inline-block';
@@ -1485,6 +1487,7 @@
                         }
                     } else if (data.cache_valid) {
                         status = '✅';
+                        statusTitle = 'Cache is fresh';
                         document.getElementById('refresh-cache-btn').disabled = false;
                         document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
                         document.getElementById('cancel-refresh-btn').style.display = 'none';
@@ -1495,18 +1498,20 @@
                             refreshPollInterval = null;
                         }
                     } else {
-                        status = '⚠️';
+                        status = '🕐';
+                        statusTitle = 'Cache is stale — auto-refresh pending';
                         document.getElementById('refresh-cache-btn').disabled = false;
                         document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
                         document.getElementById('cancel-refresh-btn').style.display = 'none';
                         progressContainer.style.display = 'none';
-                        // Stop fast polling
-                        if (refreshPollInterval) {
-                            clearInterval(refreshPollInterval);
-                            refreshPollInterval = null;
+                        // Keep polling so we notice when the background refresh fires
+                        if (!refreshPollInterval) {
+                            refreshPollInterval = setInterval(loadCacheStatus, 5000);
                         }
                     }
-                    document.getElementById('cache-status').textContent = status;
+                    const statusEl = document.getElementById('cache-status');
+                    statusEl.textContent = status;
+                    statusEl.title = statusTitle;
                     
                     // Last refresh time
                     if (data.last_refresh) {

@@ -100,7 +100,8 @@ class MonitorService:
             series_rows = conn.execute(
                 "SELECT id, series_name, canonical_name, series_id, source_id, source_name, "
                 "source_category, cover, scope, season_filter, action, enabled, "
-                "created_at, last_checked, last_new_count, tmdb_id, imdb_id "
+                "created_at, last_checked, last_new_count, tmdb_id, imdb_id, "
+                "custom_category_ids "
                 "FROM monitored_series ORDER BY created_at"
             ).fetchall()
 
@@ -140,6 +141,15 @@ class MonitorService:
                 except Exception:
                     monitor_sources = []
 
+                raw_ccids = sr["custom_category_ids"]
+                if raw_ccids:
+                    try:
+                        custom_category_ids = json.loads(raw_ccids)
+                    except Exception:
+                        custom_category_ids = []
+                else:
+                    custom_category_ids = []
+
                 result.append({
                     "id": sid,
                     "series_name": sr["series_name"],
@@ -149,6 +159,7 @@ class MonitorService:
                     "source_name": sr["source_name"],
                     "source_category": sr["source_category"],
                     "monitor_sources": monitor_sources,
+                    "custom_category_ids": custom_category_ids,
                     "cover": sr["cover"],
                     "scope": sr["scope"],
                     "season_filter": sr["season_filter"],
@@ -191,13 +202,15 @@ class MonitorService:
                 if not entry_id:
                     continue
 
+                _ccids = entry.get("custom_category_ids") or []
+                _ccids_json = json.dumps(_ccids) if _ccids else None
                 conn.execute(
                     """INSERT OR REPLACE INTO monitored_series
                        (id, series_name, canonical_name, series_id, source_id, source_name,
                         source_category, cover, scope, season_filter, action,
                         enabled, created_at, last_checked, last_new_count,
-                        tmdb_id, imdb_id)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        tmdb_id, imdb_id, custom_category_ids)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         entry_id,
                         entry.get("series_name", ""),
@@ -216,6 +229,7 @@ class MonitorService:
                         int(entry.get("last_new_count", 0)),
                         entry.get("tmdb_id"),
                         entry.get("imdb_id"),
+                        _ccids_json,
                     ),
                 )
 
@@ -432,6 +446,46 @@ class MonitorService:
     # Check logic
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Custom category item lookup
+    # ------------------------------------------------------------------
+
+    def _get_custom_category_items(self, category_ids: list[str], content_type: str) -> list[dict]:
+        """Return {source_id, stream_id} pairs for all items in the given custom categories
+        that match the specified content_type (e.g. 'series' or 'vod')."""
+        if not category_ids:
+            return []
+        conn = db_connect(self.db_path)
+        try:
+            placeholders = ",".join("?" * len(category_ids))
+            manual_rows = conn.execute(
+                f"SELECT DISTINCT source_id, stream_id FROM category_manual_items "
+                f"WHERE category_id IN ({placeholders}) AND content_type = ?",
+                category_ids + [content_type],
+            ).fetchall()
+            cached_rows = conn.execute(
+                f"SELECT DISTINCT source_id, stream_id FROM category_cached_items "
+                f"WHERE category_id IN ({placeholders}) AND content_type = ?",
+                category_ids + [content_type],
+            ).fetchall()
+            seen: set[tuple[str, str]] = set()
+            items: list[dict] = []
+            for r in list(manual_rows) + list(cached_rows):
+                key = (r["source_id"], r["stream_id"])
+                if key not in seen:
+                    seen.add(key)
+                    items.append({"source_id": r["source_id"], "stream_id": r["stream_id"]})
+            return items
+        except Exception as e:
+            logger.warning(f"_get_custom_category_items error: {e}")
+            return []
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Check logic
+    # ------------------------------------------------------------------
+
     async def check_monitored_series(self) -> None:
         """Check all enabled monitored series for new episodes (called after cache refresh)."""
         if self._check_in_progress:
@@ -521,6 +575,26 @@ class MonitorService:
                 sources_to_try = [{"source_id": m["source_id"], "series_id": m["series_id"]} for m in matches]
             else:
                 logger.warning(f"Series monitoring: '{series_name}' not found in any source")
+                entry["last_checked"] = datetime.now().isoformat()
+                entry["last_new_count"] = 0
+                return []
+
+        # If custom category channels are configured, restrict to only (source_id, series_id)
+        # pairs whose series item exists in one of those custom categories.
+        custom_category_ids: list[str] = entry.get("custom_category_ids") or []
+        if custom_category_ids and sources_to_try:
+            cat_series_items = self._get_custom_category_items(custom_category_ids, "series")
+            cat_series_set = {(item["source_id"], item["stream_id"]) for item in cat_series_items}
+            filtered = [
+                s for s in sources_to_try
+                if (s["source_id"], s["series_id"]) in cat_series_set
+            ]
+            if filtered:
+                sources_to_try = filtered
+            else:
+                logger.info(
+                    f"Series monitoring: '{series_name}' — no sources in selected custom categories yet"
+                )
                 entry["last_checked"] = datetime.now().isoformat()
                 entry["last_new_count"] = 0
                 return []
@@ -877,7 +951,8 @@ class MonitorService:
         try:
             movie_rows = conn.execute(
                 "SELECT id, movie_name, canonical_name, tmdb_id, cover, "
-                "action, enabled, status, created_at, last_checked "
+                "action, enabled, status, created_at, last_checked, "
+                "custom_category_ids "
                 "FROM monitored_movies ORDER BY created_at"
             ).fetchall()
 
@@ -912,6 +987,15 @@ class MonitorService:
                 except Exception:
                     monitor_sources = []
 
+                raw_mccids = mr["custom_category_ids"]
+                if raw_mccids:
+                    try:
+                        movie_cc_ids = json.loads(raw_mccids)
+                    except Exception:
+                        movie_cc_ids = []
+                else:
+                    movie_cc_ids = []
+
                 result.append({
                     "id": mid,
                     "movie_name": mr["movie_name"],
@@ -922,6 +1006,7 @@ class MonitorService:
                     "enabled": bool(mr["enabled"]),
                     "status": mr["status"],
                     "monitor_sources": monitor_sources,
+                    "custom_category_ids": movie_cc_ids,
                     "created_at": mr["created_at"],
                     "last_checked": mr["last_checked"],
                 })
@@ -945,11 +1030,14 @@ class MonitorService:
                 entry_id = entry.get("id")
                 if not entry_id:
                     continue
+                _mccids = entry.get("custom_category_ids") or []
+                _mccids_json = json.dumps(_mccids) if _mccids else None
                 conn.execute(
                     """INSERT OR REPLACE INTO monitored_movies
                        (id, movie_name, canonical_name, tmdb_id, cover,
-                        action, enabled, status, created_at, last_checked)
-                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                        action, enabled, status, created_at, last_checked,
+                        custom_category_ids)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         entry_id,
                         entry.get("movie_name", ""),
@@ -961,6 +1049,7 @@ class MonitorService:
                         entry.get("status", "watching"),
                         entry.get("created_at"),
                         entry.get("last_checked"),
+                        _mccids_json,
                     ),
                 )
                 conn.execute(
@@ -1187,6 +1276,14 @@ class MonitorService:
             source_ids=source_ids,
             category_filters=category_filters if category_filters else None,
         )
+
+        # If custom category channels are configured, restrict matches to only those
+        # items (source_id, stream_id) that exist in one of those custom categories.
+        custom_category_ids: list[str] = entry.get("custom_category_ids") or []
+        if custom_category_ids and matches:
+            cat_vod_items = self._get_custom_category_items(custom_category_ids, "vod")
+            cat_vod_set = {(item["source_id"], item["stream_id"]) for item in cat_vod_items}
+            matches = [m for m in matches if (m["source_id"], m["stream_id"]) in cat_vod_set]
 
         entry["last_checked"] = datetime.now().isoformat()
 

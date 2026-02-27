@@ -197,6 +197,16 @@
         .monitor-form .source-select-all { display: flex; align-items: center; gap: 8px; padding: 4px 12px; margin-bottom: 2px; cursor: pointer; user-select: none; }
         .monitor-form .source-select-all input[type=checkbox] { width: 14px; height: 14px; flex-shrink: 0; accent-color: #a29bfe; cursor: pointer; }
         .monitor-form .source-select-all span { font-size: 0.78em; color: #a29bfe; font-weight: 500; }
+        /* Custom category channels in monitor modal */
+        .monitor-form .custom-cat-item { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; cursor: pointer; transition: background 0.15s; }
+        .monitor-form .custom-cat-item:hover { background: rgba(255,255,255,0.05); }
+        .monitor-form .custom-cat-item input[type=checkbox] { width: 15px; height: 15px; flex-shrink: 0; accent-color: #ffa502; cursor: pointer; }
+        .monitor-form .custom-cat-item .cc-icon { font-size: 1.1em; line-height: 1; }
+        .monitor-form .custom-cat-item .cc-name { font-size: 0.88em; color: #e0e0e0; font-weight: 500; }
+        details.custom-cat-details summary { cursor: pointer; color: #a29bfe; font-size: 0.88em; user-select: none; list-style: none; display: flex; align-items: center; gap: 6px; padding: 4px 0; }
+        details.custom-cat-details summary::-webkit-details-marker { display: none; }
+        details.custom-cat-details summary .arrow { display: inline-block; transition: transform 0.2s; font-size: 0.75em; }
+        details.custom-cat-details[open] summary .arrow { transform: rotate(90deg); }
         /* "All" scope coverage info box */
         .monitor-form .all-scope-info { margin-top: 8px; padding: 8px 12px; background: rgba(0,212,255,0.06); border: 1px solid rgba(0,212,255,0.2); border-radius: 8px; font-size: 0.8em; color: #888; }
         .monitor-form .all-scope-info strong { color: #00d4ff; display: block; margin-bottom: 4px; }
@@ -579,6 +589,16 @@
                     <div class="source-list" id="monitor-source-options">
                         <!-- populated by JS -->
                     </div>
+                </div>
+                <div class="form-group">
+                    <details id="monitor-custom-cats-details" class="custom-cat-details">
+                        <summary>
+                            <span class="arrow">▶</span> Custom category channels <span style="color:#666;font-weight:normal;">(optional)</span>
+                        </summary>
+                        <div id="monitor-custom-cats" style="display:flex;flex-direction:column;gap:4px;max-height:220px;overflow-y:auto;margin-top:8px;">
+                            <div style="color:#888;font-size:0.85em;padding:6px;">Loading…</div>
+                        </div>
+                    </details>
                 </div>
                 <div class="form-group">
                     <label>Action</label>
@@ -2354,6 +2374,53 @@
         // SERIES MONITOR FUNCTIONS
         // ============================================
         let _monitorModalData = {};
+        let _browseCustomCatsCache = null; // [{id, name, icon, content_types}]
+
+        async function _getBrowseCustomCategories() {
+            if (_browseCustomCatsCache) return _browseCustomCatsCache;
+            try {
+                const r = await fetch('/api/monitor/custom-categories');
+                const d = await r.json();
+                _browseCustomCatsCache = d.categories || [];
+            } catch(e) { _browseCustomCatsCache = []; }
+            return _browseCustomCatsCache;
+        }
+
+        async function _buildBrowseCustomCatSection(containerId, contentTypeFilter, preSelected) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            const allCats = await _getBrowseCustomCategories();
+            const relevant = allCats.filter(c =>
+                !contentTypeFilter || (c.content_types || []).includes(contentTypeFilter)
+            );
+            if (relevant.length === 0) {
+                container.innerHTML = '<div style="color:#555;font-size:0.82em;padding:6px 2px;">No custom categories for this content type.</div>';
+                return;
+            }
+            const preSet = new Set(preSelected || []);
+            // Auto-expand if any are pre-selected
+            if (preSet.size > 0) {
+                const details = document.getElementById(containerId + '-details');
+                if (details) details.open = true;
+            }
+            let html = '';
+            for (const cat of relevant) {
+                const checked = preSet.has(cat.id) ? ' checked' : '';
+                const iconGlyph = iconMap[cat.icon] || cat.icon || '📁';
+                html += '<label class="custom-cat-item">' +
+                    '<input type="checkbox" value="' + escapeAttr(cat.id) + '"' + checked + '>' +
+                    '<span class="cc-icon">' + iconGlyph + '</span>' +
+                    '<span class="cc-name">' + escapeHtml(cat.name) + '</span>' +
+                    '</label>';
+            }
+            container.innerHTML = html;
+        }
+
+        function _getBrowseSelectedCustomCategories(containerId) {
+            const container = document.getElementById(containerId);
+            if (!container) return [];
+            return Array.from(container.querySelectorAll('input[type=checkbox]:checked')).map(cb => cb.value);
+        }
 
         async function openMonitorModal(event, sourceId, seriesId, seriesName, icon, sourceName, allSources) {
             event.stopPropagation();
@@ -2409,6 +2476,7 @@
                 }
                 if (confirmBtn) confirmBtn.innerHTML = '✏️ Update Monitoring';
                 _buildMonitorSourceList(sourceId, seriesId, sourceName, allSources, existingEntry.monitor_sources || []);
+                _buildBrowseCustomCatSection('monitor-custom-cats', 'series', existingEntry.custom_category_ids || []);
             } else {
                 selectMonitorScope('new_only');
                 document.getElementById('monitor-season-group').style.display = 'none';
@@ -2418,6 +2486,7 @@
                 _fetchAndFillCanonicalName(sourceId, seriesId, allSources);
                 if (confirmBtn) confirmBtn.innerHTML = '📡 Start Monitoring';
                 _buildMonitorSourceList(sourceId, seriesId, sourceName, allSources, null);
+                _buildBrowseCustomCatSection('monitor-custom-cats', 'series', []);
             }
 
             // Load season list for season scope
@@ -2638,6 +2707,7 @@
                             action: d.action || 'both',
                             canonical_name: document.getElementById('monitor-canonical-name').value.trim() || null,
                             monitor_sources: monitorSources,
+                            custom_category_ids: _getBrowseSelectedCustomCategories('monitor-custom-cats'),
                         })
                     });
                     data = await resp.json();
@@ -2661,6 +2731,7 @@
                             source_name: sourceName,
                             source_category: sourceCategory,
                             monitor_sources: monitorSources,
+                            custom_category_ids: _getBrowseSelectedCustomCategories('monitor-custom-cats'),
                             cover: d.icon,
                             scope: scope,
                             season_filter: seasonFilter,

@@ -340,6 +340,8 @@ _COLUMN_UPGRADES: list[tuple[str, str, str]] = [
     ("cart_items", "series_id", "TEXT"),
     ("monitor_sources", "series_name", "TEXT"),
     ("monitored_series", "canonical_name", "TEXT"),
+    ("monitored_series", "custom_category_ids", "TEXT"),
+    ("monitored_movies", "custom_category_ids", "TEXT"),
 ]
 
 

@@ -131,6 +131,7 @@ async def api_browse(
         content_types_to_query_override = None
 
     sources_config = {}
+    # Auto-enable source filters when the viewed category has use_source_filters set
     if use_source_filters:
         sources_config = {s.get("id"): s for s in cfg.config.get("sources", [])}
 
@@ -156,6 +157,10 @@ async def api_browse(
     if category_id:
         cat_data = cat_svc.get_category_by_id(category_id)
         if cat_data:
+            # If the category itself has use_source_filters enabled, honour it even
+            # if the browse request didn't explicitly pass use_source_filters=true.
+            if not use_source_filters and cat_data.get("use_source_filters"):
+                sources_config = {s.get("id"): s for s in cfg.config.get("sources", [])}
             cat_items = cat_data.get("items", []) if cat_data.get("mode") == "manual" else cat_data.get("cached_items", [])
             for item in cat_items:
                 ct = item.get("content_type", "")

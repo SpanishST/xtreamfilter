@@ -516,9 +516,9 @@ class CategoryService:
                 )
 
                 if use_source_filters:
-                    # Hybrid: SQL for pattern match → Python for per-source group filters
+                    # Hybrid: SQL for pattern match → Python for per-source group+channel filters
                     candidates = conn.execute(
-                        f"SELECT stream_id, source_id, content_type, category_id AS cat_id "
+                        f"SELECT stream_id, source_id, content_type, category_id AS cat_id, name "
                         f"FROM streams WHERE {where_sql}",
                         params,
                     ).fetchall()
@@ -529,7 +529,7 @@ class CategoryService:
                         src_id = row["source_id"]
                         ct = row["content_type"]
                         if src_id not in sources_config:
-                            new_rows.append((cat_id, row["stream_id"], src_id, ct))
+                            # Unknown/removed source — skip entirely
                             continue
                         key = (src_id, ct)
                         if key not in cat_name_cache:
@@ -540,9 +540,13 @@ class CategoryService:
                             ).fetchall()
                             cat_name_cache[key] = {r["category_id"]: r["category_name"] for r in sc_rows}
                         source_cfg = sources_config[src_id]
-                        group_filters = source_cfg.get("filters", {}).get(ct, {}).get("groups", [])
+                        source_filters = source_cfg.get("filters", {}).get(ct, {})
+                        group_filters = source_filters.get("groups", [])
+                        channel_filters = source_filters.get("channels", [])
                         group_name = cat_name_cache[key].get(str(row["cat_id"]), "")
                         if group_filters and not should_include(group_name, group_filters):
+                            continue
+                        if channel_filters and not should_include(row["name"] or "", channel_filters):
                             continue
                         new_rows.append((cat_id, row["stream_id"], src_id, ct))
 

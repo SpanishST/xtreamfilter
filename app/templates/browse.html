@@ -1440,6 +1440,7 @@
                 if (selectedCategoryId) {
                     // Category view: don't send type — API returns all types
                     url = '/api/browse?page=' + currentPage + '&per_page=50&category_id=' + selectedCategoryId;
+                    if (useSourceFilters) url += '&use_source_filters=true';
                 } else {
                     url = '/api/browse?type=' + contentType + '&page=' + currentPage + '&per_page=50';
                     if (searchQuery) url += '&search=' + encodeURIComponent(searchQuery);

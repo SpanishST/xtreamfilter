@@ -211,7 +211,7 @@ async def api_browse(
 
             if source and src_id != source:
                 continue
-            if use_source_filters and src_id in sources_config:
+            if src_id in sources_config:
                 source_cfg = sources_config[src_id]
                 filters = source_cfg.get("filters", {})
                 content_filters = filters.get(ct, {})

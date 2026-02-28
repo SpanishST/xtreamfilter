@@ -19,6 +19,15 @@ async def get_categories(cat_svc: CategoryService = Depends(get_category_service
     return {"categories": data.get("categories", [])}
 
 
+@router.get("/summary")
+async def get_categories_summary(cat_svc: CategoryService = Depends(get_category_service)):
+    """Lightweight endpoint returning only id/name/icon/mode/item_count.
+
+    Used by the browse nav pills — avoids loading full item arrays.
+    """
+    return {"categories": cat_svc.load_categories_summary()}
+
+
 @router.post("")
 async def create_category(request: Request, cat_svc: CategoryService = Depends(get_category_service)):
     try:

@@ -57,6 +57,11 @@ class CacheService:
         }
         self._stream_map_lock = asyncio.Lock()
 
+        # Fast lookup index: (content_type, source_id, stream_id) → stream dict
+        self._stream_index: dict[tuple[str, str, str], dict] = {}
+        # Pre-built source names
+        self._source_names: dict[str, str] = {}
+
     # ------------------------------------------------------------------
     # Progress helpers  (SQLite replaces refresh_progress.json)
     # ------------------------------------------------------------------
@@ -211,7 +216,9 @@ class CacheService:
             if sources:
                 self._api_cache["sources"] = sources
                 self._api_cache["refresh_in_progress"] = False
+                self._inject_source_info()
                 self._rebuild_stream_source_map_sync()
+                self._rebuild_stream_index()
                 logger.info(
                     f"Loaded cache from DB. Last refresh: {self._api_cache.get('last_refresh', 'Never')}"
                 )
@@ -331,6 +338,70 @@ class CacheService:
             conn.close()
 
     # ------------------------------------------------------------------
+    # Source-info injection & stream index
+    # ------------------------------------------------------------------
+
+    def _inject_source_info(self) -> None:
+        """Stamp _source_id and _source_name onto every stream dict in‑place.
+
+        This runs once at load/refresh time so that read‑time accessors
+        never need to copy dicts.
+        """
+        source_names: dict[str, str] = {}
+        for src in self.config_service.config.get("sources", []):
+            source_names[src.get("id")] = src.get("name", "Unknown")
+        self._source_names = source_names
+
+        STREAM_KEYS = ("live_streams", "vod_streams", "series")
+        sources = self._api_cache.get("sources", {})
+        for src_id, src_cache in sources.items():
+            src_name = source_names.get(src_id, "Unknown")
+            for key in STREAM_KEYS:
+                for item in src_cache.get(key, []):
+                    item["_source_id"] = src_id
+                    item["_source_name"] = src_name
+
+    def _rebuild_stream_index(self) -> None:
+        """Build a (content_type, source_id, stream_id) → dict lookup index."""
+        idx: dict[tuple[str, str, str], dict] = {}
+        TYPE_MAP = {
+            "live_streams": ("live", "stream_id"),
+            "vod_streams": ("vod", "stream_id"),
+            "series": ("series", "series_id"),
+        }
+        sources = self._api_cache.get("sources", {})
+        for src_id, src_cache in sources.items():
+            for list_key, (ct, id_field) in TYPE_MAP.items():
+                for item in src_cache.get(list_key, []):
+                    sid = str(item.get(id_field, ""))
+                    if sid:
+                        idx[(ct, src_id, sid)] = item
+        self._stream_index = idx
+        logger.debug(f"Built stream index with {len(idx)} entries")
+
+    def get_streams_by_ids(
+        self, content_type: str, id_set: set[tuple[str, str]]
+    ) -> list[dict]:
+        """Return stream dicts for a set of (stream_id, source_id) pairs.
+
+        Uses the pre-built ``_stream_index`` for O(1) lookups per item,
+        avoiding full iteration of all streams.
+        """
+        result: list[dict] = []
+        for stream_id, source_id in id_set:
+            item = self._stream_index.get((content_type, source_id, stream_id))
+            if item is not None:
+                result.append(item)
+        return result
+
+    def get_categories_raw(self, category_key: str) -> list:
+        """Return the raw (un-copied) category list for all sources."""
+        result: list = []
+        for src_cache in self._api_cache.get("sources", {}).values():
+            result.extend(src_cache.get(category_key, []))
+        return result
+
+    # ------------------------------------------------------------------
     # Stream source map
     # ------------------------------------------------------------------
 
@@ -415,21 +486,16 @@ class CacheService:
         return result
 
     def get_cached_with_source_info(self, key: str, category_key: str) -> tuple[list, list]:
-        sources = self._api_cache.get("sources", {})
-        config = self.config_service.config
-        source_names: dict[str, str] = {}
-        for src in config.get("sources", []):
-            source_names[src.get("id")] = src.get("name", "Unknown")
+        """Return (streams, categories) with _source_id/_source_name on each stream.
 
+        Since source info is now injected at load/refresh time, this simply
+        concatenates the original lists — no per-item dict copy.
+        """
+        sources = self._api_cache.get("sources", {})
         result: list = []
         all_categories: list = []
-        for src_id, src_cache in sources.items():
-            src_name = source_names.get(src_id, "Unknown")
-            for item in src_cache.get(key, []):
-                item_copy = dict(item)
-                item_copy["_source_id"] = src_id
-                item_copy["_source_name"] = src_name
-                result.append(item_copy)
+        for src_cache in sources.values():
+            result.extend(src_cache.get(key, []))
             all_categories.extend(src_cache.get(category_key, []))
         return result, all_categories
 
@@ -656,7 +722,9 @@ class CacheService:
                     self._api_cache["sources"] = new_sources_cache
                     self._api_cache["last_refresh"] = datetime.now().isoformat()
                     self._api_cache["refresh_in_progress"] = False
+                self._inject_source_info()
                 await self.rebuild_stream_source_map()
+                self._rebuild_stream_index()
                 self.save_cache_to_disk()
 
                 self.save_refresh_progress(
@@ -702,6 +770,8 @@ class CacheService:
             self._api_cache = {"sources": {}, "last_refresh": None, "refresh_in_progress": False}
         async with self._stream_map_lock:
             self._stream_source_map = {"live": {}, "vod": {}, "series": {}}
+        self._stream_index = {}
+        self._source_names = {}
         conn = db_connect(self.db_path)
         try:
             conn.execute("DELETE FROM streams")

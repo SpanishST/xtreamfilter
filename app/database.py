@@ -175,6 +175,9 @@ CREATE TABLE IF NOT EXISTS category_manual_items (
 CREATE INDEX IF NOT EXISTS idx_manual_items_category
     ON category_manual_items (category_id);
 
+CREATE INDEX IF NOT EXISTS idx_manual_items_stream
+    ON category_manual_items (stream_id, source_id, content_type);
+
 CREATE TABLE IF NOT EXISTS category_cached_items (
     category_id  TEXT NOT NULL
                  REFERENCES custom_categories(id) ON DELETE CASCADE,
@@ -184,8 +187,8 @@ CREATE TABLE IF NOT EXISTS category_cached_items (
     PRIMARY KEY (category_id, stream_id, source_id, content_type)
 );
 
-CREATE INDEX IF NOT EXISTS idx_cached_items_category
-    ON category_cached_items (category_id);
+-- Note: no separate idx_cached_items_category needed; the PK already
+-- covers lookups by category_id prefix.
 
 -- ── Cart ───────────────────────────────────────────────────────────────────
 

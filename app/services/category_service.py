@@ -216,7 +216,11 @@ class CategoryService:
     # ------------------------------------------------------------------
 
     def load_categories(self) -> dict:
-        """Return the full categories dict from SQLite (same shape as old JSON)."""
+        """Return the full categories dict from SQLite (same shape as old JSON).
+
+        Uses batch queries to avoid the N+1 pattern: 3 queries total for
+        patterns, manual items, and cached items instead of 3 per category.
+        """
         conn = db_connect(self.db_path)
         try:
             cat_rows = conn.execute(
@@ -245,10 +249,119 @@ class CategoryService:
                     }]
                 }
 
-            return {"categories": [self._row_to_category(conn, r) for r in cat_rows]}
+            # --- Batch-load related data (3 queries instead of 3×N) ---
+            all_patterns: dict[str, list] = {}
+            for pr in conn.execute(
+                "SELECT category_id, match_type, value, case_sensitive "
+                "FROM category_patterns ORDER BY id"
+            ).fetchall():
+                all_patterns.setdefault(pr["category_id"], []).append(
+                    {"match": pr["match_type"], "value": pr["value"],
+                     "case_sensitive": bool(pr["case_sensitive"])}
+                )
+
+            all_manual: dict[str, list] = {}
+            for r in conn.execute(
+                "SELECT category_id, stream_id, source_id, content_type, added_at "
+                "FROM category_manual_items ORDER BY id"
+            ).fetchall():
+                all_manual.setdefault(r["category_id"], []).append(
+                    {"id": r["stream_id"], "source_id": r["source_id"],
+                     "content_type": r["content_type"], "added_at": r["added_at"]}
+                )
+
+            all_cached: dict[str, list] = {}
+            for r in conn.execute(
+                "SELECT category_id, stream_id, source_id, content_type "
+                "FROM category_cached_items ORDER BY rowid"
+            ).fetchall():
+                all_cached.setdefault(r["category_id"], []).append(
+                    {"id": r["stream_id"], "source_id": r["source_id"],
+                     "content_type": r["content_type"]}
+                )
+
+            categories = []
+            for row in cat_rows:
+                cat_id = row["id"]
+                try:
+                    content_types = json.loads(row["content_types"])
+                except (json.JSONDecodeError, TypeError):
+                    content_types = ["live", "vod", "series"]
+                categories.append({
+                    "id": cat_id,
+                    "name": row["name"],
+                    "icon": row["icon"],
+                    "mode": row["mode"],
+                    "content_types": content_types,
+                    "items": all_manual.get(cat_id, []),
+                    "patterns": all_patterns.get(cat_id, []),
+                    "pattern_logic": row["pattern_logic"],
+                    "use_source_filters": bool(row["use_source_filters"]),
+                    "notify_telegram": bool(row["notify_telegram"]),
+                    "recently_added_days": row["recently_added_days"],
+                    "cached_items": all_cached.get(cat_id, []),
+                    "last_refresh": row["last_refresh"],
+                })
+
+            return {"categories": categories}
         except Exception as e:
             logger.error(f"Error loading categories from DB: {e}")
             return {"categories": []}
+        finally:
+            conn.close()
+
+    def load_categories_summary(self) -> list[dict]:
+        """Return a lightweight list of categories with item counts only.
+
+        Uses ``COUNT(*)`` aggregation instead of loading all items — much
+        cheaper than ``load_categories()`` for rendering nav pills.
+        """
+        conn = db_connect(self.db_path)
+        try:
+            cat_rows = conn.execute(
+                "SELECT id, name, icon, mode, content_types "
+                "FROM custom_categories ORDER BY sort_order, id"
+            ).fetchall()
+            if not cat_rows:
+                return []
+
+            # Counts for manual items
+            manual_counts: dict[str, int] = {}
+            for r in conn.execute(
+                "SELECT category_id, COUNT(*) AS cnt FROM category_manual_items GROUP BY category_id"
+            ).fetchall():
+                manual_counts[r["category_id"]] = r["cnt"]
+
+            # Counts for cached items (automatic categories)
+            cached_counts: dict[str, int] = {}
+            for r in conn.execute(
+                "SELECT category_id, COUNT(*) AS cnt FROM category_cached_items GROUP BY category_id"
+            ).fetchall():
+                cached_counts[r["category_id"]] = r["cnt"]
+
+            result = []
+            for row in cat_rows:
+                cat_id = row["id"]
+                try:
+                    content_types = json.loads(row["content_types"])
+                except (json.JSONDecodeError, TypeError):
+                    content_types = ["live", "vod", "series"]
+                if row["mode"] == "manual":
+                    count = manual_counts.get(cat_id, 0)
+                else:
+                    count = cached_counts.get(cat_id, 0)
+                result.append({
+                    "id": cat_id,
+                    "name": row["name"],
+                    "icon": row["icon"],
+                    "mode": row["mode"],
+                    "content_types": content_types,
+                    "item_count": count,
+                })
+            return result
+        except Exception as e:
+            logger.error(f"Error loading categories summary: {e}")
+            return []
         finally:
             conn.close()
 
@@ -327,21 +440,11 @@ class CategoryService:
             conn.close()
 
     def get_item_details_from_cache(self, item_id: str, source_id: str, content_type: str) -> dict:
-        if content_type == "live":
-            streams, _ = self.cache_service.get_cached_with_source_info("live_streams", "live_categories")
-            id_field = "stream_id"
-        elif content_type == "vod":
-            streams, _ = self.cache_service.get_cached_with_source_info("vod_streams", "vod_categories")
-            id_field = "stream_id"
-        elif content_type == "series":
-            streams, _ = self.cache_service.get_cached_with_source_info("series", "series_categories")
-            id_field = "series_id"
-        else:
-            return {}
-        for stream in streams:
-            if str(stream.get(id_field, "")) == item_id and stream.get("_source_id", "") == source_id:
-                return {"name": stream.get("name", "Unknown"),
-                        "cover": stream.get("stream_icon", "") or stream.get("cover", "")}
+        """Look up a stream's name and cover via the pre-built index (O(1))."""
+        item = self.cache_service._stream_index.get((content_type, source_id, item_id))
+        if item:
+            return {"name": item.get("name", "Unknown"),
+                    "cover": item.get("stream_icon", "") or item.get("cover", "")}
         return {}
 
     # ------------------------------------------------------------------

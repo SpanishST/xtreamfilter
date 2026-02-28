@@ -1318,7 +1318,7 @@
 
         async function loadCategories() {
             try {
-                const response = await fetch('/api/categories');
+                const response = await fetch('/api/categories/summary');
                 const data = await response.json();
                 categories = data.categories || [];
                 renderBrowseNav();
@@ -1348,8 +1348,8 @@
                 html += '<div class="browse-nav-separator"></div>';
             }
             html += categories.map(cat => {
-                const rawItems = cat.mode === 'automatic' ? (cat.cached_items || []) : (cat.items || []);
-                const count = rawItems.length;
+                const count = cat.item_count != null ? cat.item_count
+                    : (cat.mode === 'automatic' ? (cat.cached_items || []).length : (cat.items || []).length);
                 const icon = iconMap[cat.icon] || cat.icon || '📁';
                 const isActive = selectedCategoryId === cat.id ? 'active' : '';
                 const modeIndicator = cat.mode === 'automatic' ? ' 🤖' : '';

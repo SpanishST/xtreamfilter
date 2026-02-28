@@ -48,6 +48,12 @@ def matches_filter(value: str, filter_rule: dict) -> bool:
         test_value = _strip_accents(test_value)
         test_pattern = _strip_accents(test_pattern)
 
+    # Normalize multiple whitespace characters to a single space
+    # so that e.g. "TELE  REALITE" (two spaces) matches "tele realite"
+    if match_type in ("exact", "starts_with", "ends_with", "contains", "not_contains"):
+        test_value = re.sub(r'\s+', ' ', test_value).strip()
+        test_pattern = re.sub(r'\s+', ' ', test_pattern).strip()
+
     if match_type == "exact":
         return test_value == test_pattern
     elif match_type == "starts_with":

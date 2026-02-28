@@ -47,8 +47,12 @@ def _pattern_to_sql(pattern: dict) -> tuple[str, list]:
         return "1=1", []
 
     if match_type in ("contains", "not_contains", "starts_with", "ends_with", "exact"):
-        col = "name" if case_sensitive else "lower(name)"
+        import re
+        # Normalize continuous whitespace inside DB 'name' values
+        col = "REPLACE(REPLACE(REPLACE(name, '  ', ' '), '  ', ' '), '  ', ' ')" if case_sensitive else "REPLACE(REPLACE(REPLACE(lower(name), '  ', ' '), '  ', ' '), '  ', ' ')"
         v = value if case_sensitive else value.lower()
+        v = re.sub(r'\s+', ' ', v).strip()
+
         # Escape LIKE special chars in value
         v_esc = v.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         if match_type == "contains":
@@ -319,11 +323,23 @@ class CategoryService:
         conn = db_connect(self.db_path)
         try:
             cat_rows = conn.execute(
-                "SELECT id, name, icon, mode, content_types "
+                "SELECT id, name, icon, mode, content_types, pattern_logic, "
+                "use_source_filters, notify_telegram, recently_added_days "
                 "FROM custom_categories ORDER BY sort_order, id"
             ).fetchall()
             if not cat_rows:
                 return []
+
+            # Load patterns (lightweight, needed for frontend edit modal)
+            all_patterns: dict[str, list] = {}
+            for pr in conn.execute(
+                "SELECT category_id, match_type, value, case_sensitive "
+                "FROM category_patterns ORDER BY id"
+            ).fetchall():
+                all_patterns.setdefault(pr["category_id"], []).append(
+                    {"match": pr["match_type"], "value": pr["value"],
+                     "case_sensitive": bool(pr["case_sensitive"])}
+                )
 
             # Counts for manual items
             manual_counts: dict[str, int] = {}
@@ -356,6 +372,11 @@ class CategoryService:
                     "icon": row["icon"],
                     "mode": row["mode"],
                     "content_types": content_types,
+                    "pattern_logic": row["pattern_logic"],
+                    "use_source_filters": bool(row["use_source_filters"]),
+                    "notify_telegram": bool(row["notify_telegram"]),
+                    "recently_added_days": row["recently_added_days"],
+                    "patterns": all_patterns.get(cat_id, []),
                     "item_count": count,
                 })
             return result

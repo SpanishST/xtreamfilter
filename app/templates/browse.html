@@ -652,19 +652,27 @@
         </div>
     </div>
 
-    <!-- VOD Source Selector Modal -->
-    <div class="modal-overlay" id="vod-source-modal">
+    <!-- VOD Add to Cart Modal -->
+    <div class="modal-overlay" id="vod-add-modal">
         <div class="modal" style="max-width: 500px;">
             <div class="modal-header">
-                <h2 id="vod-source-modal-title">Select Source</h2>
-                <button class="modal-close" onclick="closeVodSourceModal()">&times;</button>
+                <h2 id="vod-add-modal-title">Add Movie to Cart</h2>
+                <button class="modal-close" onclick="closeVodAddModal()">&times;</button>
             </div>
-            <div class="modal-body">
-                <p style="color:#888; margin-bottom:15px; font-size:0.9em;">This film is available from multiple sources. Choose which one to download:</p>
-                <div id="vod-source-list"></div>
+            <div class="modal-body monitor-form">
+                <div class="form-group">
+                    <label>Movie / File Name</label>
+                    <input type="text" id="vod-add-name" style="width:100%;padding:8px 10px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#fff;font-size:0.9em;box-sizing:border-box;">
+                    <div style="font-size:0.8em; color:#888; margin-top:5px;">This name will be used for the downloaded file.</div>
+                </div>
+                <div class="form-group" id="vod-add-source-group" style="display:none;">
+                    <label>Select Source</label>
+                    <select id="vod-add-source" style="width:100%;padding:8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#fff;"></select>
+                </div>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="closeVodSourceModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="submitVodAdd()">Add to Cart</button>
+                <button class="btn btn-secondary" onclick="closeVodAddModal()">Cancel</button>
             </div>
         </div>
     </div>
@@ -2096,13 +2104,8 @@
                 openEpisodeModal(sourceId, itemId, name, icon, group, allSources);
                 return;
             }
-            // VOD: if multiple sources, show source selector modal
-            if (cType === 'vod' && allSources && allSources.length > 1) {
-                openVodSourceModal(allSources, name);
-                return;
-            }
-            // VOD single source: add directly
-            await _addVodToCart(sourceId, itemId, name, icon, group, ext);
+            // VOD: open the Add to Cart modal
+            openVodAddModal(sourceId, itemId, name, icon, group, allSources, ext);
         }
 
         async function _addVodToCart(sourceId, itemId, name, icon, group, ext) {
@@ -2130,36 +2133,64 @@
             } catch (e) { showToast('Error adding to cart', 'error'); }
         }
 
-        function openVodSourceModal(allSources, name) {
-            const modal = document.getElementById('vod-source-modal');
-            document.getElementById('vod-source-modal-title').textContent = 'Select Source: ' + name;
-            const listEl = document.getElementById('vod-source-list');
-            listEl.innerHTML = allSources.map((s, idx) => {
-                const si = sources.findIndex(src => src.id === s.source_id) + 1;
-                return '<div style="display:flex; justify-content:space-between; align-items:center; padding:12px; border-radius:8px; margin-bottom:8px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); cursor:pointer; transition:all 0.2s;" ' +
-                    'onmouseenter="this.style.borderColor=\'#00d4ff\'" onmouseleave="this.style.borderColor=\'rgba(255,255,255,0.1)\'" ' +
-                    'onclick="selectVodSource(' + idx + ')">' +
-                    '<div>' +
-                    '<div style="font-weight:500;">' + escapeHtml(s.name) + '</div>' +
-                    '<span class="source-badge" data-color="' + (si % 5 || 5) + '">' + escapeHtml(s.source_name) + '</span>' +
-                    (s.group ? ' <span style="font-size:0.8em;color:#888;">' + escapeHtml(s.group) + '</span>' : '') +
-                    '</div>' +
-                    '<span style="font-size:1.2em;">🛒</span>' +
-                    '</div>';
-            }).join('');
+        function openVodAddModal(sourceId, itemId, name, icon, group, allSources, ext) {
+            const modal = document.getElementById('vod-add-modal');
+            document.getElementById('vod-add-name').value = name;
+            
+            const sourceGroup = document.getElementById('vod-add-source-group');
+            const sourceSelect = document.getElementById('vod-add-source');
+            
+            if (allSources && allSources.length > 1) {
+                modal._allSources = allSources;
+                modal._singleSource = null;
+                sourceSelect.innerHTML = allSources.map((s, idx) => {
+                    const srcInfo = sources.find(x => x.id === s.source_id);
+                    const srcName = srcInfo ? srcInfo.name : s.source_name || s.source_id;
+                    return '<option value="' + idx + '"' + (s.source_id === sourceId ? ' selected' : '') + '>' + escapeHtml(srcName) + ' — ' + escapeHtml(s.name) + '</option>';
+                }).join('');
+                sourceGroup.style.display = 'block';
+            } else {
+                modal._allSources = null;
+                modal._singleSource = { sourceId, itemId, icon, group, ext, name };
+                sourceSelect.innerHTML = '<option value="0" selected></option>';
+                sourceGroup.style.display = 'none';
+            }
+            
             modal.classList.add('show');
-            modal._allSources = allSources;
         }
 
-        function closeVodSourceModal() {
-            document.getElementById('vod-source-modal').classList.remove('show');
+        function closeVodAddModal() {
+            const modal = document.getElementById('vod-add-modal');
+            modal.classList.remove('show');
+            modal._allSources = null;
+            modal._singleSource = null;
         }
 
-        async function selectVodSource(idx) {
-            const modal = document.getElementById('vod-source-modal');
-            const s = modal._allSources[idx];
-            closeVodSourceModal();
-            await _addVodToCart(s.source_id, s.item_id, s.name, s.icon || '', s.group || '', s.container_extension || 'mp4');
+        async function submitVodAdd() {
+            const finalName = document.getElementById('vod-add-name').value.trim();
+            if (!finalName) {
+                showToast('Name cannot be empty', 'error');
+                return;
+            }
+            
+            const modal = document.getElementById('vod-add-modal');
+            let sId, iId, ic, grp, xt;
+            
+            if (modal._singleSource) {
+                const s = modal._singleSource;
+                sId = s.sourceId; iId = s.itemId; ic = s.icon; grp = s.group; xt = s.ext;
+            } else if (modal._allSources) {
+                const sourceSelect = document.getElementById('vod-add-source');
+                const idx = parseInt(sourceSelect.value, 10);
+                const s = modal._allSources[idx];
+                sId = s.source_id; iId = s.item_id; ic = s.icon || ''; grp = s.group || ''; xt = s.container_extension || 'mp4';
+            } else {
+                closeVodAddModal();
+                return;
+            }
+            
+            closeVodAddModal();
+            await _addVodToCart(sId, iId, finalName, ic, grp, xt);
         }
 
         async function openEpisodeModal(sourceId, seriesId, seriesName, icon, group, allSources) {

@@ -7,6 +7,14 @@ import unicodedata
 from rapidfuzz import fuzz
 
 
+def _strip_accents(text: str) -> str:
+    """Remove diacritical marks (accents) from *text*."""
+    return "".join(
+        c for c in unicodedata.normalize("NFD", text)
+        if unicodedata.category(c) != "Mn"
+    )
+
+
 def matches_filter(value: str, filter_rule: dict) -> bool:
     """Check if a value matches a filter rule."""
     match_type = filter_rule.get("match", "contains")
@@ -22,6 +30,12 @@ def matches_filter(value: str, filter_rule: dict) -> bool:
 
     test_value = value if case_sensitive else value.lower()
     test_pattern = pattern if case_sensitive else pattern.lower()
+
+    # Accent-insensitive comparison: strip diacritics so that e.g.
+    # "TÉLÉ RÉALITÉ" matches a filter value "tele realite".
+    if not case_sensitive:
+        test_value = _strip_accents(test_value)
+        test_pattern = _strip_accents(test_pattern)
 
     if match_type == "exact":
         return test_value == test_pattern

@@ -2307,5 +2307,121 @@
             ★ XtreamFilter on GitHub
         </a>
     </footer>
+<script>
+// Global action button spinner interceptor
+(function() {
+    let activeActionElement = null;
+
+    document.addEventListener('click', function(e) {
+        const target = e.target.closest('button, .btn, .icon-btn, .action-btn, .add-cart-btn, .add-monitor-btn, .play-btn, .episode-play-btn, [class*="-btn"]');
+        if (target) {
+            if (target.tagName === 'BUTTON' || target.classList.contains('btn') || target.className.includes('-btn') || target.hasAttribute('onclick')) {
+                activeActionElement = target;
+                setTimeout(() => {
+                    if (activeActionElement === target) {
+                        activeActionElement = null;
+                    }
+                }, 100);
+            }
+        }
+    }, true);
+
+    const originalFetch = window.fetch;
+    window.fetch = async function(...args) {
+        let url = '';
+        if (typeof args[0] === 'string') {
+            url = args[0];
+        } else if (args[0] && args[0].url) {
+            url = args[0].url;
+        }
+
+        // Methods that are actions
+        const isPostOrDelete = (args[1] && (args[1].method === 'POST' || args[1].method === 'DELETE'));
+
+        // Identify common background polling endpoints or frequent passive gets
+        const isBackgroundPoll = url.match(/\/api\/(cart|cart\/status|version|cache\/status|monitor|monitor\/movies|categories\/summary|player\/epg\/.*)$/) && !isPostOrDelete;
+
+        const el = activeActionElement;
+        
+        // Skip spinners for these
+        if (isBackgroundPoll || !el || el.dataset.fetching) {
+            return originalFetch.apply(this, args);
+        }
+
+        // Consume to avoid dual triggers on concurrent requests
+        activeActionElement = null; 
+        el.dataset.fetching = 'true';
+        
+        const originalHtml = el.innerHTML;
+        const originalPointerEvents = el.style.pointerEvents;
+        const originalPosition = el.style.position || '';
+        const originalWidth = el.style.width || '';
+        const originalHeight = el.style.height || '';
+        
+        // Freeze dimensions explicitly so it doesn't jump
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0) {
+            el.style.width = rect.width + 'px';
+            if (rect.height > 0) {
+                el.style.height = rect.height + 'px';
+            }
+        }
+        el.style.pointerEvents = 'none';
+        
+        if (!document.getElementById('xtream-global-spinner-style')) {
+            const style = document.createElement('style');
+            style.id = 'xtream-global-spinner-style';
+            style.textContent = `
+                @keyframes xtream-spin { to { transform: rotate(360deg); } }
+                .xtream-spinner { 
+                    display: inline-block; 
+                    width: 1.2em; 
+                    height: 1.2em; 
+                    border: 2px solid currentColor; 
+                    border-bottom-color: transparent; 
+                    border-radius: 50%; 
+                    animation: xtream-spin 0.6s linear infinite; 
+                    box-sizing: border-box; 
+                }
+                .btn-spinner-overlay {
+                    position: absolute;
+                    top: 0; left: 0; right: 0; bottom: 0;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    
+                    border-radius: inherit;
+                }
+            `;
+            document.head.appendChild(style);
+        }
+
+        const computedStyle = window.getComputedStyle(el);
+        if (computedStyle.position === 'static') {
+            el.style.position = 'relative';
+        }
+        
+        el.innerHTML = `
+            <div style="visibility: hidden; display: contents;">${originalHtml}</div>
+            <div class="btn-spinner-overlay"><div class="xtream-spinner"></div></div>
+        `;
+
+        try {
+            return await originalFetch.apply(this, args);
+        } finally {
+            el.innerHTML = originalHtml;
+            el.style.pointerEvents = originalPointerEvents;
+            el.style.position = originalPosition;
+            if (rect.width > 0) {
+                el.style.width = originalWidth;
+                if (rect.height > 0) {
+                    el.style.height = originalHeight;
+                }
+            }
+            delete el.dataset.fetching;
+        }
+    };
+})();
+</script>
 </body>
 </html>

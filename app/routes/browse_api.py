@@ -131,24 +131,12 @@ async def api_browse(
         content_types_to_query_override = None
 
     sources_config = {}
+    # Auto-enable source filters when the viewed category has use_source_filters set
     if use_source_filters:
         sources_config = {s.get("id"): s for s in cfg.config.get("sources", [])}
 
     current_time = int(time.time())
     news_cutoff = current_time - (news_days * 86400) if news_days > 0 else 0
-
-    # Build category membership map via direct SQL (avoids loading all categories JSON)
-    category_membership: dict[tuple, list] = {}
-    _cm_conn = db_connect(cat_svc.db_path)
-    try:
-        for _row in _cm_conn.execute(
-            "SELECT category_id, stream_id, source_id, content_type "
-            "FROM category_manual_items"
-        ).fetchall():
-            _key = (_row["content_type"], _row["stream_id"], _row["source_id"])
-            category_membership.setdefault(_key, []).append(_row["category_id"])
-    finally:
-        _cm_conn.close()
 
     # Determine which content types to query
     cat_data = None
@@ -156,6 +144,10 @@ async def api_browse(
     if category_id:
         cat_data = cat_svc.get_category_by_id(category_id)
         if cat_data:
+            # If the category itself has use_source_filters enabled, honour it even
+            # if the browse request didn't explicitly pass use_source_filters=true.
+            if not use_source_filters and cat_data.get("use_source_filters"):
+                sources_config = {s.get("id"): s for s in cfg.config.get("sources", [])}
             cat_items = cat_data.get("items", []) if cat_data.get("mode") == "manual" else cat_data.get("cached_items", [])
             for item in cat_items:
                 ct = item.get("content_type", "")
@@ -181,10 +173,20 @@ async def api_browse(
         if ct not in TYPE_MAP:
             continue
         streams_key, cats_key = TYPE_MAP[ct]
-        streams, categories = cache.get_cached_with_source_info(streams_key, cats_key)
+
+        # Build the category map (needed for group names)
+        categories = cache.get_categories_raw(cats_key)
         cat_map = build_category_map(categories)
 
         cat_item_set = category_item_sets.get(ct, set())
+
+        # Fast path: when browsing a specific category, fetch only the
+        # matching streams via the pre-built index instead of iterating
+        # every stream in the cache.
+        if category_id and cat_item_set:
+            streams = cache.get_streams_by_ids(ct, cat_item_set)
+        else:
+            streams, _ = cache.get_cached_with_source_info(streams_key, cats_key)
 
         for s in streams:
             src_id = s.get("_source_id", "")
@@ -206,7 +208,7 @@ async def api_browse(
 
             if source and src_id != source:
                 continue
-            if use_source_filters and src_id in sources_config:
+            if src_id in sources_config:
                 source_cfg = sources_config[src_id]
                 filters = source_cfg.get("filters", {})
                 content_filters = filters.get(ct, {})
@@ -215,8 +217,6 @@ async def api_browse(
                 if content_filters.get("channels") and not should_include(name, content_filters["channels"]):
                     continue
             if news_days > 0 and added_ts < news_cutoff:
-                continue
-            if category_id and (item_id, src_id) not in cat_item_set:
                 continue
             if tmdb_search_id is not None:
                 raw_tmdb = s.get("tmdb_id") or s.get("tmdb")
@@ -300,10 +300,6 @@ async def api_browse(
             grouped_items.sort(key=lambda x: x["rating"], reverse=reverse)
         elif sort_by == "name":
             grouped_items.sort(key=lambda x: x["name"].lower(), reverse=reverse)
-        for gi in grouped_items:
-            for sub in gi["items"]:
-                key = (sub.get("content_type", type), sub["id"], sub["source_id"])
-                sub["categories"] = category_membership.get(key, [])
         total = len(grouped_items)
         grouped = True
         start = (page - 1) * per_page
@@ -311,8 +307,43 @@ async def api_browse(
     else:
         start = (page - 1) * per_page
         paginated = items[start : start + per_page]
+
+    # Build category membership for paginated items only (not the full table).
+    # Collect the unique (stream_id, source_id, content_type) triples from
+    # the current page and query just those from the DB.
+    _page_keys: set[tuple[str, str, str]] = set()
+    if grouped:
+        for gi in paginated:
+            for sub in gi["items"]:
+                _page_keys.add((sub["id"], sub["source_id"], sub.get("content_type", type)))
+    else:
         for item in paginated:
-            key = (type, item["id"], item["source_id"])
+            _page_keys.add((item["id"], item["source_id"], item.get("content_type", type)))
+
+    category_membership: dict[tuple, list] = {}
+    if _page_keys:
+        _cm_conn = db_connect(cat_svc.db_path)
+        try:
+            # Query only items on the current page
+            for _pk in _page_keys:
+                for _row in _cm_conn.execute(
+                    "SELECT category_id FROM category_manual_items "
+                    "WHERE stream_id=? AND source_id=? AND content_type=?",
+                    _pk,
+                ).fetchall():
+                    category_membership.setdefault(_pk, []).append(_row["category_id"])
+        finally:
+            _cm_conn.close()
+
+    # Annotate paginated items with their category memberships
+    if grouped:
+        for gi in paginated:
+            for sub in gi["items"]:
+                key = (sub["id"], sub["source_id"], sub.get("content_type", type))
+                sub["categories"] = category_membership.get(key, [])
+    else:
+        for item in paginated:
+            key = (item["id"], item["source_id"], item.get("content_type", type))
             item["categories"] = category_membership.get(key, [])
 
     groups_list = [{"name": g, "count": c} for g, c in sorted(group_counts.items())]

@@ -58,6 +58,28 @@ class TestMatchesFilter:
         assert matches_filter("Any Channel", rule) is True
         assert matches_filter("", rule) is True
 
+    def test_contains_accent_insensitive(self):
+        """Accented characters should match their unaccented equivalents."""
+        rule = {"type": "exclude", "match": "contains", "value": "tele realite", "case_sensitive": False}
+        assert matches_filter("|FR| ✪ TÉLÉ RÉALITÉ", rule) is True
+        assert matches_filter("|FR| ✪ TELE REALITE", rule) is True
+        assert matches_filter("|FR| ✪ SCIENCE", rule) is False
+
+    def test_starts_with_accent_insensitive(self):
+        rule = {"type": "include", "match": "starts_with", "value": "tele", "case_sensitive": False}
+        assert matches_filter("TÉLÉ RÉALITÉ", rule) is True
+
+    def test_exact_accent_insensitive(self):
+        rule = {"type": "include", "match": "exact", "value": "cafe", "case_sensitive": False}
+        assert matches_filter("Café", rule) is True
+        assert matches_filter("CAFÉ", rule) is True
+
+    def test_accents_preserved_when_case_sensitive(self):
+        """When case_sensitive is True, accents are NOT stripped."""
+        rule = {"type": "include", "match": "contains", "value": "tele realite", "case_sensitive": True}
+        assert matches_filter("TÉLÉ RÉALITÉ", rule) is False
+        assert matches_filter("tele realite", rule) is True
+
 
 # ---------------------------------------------------------------
 # should_include

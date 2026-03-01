@@ -197,6 +197,16 @@
         .monitor-form .source-select-all { display: flex; align-items: center; gap: 8px; padding: 4px 12px; margin-bottom: 2px; cursor: pointer; user-select: none; }
         .monitor-form .source-select-all input[type=checkbox] { width: 14px; height: 14px; flex-shrink: 0; accent-color: #a29bfe; cursor: pointer; }
         .monitor-form .source-select-all span { font-size: 0.78em; color: #a29bfe; font-weight: 500; }
+        /* Custom category channels in monitor modal */
+        .monitor-form .custom-cat-item { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; cursor: pointer; transition: background 0.15s; }
+        .monitor-form .custom-cat-item:hover { background: rgba(255,255,255,0.05); }
+        .monitor-form .custom-cat-item input[type=checkbox] { width: 15px; height: 15px; flex-shrink: 0; accent-color: #ffa502; cursor: pointer; }
+        .monitor-form .custom-cat-item .cc-icon { font-size: 1.1em; line-height: 1; }
+        .monitor-form .custom-cat-item .cc-name { font-size: 0.88em; color: #e0e0e0; font-weight: 500; }
+        details.custom-cat-details summary { cursor: pointer; color: #a29bfe; font-size: 0.88em; user-select: none; list-style: none; display: flex; align-items: center; gap: 6px; padding: 4px 0; }
+        details.custom-cat-details summary::-webkit-details-marker { display: none; }
+        details.custom-cat-details summary .arrow { display: inline-block; transition: transform 0.2s; font-size: 0.75em; }
+        details.custom-cat-details[open] summary .arrow { transform: rotate(90deg); }
         /* "All" scope coverage info box */
         .monitor-form .all-scope-info { margin-top: 8px; padding: 8px 12px; background: rgba(0,212,255,0.06); border: 1px solid rgba(0,212,255,0.2); border-radius: 8px; font-size: 0.8em; color: #888; }
         .monitor-form .all-scope-info strong { color: #00d4ff; display: block; margin-bottom: 4px; }
@@ -581,6 +591,16 @@
                     </div>
                 </div>
                 <div class="form-group">
+                    <details id="monitor-custom-cats-details" class="custom-cat-details">
+                        <summary>
+                            <span class="arrow">▶</span> Custom category channels <span style="color:#666;font-weight:normal;">(optional)</span>
+                        </summary>
+                        <div id="monitor-custom-cats" style="display:flex;flex-direction:column;gap:4px;max-height:220px;overflow-y:auto;margin-top:8px;">
+                            <div style="color:#888;font-size:0.85em;padding:6px;">Loading…</div>
+                        </div>
+                    </details>
+                </div>
+                <div class="form-group">
                     <label>Action</label>
                     <div class="scope-options">
                         <div class="scope-option action-option selected" data-action="both" onclick="selectMonitorAction('both')">
@@ -632,19 +652,27 @@
         </div>
     </div>
 
-    <!-- VOD Source Selector Modal -->
-    <div class="modal-overlay" id="vod-source-modal">
+    <!-- VOD Add to Cart Modal -->
+    <div class="modal-overlay" id="vod-add-modal">
         <div class="modal" style="max-width: 500px;">
             <div class="modal-header">
-                <h2 id="vod-source-modal-title">Select Source</h2>
-                <button class="modal-close" onclick="closeVodSourceModal()">&times;</button>
+                <h2 id="vod-add-modal-title">Add Movie to Cart</h2>
+                <button class="modal-close" onclick="closeVodAddModal()">&times;</button>
             </div>
-            <div class="modal-body">
-                <p style="color:#888; margin-bottom:15px; font-size:0.9em;">This film is available from multiple sources. Choose which one to download:</p>
-                <div id="vod-source-list"></div>
+            <div class="modal-body monitor-form">
+                <div class="form-group">
+                    <label>Movie / File Name</label>
+                    <input type="text" id="vod-add-name" style="width:100%;padding:8px 10px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#fff;font-size:0.9em;box-sizing:border-box;">
+                    <div style="font-size:0.8em; color:#888; margin-top:5px;">This name will be used for the downloaded file.</div>
+                </div>
+                <div class="form-group" id="vod-add-source-group" style="display:none;">
+                    <label>Select Source</label>
+                    <select id="vod-add-source" style="width:100%;padding:8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#fff;"></select>
+                </div>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="closeVodSourceModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="submitVodAdd()">Add to Cart</button>
+                <button class="btn btn-secondary" onclick="closeVodAddModal()">Cancel</button>
             </div>
         </div>
     </div>
@@ -1298,7 +1326,7 @@
 
         async function loadCategories() {
             try {
-                const response = await fetch('/api/categories');
+                const response = await fetch('/api/categories/summary');
                 const data = await response.json();
                 categories = data.categories || [];
                 renderBrowseNav();
@@ -1328,8 +1356,8 @@
                 html += '<div class="browse-nav-separator"></div>';
             }
             html += categories.map(cat => {
-                const rawItems = cat.mode === 'automatic' ? (cat.cached_items || []) : (cat.items || []);
-                const count = rawItems.length;
+                const count = cat.item_count != null ? cat.item_count
+                    : (cat.mode === 'automatic' ? (cat.cached_items || []).length : (cat.items || []).length);
                 const icon = iconMap[cat.icon] || cat.icon || '📁';
                 const isActive = selectedCategoryId === cat.id ? 'active' : '';
                 const modeIndicator = cat.mode === 'automatic' ? ' 🤖' : '';
@@ -1420,6 +1448,7 @@
                 if (selectedCategoryId) {
                     // Category view: don't send type — API returns all types
                     url = '/api/browse?page=' + currentPage + '&per_page=50&category_id=' + selectedCategoryId;
+                    if (useSourceFilters) url += '&use_source_filters=true';
                 } else {
                     url = '/api/browse?type=' + contentType + '&page=' + currentPage + '&per_page=50';
                     if (searchQuery) url += '&search=' + encodeURIComponent(searchQuery);
@@ -2075,13 +2104,8 @@
                 openEpisodeModal(sourceId, itemId, name, icon, group, allSources);
                 return;
             }
-            // VOD: if multiple sources, show source selector modal
-            if (cType === 'vod' && allSources && allSources.length > 1) {
-                openVodSourceModal(allSources, name);
-                return;
-            }
-            // VOD single source: add directly
-            await _addVodToCart(sourceId, itemId, name, icon, group, ext);
+            // VOD: open the Add to Cart modal
+            openVodAddModal(sourceId, itemId, name, icon, group, allSources, ext);
         }
 
         async function _addVodToCart(sourceId, itemId, name, icon, group, ext) {
@@ -2109,36 +2133,64 @@
             } catch (e) { showToast('Error adding to cart', 'error'); }
         }
 
-        function openVodSourceModal(allSources, name) {
-            const modal = document.getElementById('vod-source-modal');
-            document.getElementById('vod-source-modal-title').textContent = 'Select Source: ' + name;
-            const listEl = document.getElementById('vod-source-list');
-            listEl.innerHTML = allSources.map((s, idx) => {
-                const si = sources.findIndex(src => src.id === s.source_id) + 1;
-                return '<div style="display:flex; justify-content:space-between; align-items:center; padding:12px; border-radius:8px; margin-bottom:8px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); cursor:pointer; transition:all 0.2s;" ' +
-                    'onmouseenter="this.style.borderColor=\'#00d4ff\'" onmouseleave="this.style.borderColor=\'rgba(255,255,255,0.1)\'" ' +
-                    'onclick="selectVodSource(' + idx + ')">' +
-                    '<div>' +
-                    '<div style="font-weight:500;">' + escapeHtml(s.name) + '</div>' +
-                    '<span class="source-badge" data-color="' + (si % 5 || 5) + '">' + escapeHtml(s.source_name) + '</span>' +
-                    (s.group ? ' <span style="font-size:0.8em;color:#888;">' + escapeHtml(s.group) + '</span>' : '') +
-                    '</div>' +
-                    '<span style="font-size:1.2em;">🛒</span>' +
-                    '</div>';
-            }).join('');
+        function openVodAddModal(sourceId, itemId, name, icon, group, allSources, ext) {
+            const modal = document.getElementById('vod-add-modal');
+            document.getElementById('vod-add-name').value = name;
+            
+            const sourceGroup = document.getElementById('vod-add-source-group');
+            const sourceSelect = document.getElementById('vod-add-source');
+            
+            if (allSources && allSources.length > 1) {
+                modal._allSources = allSources;
+                modal._singleSource = null;
+                sourceSelect.innerHTML = allSources.map((s, idx) => {
+                    const srcInfo = sources.find(x => x.id === s.source_id);
+                    const srcName = srcInfo ? srcInfo.name : s.source_name || s.source_id;
+                    return '<option value="' + idx + '"' + (s.source_id === sourceId ? ' selected' : '') + '>' + escapeHtml(srcName) + ' — ' + escapeHtml(s.name) + '</option>';
+                }).join('');
+                sourceGroup.style.display = 'block';
+            } else {
+                modal._allSources = null;
+                modal._singleSource = { sourceId, itemId, icon, group, ext, name };
+                sourceSelect.innerHTML = '<option value="0" selected></option>';
+                sourceGroup.style.display = 'none';
+            }
+            
             modal.classList.add('show');
-            modal._allSources = allSources;
         }
 
-        function closeVodSourceModal() {
-            document.getElementById('vod-source-modal').classList.remove('show');
+        function closeVodAddModal() {
+            const modal = document.getElementById('vod-add-modal');
+            modal.classList.remove('show');
+            modal._allSources = null;
+            modal._singleSource = null;
         }
 
-        async function selectVodSource(idx) {
-            const modal = document.getElementById('vod-source-modal');
-            const s = modal._allSources[idx];
-            closeVodSourceModal();
-            await _addVodToCart(s.source_id, s.item_id, s.name, s.icon || '', s.group || '', s.container_extension || 'mp4');
+        async function submitVodAdd() {
+            const finalName = document.getElementById('vod-add-name').value.trim();
+            if (!finalName) {
+                showToast('Name cannot be empty', 'error');
+                return;
+            }
+            
+            const modal = document.getElementById('vod-add-modal');
+            let sId, iId, ic, grp, xt;
+            
+            if (modal._singleSource) {
+                const s = modal._singleSource;
+                sId = s.sourceId; iId = s.itemId; ic = s.icon; grp = s.group; xt = s.ext;
+            } else if (modal._allSources) {
+                const sourceSelect = document.getElementById('vod-add-source');
+                const idx = parseInt(sourceSelect.value, 10);
+                const s = modal._allSources[idx];
+                sId = s.source_id; iId = s.item_id; ic = s.icon || ''; grp = s.group || ''; xt = s.container_extension || 'mp4';
+            } else {
+                closeVodAddModal();
+                return;
+            }
+            
+            closeVodAddModal();
+            await _addVodToCart(sId, iId, finalName, ic, grp, xt);
         }
 
         async function openEpisodeModal(sourceId, seriesId, seriesName, icon, group, allSources) {
@@ -2354,6 +2406,53 @@
         // SERIES MONITOR FUNCTIONS
         // ============================================
         let _monitorModalData = {};
+        let _browseCustomCatsCache = null; // [{id, name, icon, content_types}]
+
+        async function _getBrowseCustomCategories() {
+            if (_browseCustomCatsCache) return _browseCustomCatsCache;
+            try {
+                const r = await fetch('/api/monitor/custom-categories');
+                const d = await r.json();
+                _browseCustomCatsCache = d.categories || [];
+            } catch(e) { _browseCustomCatsCache = []; }
+            return _browseCustomCatsCache;
+        }
+
+        async function _buildBrowseCustomCatSection(containerId, contentTypeFilter, preSelected) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            const allCats = await _getBrowseCustomCategories();
+            const relevant = allCats.filter(c =>
+                !contentTypeFilter || (c.content_types || []).includes(contentTypeFilter)
+            );
+            if (relevant.length === 0) {
+                container.innerHTML = '<div style="color:#555;font-size:0.82em;padding:6px 2px;">No custom categories for this content type.</div>';
+                return;
+            }
+            const preSet = new Set(preSelected || []);
+            // Auto-expand if any are pre-selected
+            if (preSet.size > 0) {
+                const details = document.getElementById(containerId + '-details');
+                if (details) details.open = true;
+            }
+            let html = '';
+            for (const cat of relevant) {
+                const checked = preSet.has(cat.id) ? ' checked' : '';
+                const iconGlyph = iconMap[cat.icon] || cat.icon || '📁';
+                html += '<label class="custom-cat-item">' +
+                    '<input type="checkbox" value="' + escapeAttr(cat.id) + '"' + checked + '>' +
+                    '<span class="cc-icon">' + iconGlyph + '</span>' +
+                    '<span class="cc-name">' + escapeHtml(cat.name) + '</span>' +
+                    '</label>';
+            }
+            container.innerHTML = html;
+        }
+
+        function _getBrowseSelectedCustomCategories(containerId) {
+            const container = document.getElementById(containerId);
+            if (!container) return [];
+            return Array.from(container.querySelectorAll('input[type=checkbox]:checked')).map(cb => cb.value);
+        }
 
         async function openMonitorModal(event, sourceId, seriesId, seriesName, icon, sourceName, allSources) {
             event.stopPropagation();
@@ -2409,6 +2508,7 @@
                 }
                 if (confirmBtn) confirmBtn.innerHTML = '✏️ Update Monitoring';
                 _buildMonitorSourceList(sourceId, seriesId, sourceName, allSources, existingEntry.monitor_sources || []);
+                _buildBrowseCustomCatSection('monitor-custom-cats', 'series', existingEntry.custom_category_ids || []);
             } else {
                 selectMonitorScope('new_only');
                 document.getElementById('monitor-season-group').style.display = 'none';
@@ -2418,6 +2518,7 @@
                 _fetchAndFillCanonicalName(sourceId, seriesId, allSources);
                 if (confirmBtn) confirmBtn.innerHTML = '📡 Start Monitoring';
                 _buildMonitorSourceList(sourceId, seriesId, sourceName, allSources, null);
+                _buildBrowseCustomCatSection('monitor-custom-cats', 'series', []);
             }
 
             // Load season list for season scope
@@ -2638,6 +2739,7 @@
                             action: d.action || 'both',
                             canonical_name: document.getElementById('monitor-canonical-name').value.trim() || null,
                             monitor_sources: monitorSources,
+                            custom_category_ids: _getBrowseSelectedCustomCategories('monitor-custom-cats'),
                         })
                     });
                     data = await resp.json();
@@ -2661,6 +2763,7 @@
                             source_name: sourceName,
                             source_category: sourceCategory,
                             monitor_sources: monitorSources,
+                            custom_category_ids: _getBrowseSelectedCustomCategories('monitor-custom-cats'),
                             cover: d.icon,
                             scope: scope,
                             season_filter: seasonFilter,
@@ -2696,5 +2799,121 @@
             ★ XtreamFilter on GitHub
         </a>
     </footer>
+<script>
+// Global action button spinner interceptor
+(function() {
+    let activeActionElement = null;
+
+    document.addEventListener('click', function(e) {
+        const target = e.target.closest('button, .btn, .icon-btn, .action-btn, .add-cart-btn, .add-monitor-btn, .play-btn, .episode-play-btn, [class*="-btn"]');
+        if (target) {
+            if (target.tagName === 'BUTTON' || target.classList.contains('btn') || target.className.includes('-btn') || target.hasAttribute('onclick')) {
+                activeActionElement = target;
+                setTimeout(() => {
+                    if (activeActionElement === target) {
+                        activeActionElement = null;
+                    }
+                }, 100);
+            }
+        }
+    }, true);
+
+    const originalFetch = window.fetch;
+    window.fetch = async function(...args) {
+        let url = '';
+        if (typeof args[0] === 'string') {
+            url = args[0];
+        } else if (args[0] && args[0].url) {
+            url = args[0].url;
+        }
+
+        // Methods that are actions
+        const isPostOrDelete = (args[1] && (args[1].method === 'POST' || args[1].method === 'DELETE'));
+
+        // Identify common background polling endpoints or frequent passive gets
+        const isBackgroundPoll = url.match(/\/api\/(cart|cart\/status|version|cache\/status|monitor|monitor\/movies|categories\/summary|player\/epg\/.*)$/) && !isPostOrDelete;
+
+        const el = activeActionElement;
+        
+        // Skip spinners for these
+        if (isBackgroundPoll || !el || el.dataset.fetching) {
+            return originalFetch.apply(this, args);
+        }
+
+        // Consume to avoid dual triggers on concurrent requests
+        activeActionElement = null; 
+        el.dataset.fetching = 'true';
+        
+        const originalHtml = el.innerHTML;
+        const originalPointerEvents = el.style.pointerEvents;
+        const originalPosition = el.style.position || '';
+        const originalWidth = el.style.width || '';
+        const originalHeight = el.style.height || '';
+        
+        // Freeze dimensions explicitly so it doesn't jump
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0) {
+            el.style.width = rect.width + 'px';
+            if (rect.height > 0) {
+                el.style.height = rect.height + 'px';
+            }
+        }
+        el.style.pointerEvents = 'none';
+        
+        if (!document.getElementById('xtream-global-spinner-style')) {
+            const style = document.createElement('style');
+            style.id = 'xtream-global-spinner-style';
+            style.textContent = `
+                @keyframes xtream-spin { to { transform: rotate(360deg); } }
+                .xtream-spinner { 
+                    display: inline-block; 
+                    width: 1.2em; 
+                    height: 1.2em; 
+                    border: 2px solid currentColor; 
+                    border-bottom-color: transparent; 
+                    border-radius: 50%; 
+                    animation: xtream-spin 0.6s linear infinite; 
+                    box-sizing: border-box; 
+                }
+                .btn-spinner-overlay {
+                    position: absolute;
+                    top: 0; left: 0; right: 0; bottom: 0;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    
+                    border-radius: inherit;
+                }
+            `;
+            document.head.appendChild(style);
+        }
+
+        const computedStyle = window.getComputedStyle(el);
+        if (computedStyle.position === 'static') {
+            el.style.position = 'relative';
+        }
+        
+        el.innerHTML = `
+            <div style="visibility: hidden; display: contents;">${originalHtml}</div>
+            <div class="btn-spinner-overlay"><div class="xtream-spinner"></div></div>
+        `;
+
+        try {
+            return await originalFetch.apply(this, args);
+        } finally {
+            el.innerHTML = originalHtml;
+            el.style.pointerEvents = originalPointerEvents;
+            el.style.position = originalPosition;
+            if (rect.width > 0) {
+                el.style.width = originalWidth;
+                if (rect.height > 0) {
+                    el.style.height = originalHeight;
+                }
+            }
+            delete el.dataset.fetching;
+        }
+    };
+})();
+</script>
 </body>
 </html>

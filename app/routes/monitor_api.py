@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 from datetime import datetime
@@ -49,6 +50,9 @@ async def add_monitored(
     source_category = data.get("source_category") or None
     # New: list of {source_id, series_ref, source_name, category} for multi-source monitoring
     monitor_sources: list[dict] = data.get("monitor_sources") or []
+    # Optional list of custom category IDs to restrict monitoring scope
+    raw_ccids = data.get("custom_category_ids") or []
+    custom_category_ids: list[str] = [str(c) for c in raw_ccids if c] if isinstance(raw_ccids, list) else []
     cover = data.get("cover", "")
     tmdb_id = _normalize_tmdb_id(data.get("tmdb_id") or data.get("tmdb"))
     imdb_id = _normalize_imdb_id(data.get("imdb_id") or data.get("imdb"))
@@ -180,6 +184,7 @@ async def add_monitored(
         "source_name": source_name,
         "source_category": source_category,
         "monitor_sources": validated_sources,
+        "custom_category_ids": custom_category_ids,
         "cover": cover,
         "tmdb_id": tmdb_id,
         "imdb_id": imdb_id,
@@ -253,6 +258,9 @@ async def update_monitored(monitor_id: str, request: Request, monitor: MonitorSe
                     entry["source_id"] = None
                     entry["source_name"] = None
                     entry["source_category"] = None
+            if "custom_category_ids" in data:
+                raw = data["custom_category_ids"]
+                entry["custom_category_ids"] = [str(c) for c in raw if c] if isinstance(raw, list) else []
             monitor.save_monitored()
             return {"status": "ok", "entry": entry}
     return JSONResponse(status_code=404, content={"error": "Monitored entry not found"})
@@ -378,6 +386,36 @@ async def movie_lookup(
     return {"results": deduped[:20]}
 
 
+@router.get("/api/monitor/custom-categories")
+async def get_monitor_custom_categories(
+    config_svc: ConfigService = Depends(get_config_service),
+):
+    """Return user-defined custom categories for use as monitoring channels."""
+    conn = db_connect(os.path.join(config_svc.data_dir, DB_NAME))
+    try:
+        rows = conn.execute(
+            "SELECT id, name, icon, content_types FROM custom_categories ORDER BY sort_order, name"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    categories = []
+    for row in rows:
+        ct_raw = row["content_types"]
+        try:
+            content_types = json.loads(ct_raw) if ct_raw else []
+        except Exception:
+            content_types = []
+        categories.append({
+            "id": row["id"],
+            "name": row["name"],
+            "icon": row["icon"] or "📁",
+            "content_types": content_types,
+        })
+
+    return {"categories": categories}
+
+
 @router.get("/api/monitor/vod-categories")
 async def get_vod_categories(
     config_svc: ConfigService = Depends(get_config_service),
@@ -441,6 +479,10 @@ async def add_monitored_movie(
     if action not in ("notify", "download", "both"):
         return JSONResponse(status_code=400, content={"error": "Invalid action (must be notify, download or both)"})
 
+    # Optional list of custom category IDs to restrict monitoring scope
+    raw_mccids = data.get("custom_category_ids") or []
+    movie_custom_category_ids: list[str] = [str(c) for c in raw_mccids if c] if isinstance(raw_mccids, list) else []
+
     # Validate sources
     validated_sources: list[dict] = []
     for ms in monitor_sources_raw:
@@ -474,6 +516,7 @@ async def add_monitored_movie(
         "enabled": True,
         "status": "watching",
         "monitor_sources": validated_sources,
+        "custom_category_ids": movie_custom_category_ids,
         "created_at": datetime.now().isoformat(),
         "last_checked": None,
     }
@@ -521,6 +564,9 @@ async def update_monitored_movie(
                         "category_filter": cf,
                     })
             entry["monitor_sources"] = validated
+        if "custom_category_ids" in data:
+            raw = data["custom_category_ids"]
+            entry["custom_category_ids"] = [str(c) for c in raw if c] if isinstance(raw, list) else []
         monitor.save_monitored_movies()
         return {"status": "ok", "entry": entry}
     return JSONResponse(status_code=404, content={"error": "Movie monitor entry not found"})

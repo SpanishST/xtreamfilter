@@ -1,10 +1,29 @@
 """Filter service — pure matching functions for include/exclude rules."""
 from __future__ import annotations
 
+import functools
 import re
 import unicodedata
 
 from rapidfuzz import fuzz
+
+
+@functools.lru_cache(maxsize=4096)
+def _strip_accents(text: str) -> str:
+    """Remove diacritical marks (accents) from *text* (cached)."""
+    return "".join(
+        c for c in unicodedata.normalize("NFD", text)
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+# Small cache for compiled regex patterns
+@functools.lru_cache(maxsize=256)
+def _compile_regex(pattern: str, flags: int) -> re.Pattern | None:
+    try:
+        return re.compile(pattern, flags)
+    except re.error:
+        return None
 
 
 def matches_filter(value: str, filter_rule: dict) -> bool:
@@ -23,6 +42,18 @@ def matches_filter(value: str, filter_rule: dict) -> bool:
     test_value = value if case_sensitive else value.lower()
     test_pattern = pattern if case_sensitive else pattern.lower()
 
+    # Accent-insensitive comparison: strip diacritics so that e.g.
+    # "TÉLÉ RÉALITÉ" matches a filter value "tele realite".
+    if not case_sensitive:
+        test_value = _strip_accents(test_value)
+        test_pattern = _strip_accents(test_pattern)
+
+    # Normalize multiple whitespace characters to a single space
+    # so that e.g. "TELE  REALITE" (two spaces) matches "tele realite"
+    if match_type in ("exact", "starts_with", "ends_with", "contains", "not_contains"):
+        test_value = re.sub(r'\s+', ' ', test_value).strip()
+        test_pattern = re.sub(r'\s+', ' ', test_pattern).strip()
+
     if match_type == "exact":
         return test_value == test_pattern
     elif match_type == "starts_with":
@@ -36,7 +67,10 @@ def matches_filter(value: str, filter_rule: dict) -> bool:
     elif match_type == "regex":
         try:
             flags = 0 if case_sensitive else re.IGNORECASE
-            return bool(re.search(pattern, value, flags))
+            compiled = _compile_regex(pattern, flags)
+            if compiled is None:
+                return False
+            return bool(compiled.search(value))
         except re.error:
             return False
 

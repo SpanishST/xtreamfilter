@@ -1845,14 +1845,24 @@
             }
         }
 
-        function openCategoryModal(categoryId = null) {
+        async function openCategoryModal(categoryId = null) {
             const modal = document.getElementById('category-modal');
             const title = document.getElementById('category-modal-title');
             document.getElementById('category-edit-id').value = categoryId || '';
             title.textContent = categoryId ? 'Edit Category' : 'Create Category';
 
             if (categoryId) {
-                const cat = categories.find(c => c.id === categoryId);
+                let cat = null;
+                try {
+                    const resp = await fetch('/api/categories/' + categoryId);
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        cat = data.category || null;
+                    }
+                } catch (e) {
+                    console.error('Failed to load category for editing', e);
+                }
+                if (!cat) cat = categories.find(c => c.id === categoryId);
                 if (cat) {
                     document.getElementById('category-name').value = cat.name;
                     document.querySelectorAll('.icon-option').forEach(o => {
@@ -1991,7 +2001,7 @@
             const container = document.getElementById('categories-manage-list');
             container.innerHTML = categories.map(cat => {
                 const icon = iconMap[cat.icon] || cat.icon || '📁';
-                const count = cat.mode === 'automatic' ? (cat.cached_items || []).length : (cat.items || []).length;
+                const count = cat.item_count != null ? cat.item_count : (cat.mode === 'automatic' ? (cat.cached_items || []).length : (cat.items || []).length);
                 return '<div class="category-manage-item"><div class="category-manage-info"><span class="icon">' + icon + '</span><div><div class="name">' + escapeHtml(cat.name) + '</div><div class="meta">' + cat.mode + ' - ' + count + ' items</div></div></div><div class="category-manage-actions"><button class="btn btn-small btn-secondary" onclick="closeManageCategoriesModal(); openCategoryModal(\'' + cat.id + '\')">Edit</button><button class="btn btn-small btn-danger" onclick="deleteCategory(\'' + cat.id + '\')">Delete</button></div></div>';
             }).join('') || '<p style="color:#888">No categories yet</p>';
             document.getElementById('manage-modal').classList.add('show');
@@ -2700,8 +2710,9 @@
             const checkedSrcs = Array.from(
                 document.querySelectorAll('#monitor-source-options .monitor-src-specific:checked')
             );
-            if (checkedSrcs.length === 0 && document.querySelector('#monitor-source-options .monitor-src-specific')) {
-                showToast('Please select at least one source', 'error');
+            const customCatIds = _getBrowseSelectedCustomCategories('monitor-custom-cats');
+            if (checkedSrcs.length === 0 && customCatIds.length === 0 && document.querySelector('#monitor-source-options .monitor-src-specific')) {
+                showToast('Please select at least one source or custom category', 'error');
                 return;
             }
 
@@ -2739,7 +2750,7 @@
                             action: d.action || 'both',
                             canonical_name: document.getElementById('monitor-canonical-name').value.trim() || null,
                             monitor_sources: monitorSources,
-                            custom_category_ids: _getBrowseSelectedCustomCategories('monitor-custom-cats'),
+                            custom_category_ids: customCatIds,
                         })
                     });
                     data = await resp.json();
@@ -2763,7 +2774,7 @@
                             source_name: sourceName,
                             source_category: sourceCategory,
                             monitor_sources: monitorSources,
-                            custom_category_ids: _getBrowseSelectedCustomCategories('monitor-custom-cats'),
+                            custom_category_ids: customCatIds,
                             cover: d.icon,
                             scope: scope,
                             season_filter: seasonFilter,

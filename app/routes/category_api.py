@@ -78,6 +78,14 @@ async def create_category(request: Request, cat_svc: CategoryService = Depends(g
     return {"status": "created", "category": new_category}
 
 
+@router.get("/{category_id}")
+async def get_category(category_id: str, cat_svc: CategoryService = Depends(get_category_service)):
+    cat = cat_svc.get_category_by_id(category_id)
+    if cat is None:
+        return JSONResponse({"error": "Category not found"}, status_code=404)
+    return {"category": cat}
+
+
 @router.put("/{category_id}")
 async def update_category(category_id: str, request: Request, cat_svc: CategoryService = Depends(get_category_service)):
     try:

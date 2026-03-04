@@ -700,7 +700,7 @@ class CartService:
         ext = ext_override or item.get("container_extension", "mp4")
         name = sanitize_filename(item.get("name", "untitled"))
         if item.get("content_type") == "vod":
-            return os.path.join(base_path, "Films", name, f"{name}.{ext}")
+            return os.path.join(base_path, self.config_service.get_movie_subfolder(), name, f"{name}.{ext}")
         elif item.get("content_type") == "series":
             series_name = sanitize_filename(item.get("series_name", name))
             season = item.get("season", "1")
@@ -713,7 +713,7 @@ class CartService:
                 filename = f"{series_name} {season_str}{episode_str} - {ep_title_clean}.{ext}"
             else:
                 filename = f"{series_name} {season_str}{episode_str}.{ext}"
-            return os.path.join(base_path, "Series", series_name, season_str, filename)
+            return os.path.join(base_path, self.config_service.get_series_subfolder(), series_name, season_str, filename)
         else:
             return os.path.join(base_path, f"{name}.{ext}")
 

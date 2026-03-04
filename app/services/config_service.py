@@ -196,14 +196,24 @@ class ConfigService:
         return self._config.get("options", {}).get(
             "telegram", {"enabled": False, "bot_token": "", "chat_id": ""}
         )
+    
+    def get_series_subfolder(self) -> str:
+        return self._config.get("options", {}).get("series_subfolder", "Series")
+    
+    series_subfolder = property(get_series_subfolder)
+    
+    def get_movie_subfolder(self) -> str:
+        return self._config.get("options", {}).get("movie_subfolder", "Films")
+    
+    movie_subfolder = property(get_movie_subfolder)
 
     def get_download_path(self) -> str:
-        return self._config.get("options", {}).get("download_path", "/data/downloads")
+        return self._config.get("options", {}).get("download_path", "/downloads")
 
     download_path = property(get_download_path)
 
     def get_download_temp_path(self) -> str:
-        return self._config.get("options", {}).get("download_temp_path", "/data/downloads/.tmp")
+        return self._config.get("options", {}).get("download_temp_path", "/downloads/.tmp")
 
     download_temp_path = property(get_download_temp_path)
 

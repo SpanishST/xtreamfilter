@@ -175,7 +175,7 @@ async def get_download_path_api(cfg: ConfigService = Depends(get_config_service)
 @router.post("/api/options/download_path")
 async def set_download_path_api(request: Request, cfg: ConfigService = Depends(get_config_service)):
     data = await request.json()
-    path = data.get("download_path", "/data/downloads").strip()
+    path = data.get("download_path", "/downloads").strip()
     if not path:
         return JSONResponse(status_code=400, content={"error": "Path cannot be empty"})
     try:
@@ -197,7 +197,7 @@ async def get_download_temp_path_api(cfg: ConfigService = Depends(get_config_ser
 @router.post("/api/options/download_temp_path")
 async def set_download_temp_path_api(request: Request, cfg: ConfigService = Depends(get_config_service)):
     data = await request.json()
-    path = data.get("download_temp_path", "/data/downloads/.tmp").strip()
+    path = data.get("download_temp_path", "/downloads/.tmp").strip()
     if not path:
         return JSONResponse(status_code=400, content={"error": "Path cannot be empty"})
     try:
@@ -243,6 +243,42 @@ async def test_path_write(request: Request):
     except Exception:
         msg = "Writable"
     return {"writable": True, "message": msg}
+
+
+@router.get("/api/options/series_subfolder")
+async def get_series_subfolder_api(cfg: ConfigService = Depends(get_config_service)):
+    return {"series_subfolder": cfg.series_subfolder}
+
+
+@router.post("/api/options/series_subfolder")
+async def set_series_subfolder_api(request: Request, cfg: ConfigService = Depends(get_config_service)):
+    data = await request.json()
+    subfolder = data.get("series_subfolder", "Series").strip()
+    if not subfolder:
+        subfolder = ""
+    if "options" not in cfg.config:
+        cfg.config["options"] = {}
+    cfg.config["options"]["series_subfolder"] = subfolder
+    cfg.save()
+    return {"status": "ok", "series_subfolder": subfolder}
+
+
+@router.get("/api/options/movie_subfolder")
+async def get_movie_subfolder_api(cfg: ConfigService = Depends(get_config_service)):
+    return {"movie_subfolder": cfg.movie_subfolder}
+
+
+@router.post("/api/options/movie_subfolder")
+async def set_movie_subfolder_api(request: Request, cfg: ConfigService = Depends(get_config_service)):
+    data = await request.json()
+    subfolder = data.get("movie_subfolder", "Movies").strip()
+    if not subfolder:
+        subfolder = ""
+    if "options" not in cfg.config:
+        cfg.config["options"] = {}
+    cfg.config["options"]["movie_subfolder"] = subfolder
+    cfg.save()
+    return {"status": "ok", "movie_subfolder": subfolder}
 
 
 # ---- Download throttle ----

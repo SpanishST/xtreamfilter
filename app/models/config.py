@@ -101,8 +101,8 @@ class Options(BaseModel):
     refresh_interval: int = 3600
     proxy_streams: bool = True
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
-    download_path: str = "/data/downloads"
-    download_temp_path: str = "/data/downloads/.tmp"
+    download_path: str = "/downloads"
+    download_temp_path: str = "/downloads/.tmp"
     download_bandwidth_limit: int = 0
     download_pause_interval: int = 0
     download_pause_duration: int = 0

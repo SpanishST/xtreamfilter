@@ -154,18 +154,35 @@
                 <div class="setting-group" style="flex:1;">
                     <label>Download Path</label>
                     <div style="display: flex; gap: 8px;">
-                        <input type="text" id="download-path" placeholder="/data/downloads">
-                        <button class="btn btn-primary btn-small" onclick="saveDownloadPath()" style="white-space:nowrap;">Save</button>
+                        <input type="text" id="download-path" placeholder="/downloads">
                         <button class="btn btn-secondary btn-small" onclick="testPath('download-path')" style="white-space:nowrap;">🧪 Test</button>
                     </div>
                 </div>
                 <div class="setting-group" style="flex:1;">
                     <label>Temp Path <span style="font-size:0.8em;color:#888;">(download here first, then move)</span></label>
                     <div style="display: flex; gap: 8px;">
-                        <input type="text" id="download-temp-path" placeholder="/data/downloads/.tmp">
-                        <button class="btn btn-primary btn-small" onclick="saveTempPath()" style="white-space:nowrap;">Save</button>
+                        <input type="text" id="download-temp-path" placeholder="/downloads/.tmp">
                         <button class="btn btn-secondary btn-small" onclick="testPath('download-temp-path')" style="white-space:nowrap;">🧪 Test</button>
                     </div>
+                </div>
+            </div>
+            <div class="settings-row" style="margin-top: 6px;">
+                <div class="setting-group" style="flex:1;">
+                    <label>Series Subfolder</label>
+                    <div style="display: flex; gap: 8px;">
+                        <input type="text" id="series-subfolder">
+                    </div>
+                </div>
+                <div class="setting-group" style="flex:1;">
+                    <label>Movie Subfolder</label>
+                    <div style="display: flex; gap: 8px;">
+                        <input type="text" id="movie-subfolder">
+                    </div>
+                </div>
+            </div>
+            <div class="settings-row" style="margin-top: 6px;">
+                <div class="setting-group">
+                    <button class="btn btn-primary btn-small" onclick="saveDownloadSettings()" style="white-space:nowrap;">Save</button>
                 </div>
             </div>
             <div class="settings-section-title">🛡️ Anti-Ban Throttle</div>
@@ -331,6 +348,7 @@
         document.addEventListener('DOMContentLoaded', function() {
             loadSources();
             loadDownloadPath();
+            loadDefaultSubfolders();
             loadThrottleSettings();
             loadNotifySettings();
             loadSchedule();
@@ -351,13 +369,67 @@
             try {
                 const resp = await fetch('/api/options/download_path');
                 const data = await resp.json();
-                document.getElementById('download-path').value = data.download_path || '/data/downloads';
+                document.getElementById('download-path').value = data.download_path || '/downloads';
             } catch (e) { console.error('Error loading download path:', e); }
             try {
                 const resp = await fetch('/api/options/download_temp_path');
                 const data = await resp.json();
-                document.getElementById('download-temp-path').value = data.download_temp_path || '/data/downloads/.tmp';
+                document.getElementById('download-temp-path').value = data.download_temp_path || '/downloads/.tmp';
             } catch (e) { console.error('Error loading temp path:', e); }
+        }
+
+
+        async function loadDefaultSubfolders() {
+            try {
+                const resp = await fetch('/api/options/series_subfolder');
+                const data = await resp.json();
+                document.getElementById('series-subfolder').value = data.series_subfolder;
+            } catch (e) { console.error('Error loading series subfolder:', e); }
+            try {
+                const resp = await fetch('/api/options/movie_subfolder');
+                const data = await resp.json();
+                document.getElementById('movie-subfolder').value = data.movie_subfolder;
+            } catch (e) { console.error('Error loading movie subfolder:', e); }
+        }
+
+        async function saveSeriesSubfolder() {
+            const subfolder = document.getElementById('series-subfolder').value.trim();
+            try {
+                const resp = await fetch('/api/options/series_subfolder', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ series_subfolder: subfolder })
+                });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    showToast(data.error || 'Failed to save subfolder', 'error');
+                    return await false;
+                }
+            } catch (e) { 
+                showToast('Error saving subfolder', 'error');
+                return await false;
+            }
+            return await true;
+        }
+
+        async function saveMovieSubfolder() {
+            const subfolder = document.getElementById('movie-subfolder').value.trim();
+            try {
+                const resp = await fetch('/api/options/movie_subfolder', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ movie_subfolder: subfolder })
+                });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    showToast(data.error || 'Failed to save subfolder', 'error');
+                    return await false;
+                }
+            } catch (e) {
+                showToast('Error saving subfolder', 'error');
+                return await false;
+            }
+            return await true;
         }
 
         async function saveDownloadPath() {
@@ -370,12 +442,15 @@
                     body: JSON.stringify({ download_path: path })
                 });
                 const data = await resp.json();
-                if (resp.ok) {
-                    showToast('Download path saved', 'success');
-                } else {
+                if (!resp.ok) {
                     showToast(data.error || 'Failed to save path', 'error');
+                    return await false;
                 }
-            } catch (e) { showToast('Error saving path', 'error'); }
+            } catch (e) {
+                showToast('Error saving path', 'error');
+                return await false;
+            }
+            return await true;
         }
 
         async function saveTempPath() {
@@ -388,12 +463,27 @@
                     body: JSON.stringify({ download_temp_path: path })
                 });
                 const data = await resp.json();
-                if (resp.ok) {
-                    showToast('Temp path saved', 'success');
-                } else {
+                if (!resp.ok) {
                     showToast(data.error || 'Failed to save temp path', 'error');
+                    return await false;
                 }
-            } catch (e) { showToast('Error saving temp path', 'error'); }
+            } catch (e) {
+                showToast('Error saving temp path', 'error');
+                return await false;
+            }
+            return await true;
+        }
+
+        async function saveDownloadSettings() {
+            var success = true;
+            success = await saveDownloadPath() && success;
+            success = await saveTempPath() && success;
+            success = await saveSeriesSubfolder() && success;
+            success = await saveMovieSubfolder() && success;
+
+            if (success) {
+                showToast('Download settings saved', 'success');
+            }
         }
 
         async function testPath(inputId) {

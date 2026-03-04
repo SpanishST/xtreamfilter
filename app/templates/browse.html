@@ -2710,8 +2710,9 @@
             const checkedSrcs = Array.from(
                 document.querySelectorAll('#monitor-source-options .monitor-src-specific:checked')
             );
-            if (checkedSrcs.length === 0 && document.querySelector('#monitor-source-options .monitor-src-specific')) {
-                showToast('Please select at least one source', 'error');
+            const customCatIds = _getBrowseSelectedCustomCategories('monitor-custom-cats');
+            if (checkedSrcs.length === 0 && customCatIds.length === 0 && document.querySelector('#monitor-source-options .monitor-src-specific')) {
+                showToast('Please select at least one source or custom category', 'error');
                 return;
             }
 
@@ -2749,7 +2750,7 @@
                             action: d.action || 'both',
                             canonical_name: document.getElementById('monitor-canonical-name').value.trim() || null,
                             monitor_sources: monitorSources,
-                            custom_category_ids: _getBrowseSelectedCustomCategories('monitor-custom-cats'),
+                            custom_category_ids: customCatIds,
                         })
                     });
                     data = await resp.json();
@@ -2773,7 +2774,7 @@
                             source_name: sourceName,
                             source_category: sourceCategory,
                             monitor_sources: monitorSources,
-                            custom_category_ids: _getBrowseSelectedCustomCategories('monitor-custom-cats'),
+                            custom_category_ids: customCatIds,
                             cover: d.icon,
                             scope: scope,
                             season_filter: seasonFilter,

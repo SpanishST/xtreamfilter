@@ -330,6 +330,12 @@
                         </div>
                     </details>
                 </div>
+                <div class="form-group" id="edit-backfill-group">
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                        <input type="checkbox" id="edit-backfill-check" style="width:16px;height:16px;accent-color:#00d4ff;cursor:pointer;">
+                        <span>Download all known episodes now</span>
+                    </label>
+                </div>
                 <div class="form-group">
                     <label>Monitoring title <span style="color:#888;font-weight:normal;font-size:0.8em">(editable — also used as download folder name)</span></label>
                     <input type="text" id="edit-canonical-name" style="width:100%;padding:8px 10px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#fff;font-size:0.9em;box-sizing:border-box;" placeholder="Series title">
@@ -703,6 +709,12 @@
             // Pre-fill canonical name (falls back to raw series name so field is never blank)
             document.getElementById('edit-canonical-name').value = entry.canonical_name || entry.series_name || '';
 
+            // Backfill checkbox — only meaningful when action involves download
+            const action = entry.action || 'both';
+            const editBackfillGroup = document.getElementById('edit-backfill-group');
+            editBackfillGroup.style.display = (action === 'notify') ? 'none' : 'block';
+            document.getElementById('edit-backfill-check').checked = false;
+
             document.getElementById('edit-modal').classList.add('show');
         }
 
@@ -722,6 +734,8 @@
             document.querySelectorAll('#edit-modal .scope-option[data-action]').forEach(o => {
                 o.classList.toggle('selected', o.dataset.action === action);
             });
+            const editBackfillGroup = document.getElementById('edit-backfill-group');
+            if (editBackfillGroup) editBackfillGroup.style.display = (action === 'notify') ? 'none' : 'block';
         }
 
         function _buildEditSourceList(entry) {
@@ -826,6 +840,7 @@
                         monitor_sources: monitorSources,
                         canonical_name: document.getElementById('edit-canonical-name').value.trim() || null,
                         custom_category_ids: _getSelectedCustomCategories('edit-series-custom-cats'),
+                        backfill: document.getElementById('edit-backfill-check').checked ? 'all' : 'none',
                     })
                 });
                 if (resp.ok) {

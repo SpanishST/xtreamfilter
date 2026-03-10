@@ -323,7 +323,7 @@
                 </div>
                 <div class="control-group">
                     <label>Source</label>
-                    <select id="source-filter"><option value="">All Sources</option></select>
+                    <select id="source-filter" onchange="loadGroups()"><option value="">All Sources</option></select>
                 </div>
                 <div class="control-group">
                     <label>Group</label>
@@ -1292,6 +1292,7 @@
         document.addEventListener('DOMContentLoaded', function() {
             loadSources();
             loadCategories();
+            loadGroups();
             // Show initial state without auto-loading results
             document.getElementById('loading-state').style.display = 'none';
             renderBrowseNav();
@@ -1397,13 +1398,30 @@
             const sortFilterRow = document.getElementById('sort-filter-row');
             sortFilterRow.style.display = (type === 'vod' || type === 'series') ? 'flex' : 'none';
             currentPage = 1;
+            loadGroups();
             // Don't auto-search - user will click Search button
         }
 
         async function loadGroups() {
-            // Groups are loaded from browse API response instead
-            // This function is kept for compatibility but does nothing
-            // Groups will be populated by applyFilters
+            const sourceId = document.getElementById('source-filter').value;
+            let url = '/api/browse/groups?type=' + contentType;
+            if (sourceId) url += '&source=' + encodeURIComponent(sourceId);
+            try {
+                const resp = await fetch(url);
+                const data = await resp.json();
+                const groupFilter = document.getElementById('group-filter');
+                const currentValue = groupFilter.value;
+                groupFilter.innerHTML = '<option value="">All Groups</option>';
+                (data.groups || []).forEach(g => {
+                    const option = document.createElement('option');
+                    option.value = g.name;
+                    option.textContent = g.name + ' (' + g.count + ')';
+                    groupFilter.appendChild(option);
+                });
+                if ((data.groups || []).some(g => g.name === currentValue)) groupFilter.value = currentValue;
+            } catch (e) {
+                console.error('Failed to load groups', e);
+            }
         }
 
         function debounceSearch() {

@@ -541,6 +541,10 @@
                     <label>Source:</label>
                     <select id="episode-source-select" onchange="onEpisodeSourceChange()"></select>
                 </div>
+                <div class="form-group" style="margin-bottom:10px;">
+                    <label style="font-size:0.82em;color:#aaa;margin-bottom:4px;display:block;">Download folder name</label>
+                    <input type="text" id="episode-series-name" style="width:100%;padding:6px 10px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#fff;font-size:0.9em;box-sizing:border-box;" placeholder="Series title">
+                </div>
                 <div class="episode-actions">
                     <button class="btn btn-primary btn-small" onclick="addAllEpisodesToCart()">Add All Episodes</button>
                     <button class="btn btn-secondary btn-small" onclick="addSelectedEpisodesToCart()">Add Selected</button>
@@ -2228,6 +2232,7 @@
             modal.classList.add('show');
 
             _episodeModalData = { sourceId, seriesId, seriesName, icon, group, allSources: allSources || null };
+            document.getElementById('episode-series-name').value = seriesName;
 
             // Show/build source selector if multiple sources available
             const selectorDiv = document.getElementById('episode-source-selector');
@@ -2319,6 +2324,7 @@
 
         async function addAllEpisodesToCart() {
             const d = _episodeModalData;
+            const folderName = document.getElementById('episode-series-name').value.trim() || d.seriesName;
             try {
                 const resp = await fetch('/api/cart', {
                     method: 'POST',
@@ -2328,8 +2334,8 @@
                         series_id: d.seriesId,
                         content_type: 'series',
                         add_mode: 'series',
-                        name: d.seriesName,
-                        series_name: d.seriesName,
+                        name: folderName,
+                        series_name: folderName,
                         icon: d.icon,
                         group: d.group
                     })
@@ -2347,6 +2353,7 @@
 
         async function addSeasonToCart(seasonNum) {
             const d = _episodeModalData;
+            const folderName = document.getElementById('episode-series-name').value.trim() || d.seriesName;
             try {
                 const resp = await fetch('/api/cart', {
                     method: 'POST',
@@ -2357,8 +2364,8 @@
                         content_type: 'series',
                         add_mode: 'season',
                         season_num: seasonNum,
-                        name: d.seriesName,
-                        series_name: d.seriesName,
+                        name: folderName,
+                        series_name: folderName,
                         icon: d.icon,
                         group: d.group
                     })
@@ -2375,6 +2382,7 @@
 
         async function addSelectedEpisodesToCart() {
             const d = _episodeModalData;
+            const folderName = document.getElementById('episode-series-name').value.trim() || d.seriesName;
             const checked = document.querySelectorAll('#episode-list input[type="checkbox"]:checked');
             if (checked.length === 0) { showToast('No episodes selected', 'info'); return; }
 
@@ -2391,7 +2399,7 @@
                             add_mode: 'episode',
                             series_id: d.seriesId,
                             name: cb.dataset.title || 'Episode ' + cb.dataset.epNum,
-                            series_name: d.seriesName,
+                            series_name: folderName,
                             season: cb.dataset.season,
                             episode_num: parseInt(cb.dataset.epNum),
                             episode_title: cb.dataset.title,

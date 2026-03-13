@@ -109,6 +109,12 @@
         .edit-form .scope-option.selected .scope-desc { color: rgba(0,212,255,0.7); }
         .edit-form input[type=number] { width: 100%; padding: 8px 12px; background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; color: #e0e0e0; font-size: 0.95em; outline: none; }
         .edit-form input[type=number]:focus { border-color: #00d4ff; }
+        .edit-form select, .header-actions select { color-scheme: dark; }
+        .edit-form select option, .edit-form select optgroup,
+        .header-actions select option, .header-actions select optgroup {
+            background: #1a1a2e;
+            color: #fff;
+        }
 
         /* Source checkboxes in edit modal */
         .edit-form .source-list { display: flex; flex-direction: column; gap: 4px; max-height: 280px; overflow-y: auto; }

@@ -1094,6 +1094,7 @@ class MonitorService:
         self,
         movie_name: str,
         tmdb_id: str | None = None,
+        imdb_id: str | None = None,
         source_ids: list[str] | None = None,
         category_filters: dict[str, list[str]] | None = None,
         limit: int = 0,
@@ -1103,6 +1104,7 @@ class MonitorService:
         Args:
             movie_name: Title to fuzzy-match against (used when IDs are absent).
             tmdb_id: TMDB ID for exact matching (higher priority).
+            imdb_id: IMDB ID for exact matching (e.g. tt1234567).
             source_ids: Restrict search to these source IDs (None = all enabled sources).
             category_filters: Optional per-source category_id list filter
                 ({source_id: [category_id, ...]}). Empty list or missing key = no filter.
@@ -1121,8 +1123,9 @@ class MonitorService:
             return []
 
         target_tmdb_id = _normalize_tmdb_id(tmdb_id)
+        target_imdb_id = _normalize_imdb_id(imdb_id)
         target_normalized = normalize_name(movie_name)
-        if not target_tmdb_id and not target_normalized:
+        if not target_tmdb_id and not target_imdb_id and not target_normalized:
             return []
 
         conn = db_connect(self.db_path)
@@ -1152,10 +1155,14 @@ class MonitorService:
                 data = {}
 
             s_tmdb_id = _normalize_tmdb_id(data.get("tmdb_id") or data.get("tmdb"))
+            s_imdb_id = _normalize_imdb_id(data.get("imdb_id") or data.get("imdb"))
             s_name = row["name"] or data.get("name", "")
             s_normalized = normalize_name(s_name)
 
-            matched_by_id = bool(target_tmdb_id and s_tmdb_id and s_tmdb_id == target_tmdb_id)
+            matched_by_id = bool(
+                (target_tmdb_id and s_tmdb_id and s_tmdb_id == target_tmdb_id)
+                or (target_imdb_id and s_imdb_id and s_imdb_id == target_imdb_id)
+            )
 
             cover = (
                 data.get("stream_icon") or data.get("movie_image")

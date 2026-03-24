@@ -50,6 +50,43 @@ async def groups(
     return {"groups": groups_list}
 
 
+@router.get("/api/browse/groups")
+async def api_browse_groups(
+    type: str = Query("live"),
+    source: str = Query(""),
+    cache: CacheService = Depends(get_cache_service),
+):
+    """Return the list of groups with item counts for the given content type and optional source.
+
+    This is a lightweight endpoint used to populate the group filter dropdown on page load,
+    before the user performs any search.
+    """
+    TYPE_MAP = {
+        "live": ("live_streams", "live_categories"),
+        "vod": ("vod_streams", "vod_categories"),
+        "series": ("series", "series_categories"),
+    }
+    if type not in TYPE_MAP:
+        return {"groups": []}
+
+    streams_key, cats_key = TYPE_MAP[type]
+    categories = cache.get_categories_raw(cats_key)
+    cat_map = build_category_map(categories)
+    streams, _ = cache.get_cached_with_source_info(streams_key, cats_key)
+
+    group_counts: dict[str, int] = {}
+    for s in streams:
+        src_id = s.get("_source_id", "")
+        if source and src_id != source:
+            continue
+        cat_id_str = str(s.get("category_id", ""))
+        grp = cat_map.get(cat_id_str, "Unknown")
+        group_counts[grp] = group_counts.get(grp, 0) + 1
+
+    groups_list = [{"name": g, "count": c} for g, c in sorted(group_counts.items())]
+    return {"groups": groups_list}
+
+
 @router.get("/channels")
 async def channels(
     type: str = Query("live"),

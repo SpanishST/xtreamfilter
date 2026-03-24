@@ -262,7 +262,18 @@ async def update_monitored(monitor_id: str, request: Request, monitor: MonitorSe
                 raw = data["custom_category_ids"]
                 entry["custom_category_ids"] = [str(c) for c in raw if c] if isinstance(raw, list) else []
             monitor.save_monitored()
-            return {"status": "ok", "entry": entry}
+
+            # Trigger backfill if requested (only makes sense when action involves download)
+            backfill = data.get("backfill", "none")
+            backfill_queued = 0
+            if backfill not in ("none", None) and entry.get("action", "both") != "notify":
+                backfill_queued = await monitor.backfill_episodes(
+                    entry,
+                    backfill=backfill,
+                    backfill_season=str(data.get("backfill_season")) if data.get("backfill_season") else None,
+                )
+
+            return {"status": "ok", "entry": entry, "backfill_queued": backfill_queued}
     return JSONResponse(status_code=404, content={"error": "Monitored entry not found"})
 
 

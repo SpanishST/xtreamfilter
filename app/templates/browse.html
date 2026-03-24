@@ -42,6 +42,16 @@
         .control-group label { font-size: 0.8em; color: #888; text-transform: uppercase; }
         .control-group input, .control-group select { padding: 10px 14px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; background: rgba(0, 0, 0, 0.3); color: #fff; font-size: 0.95em; min-width: 150px; }
         .control-group input:focus, .control-group select:focus { outline: none; border-color: #00d4ff; }
+        .control-group select, .form-group select, .pattern-row select, .monitor-form select, .episode-source-selector select, .player-audio-select select { color-scheme: dark; }
+        .control-group select option, .control-group select optgroup,
+        .form-group select option, .form-group select optgroup,
+        .pattern-row select option, .pattern-row select optgroup,
+        .monitor-form select option, .monitor-form select optgroup,
+        .episode-source-selector select option, .episode-source-selector select optgroup,
+        .player-audio-select select option, .player-audio-select select optgroup {
+            background: #1a1a2e;
+            color: #fff;
+        }
         .search-input { flex: 1; min-width: 250px; }
         .type-pills { display: flex; gap: 8px; }
         .type-pill { padding: 8px 16px; border-radius: 20px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #888; cursor: pointer; transition: all 0.2s; font-size: 0.85em; }
@@ -323,7 +333,7 @@
                 </div>
                 <div class="control-group">
                     <label>Source</label>
-                    <select id="source-filter"><option value="">All Sources</option></select>
+                    <select id="source-filter" onchange="loadGroups()"><option value="">All Sources</option></select>
                 </div>
                 <div class="control-group">
                     <label>Group</label>
@@ -540,6 +550,10 @@
                 <div class="episode-source-selector" id="episode-source-selector" style="display:none">
                     <label>Source:</label>
                     <select id="episode-source-select" onchange="onEpisodeSourceChange()"></select>
+                </div>
+                <div class="form-group" style="margin-bottom:10px;">
+                    <label style="font-size:0.82em;color:#aaa;margin-bottom:4px;display:block;">Download folder name</label>
+                    <input type="text" id="episode-series-name" style="width:100%;padding:6px 10px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#fff;font-size:0.9em;box-sizing:border-box;" placeholder="Series title">
                 </div>
                 <div class="episode-actions">
                     <button class="btn btn-primary btn-small" onclick="addAllEpisodesToCart()">Add All Episodes</button>
@@ -1292,11 +1306,24 @@
         document.addEventListener('DOMContentLoaded', function() {
             loadSources();
             loadCategories();
+            loadGroups();
             // Show initial state without auto-loading results
             document.getElementById('loading-state').style.display = 'none';
             renderBrowseNav();
             document.getElementById('empty-state').innerHTML = '<p>Use the filters above and click <strong>Search</strong> to find content.</p>';
             document.getElementById('empty-state').style.display = 'block';
+            // Pre-fill search from URL params (e.g. ?search=Title&type=series)
+            const _urlParams = new URLSearchParams(window.location.search);
+            const _preSearch = _urlParams.get('search');
+            const _preType  = _urlParams.get('type');
+            if (_preSearch || _preType) {
+                if (_preType && ['live', 'vod', 'series'].includes(_preType)) setContentType(_preType);
+                if (_preSearch) {
+                    document.getElementById('search-input').value = _preSearch;
+                    // Defer until sources/groups are loaded
+                    setTimeout(() => applyFilters(), 400);
+                }
+            }
             document.querySelectorAll('.icon-option').forEach(opt => {
                 opt.addEventListener('click', function() {
                     document.querySelectorAll('.icon-option').forEach(o => o.classList.remove('selected'));
@@ -1397,13 +1424,30 @@
             const sortFilterRow = document.getElementById('sort-filter-row');
             sortFilterRow.style.display = (type === 'vod' || type === 'series') ? 'flex' : 'none';
             currentPage = 1;
+            loadGroups();
             // Don't auto-search - user will click Search button
         }
 
         async function loadGroups() {
-            // Groups are loaded from browse API response instead
-            // This function is kept for compatibility but does nothing
-            // Groups will be populated by applyFilters
+            const sourceId = document.getElementById('source-filter').value;
+            let url = '/api/browse/groups?type=' + contentType;
+            if (sourceId) url += '&source=' + encodeURIComponent(sourceId);
+            try {
+                const resp = await fetch(url);
+                const data = await resp.json();
+                const groupFilter = document.getElementById('group-filter');
+                const currentValue = groupFilter.value;
+                groupFilter.innerHTML = '<option value="">All Groups</option>';
+                (data.groups || []).forEach(g => {
+                    const option = document.createElement('option');
+                    option.value = g.name;
+                    option.textContent = g.name + ' (' + g.count + ')';
+                    groupFilter.appendChild(option);
+                });
+                if ((data.groups || []).some(g => g.name === currentValue)) groupFilter.value = currentValue;
+            } catch (e) {
+                console.error('Failed to load groups', e);
+            }
         }
 
         function debounceSearch() {
@@ -1833,7 +1877,7 @@
             if (dropdown && dropdown.classList.contains('show')) {
                 const itemCats = categories.filter(cat => {
                     const items = cat.mode === 'manual' ? cat.items : cat.cached_items;
-                    return (items || []).some(i => i.source_id === sourceId && i.item_id === String(itemId) && i.content_type === cType);
+                    return (items || []).some(i => i.source_id === sourceId && String(i.id) === String(itemId) && i.content_type === cType);
                 });
                 dropdown.innerHTML = categories.filter(c => c.mode === 'manual').map(cat => {
                     const isIn = itemCats.some(ic => ic.id === cat.id);
@@ -2210,6 +2254,7 @@
             modal.classList.add('show');
 
             _episodeModalData = { sourceId, seriesId, seriesName, icon, group, allSources: allSources || null };
+            document.getElementById('episode-series-name').value = seriesName;
 
             // Show/build source selector if multiple sources available
             const selectorDiv = document.getElementById('episode-source-selector');
@@ -2301,6 +2346,7 @@
 
         async function addAllEpisodesToCart() {
             const d = _episodeModalData;
+            const folderName = document.getElementById('episode-series-name').value.trim() || d.seriesName;
             try {
                 const resp = await fetch('/api/cart', {
                     method: 'POST',
@@ -2310,8 +2356,8 @@
                         series_id: d.seriesId,
                         content_type: 'series',
                         add_mode: 'series',
-                        name: d.seriesName,
-                        series_name: d.seriesName,
+                        name: folderName,
+                        series_name: folderName,
                         icon: d.icon,
                         group: d.group
                     })
@@ -2329,6 +2375,7 @@
 
         async function addSeasonToCart(seasonNum) {
             const d = _episodeModalData;
+            const folderName = document.getElementById('episode-series-name').value.trim() || d.seriesName;
             try {
                 const resp = await fetch('/api/cart', {
                     method: 'POST',
@@ -2339,8 +2386,8 @@
                         content_type: 'series',
                         add_mode: 'season',
                         season_num: seasonNum,
-                        name: d.seriesName,
-                        series_name: d.seriesName,
+                        name: folderName,
+                        series_name: folderName,
                         icon: d.icon,
                         group: d.group
                     })
@@ -2357,6 +2404,7 @@
 
         async function addSelectedEpisodesToCart() {
             const d = _episodeModalData;
+            const folderName = document.getElementById('episode-series-name').value.trim() || d.seriesName;
             const checked = document.querySelectorAll('#episode-list input[type="checkbox"]:checked');
             if (checked.length === 0) { showToast('No episodes selected', 'info'); return; }
 
@@ -2373,7 +2421,7 @@
                             add_mode: 'episode',
                             series_id: d.seriesId,
                             name: cb.dataset.title || 'Episode ' + cb.dataset.epNum,
-                            series_name: d.seriesName,
+                            series_name: folderName,
                             season: cb.dataset.season,
                             episode_num: parseInt(cb.dataset.epNum),
                             episode_title: cb.dataset.title,
@@ -2566,7 +2614,7 @@
             }
 
             if (sources.length === 0) {
-                container.innerHTML = '<span style="color:#888;font-size:0.85em;padding:6px 12px;">No sources available — monitoring will search all sources automatically.</span>';
+                container.innerHTML = '<span style="color:#888;font-size:0.85em;padding:6px 12px;">No explicit sources — searches all sources automatically (filtered by custom categories if selected).</span>';
                 return;
             }
 

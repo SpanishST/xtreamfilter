@@ -341,12 +341,16 @@ class CategoryService:
                      "case_sensitive": bool(pr["case_sensitive"])}
                 )
 
-            # Counts for manual items
-            manual_counts: dict[str, int] = {}
+            # Actual items for manual categories (needed by the frontend to detect membership)
+            all_manual_items: dict[str, list] = {}
             for r in conn.execute(
-                "SELECT category_id, COUNT(*) AS cnt FROM category_manual_items GROUP BY category_id"
+                "SELECT category_id, stream_id, source_id, content_type, added_at "
+                "FROM category_manual_items ORDER BY id"
             ).fetchall():
-                manual_counts[r["category_id"]] = r["cnt"]
+                all_manual_items.setdefault(r["category_id"], []).append(
+                    {"id": r["stream_id"], "source_id": r["source_id"],
+                     "content_type": r["content_type"], "added_at": r["added_at"]}
+                )
 
             # Counts for cached items (automatic categories)
             cached_counts: dict[str, int] = {}
@@ -363,8 +367,10 @@ class CategoryService:
                 except (json.JSONDecodeError, TypeError):
                     content_types = ["live", "vod", "series"]
                 if row["mode"] == "manual":
-                    count = manual_counts.get(cat_id, 0)
+                    items = all_manual_items.get(cat_id, [])
+                    count = len(items)
                 else:
+                    items = []
                     count = cached_counts.get(cat_id, 0)
                 result.append({
                     "id": cat_id,
@@ -377,6 +383,7 @@ class CategoryService:
                     "notify_telegram": bool(row["notify_telegram"]),
                     "recently_added_days": row["recently_added_days"],
                     "patterns": all_patterns.get(cat_id, []),
+                    "items": items,
                     "item_count": count,
                 })
             return result

@@ -3,7 +3,9 @@
 [![Docker Hub](https://img.shields.io/docker/pulls/spanishst/xtreamfilter.svg)](https://hub.docker.com/r/spanishst/xtreamfilter)
 [![Docker Image Size](https://img.shields.io/docker/image-size/spanishst/xtreamfilter/latest)](https://hub.docker.com/r/spanishst/xtreamfilter)
 
-A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Series) from multiple sources with per-source dedicated routes, merged playlists, stream proxying, advanced filtering, monitoring and downloading.
+XtreamFilter is a Docker-first Xtream Codes proxy and media workflow tool for IPTV libraries. It lets you combine multiple providers, apply per-source filters, expose merged or dedicated Xtream endpoints, browse the resulting catalog in a web UI, organize content with custom categories, monitor series and movies, and download VOD or episodes to local storage.
+
+The current release line is `0.5.6`.
 
 ## Screenshots
 
@@ -15,41 +17,37 @@ A Docker-based Xtream Codes proxy that filters IPTV content (Live TV, Movies, Se
 
 ## Features
 
-- 📺 **Full Xtream Codes API Proxy** - Works with any Xtream-compatible player (TiviMate, XCIPTV, etc.)
-- 🔗 **Multi-Source Support** - Configure multiple Xtream providers with dedicated routes per source
-- 🎬 **Merged Playlist** - Combine all sources into a single unified endpoint with virtual IDs
-- 🛡️ **Stream Proxy** - Optionally proxy all streams through the server (hides upstream URLs, better for 4K)
-- 🛣️ **Per-Source Routing** - Each source has its own URL path to avoid ID conflicts
-- 🎬 **Live TV, Movies & Series** - Filter all content types independently
-- 🔧 **Web-based Configuration** - Easy UI to manage sources, settings and filters
-- 🎯 **Advanced Filtering** - Include/exclude filters with multiple match types per source
-- 🚫 **Exclude All** - Start with empty and whitelist only what you want
-- 🏷️ **Source Prefixing** - Optionally prefix group names to identify content origin
-- 🔄 **Smart Caching** - Background refresh with configurable TTL and real-time progress bar
-- 💾 **Persistent Cache** - Survives container restarts
-- � **Content Browser** - Browse and search all your content with cover art and details
-- 📂 **Custom Categories** - Create manual or automatic categories with pattern matching
-- 📱 **Telegram Notifications** - Get notified when new content matches your categories
-- ⬇️ **VOD & Series Downloads** - Download movies and series episodes locally with a cart-based queue
-- 🎞️ **Jellyfin/Kodi Metadata** - Auto-generate `.nfo` files and download poster art alongside videos for seamless library integration
-- ▶️ **Built-in Stream Preview** - Preview streams directly in the browser with mpegts.js/hls.js support, audio track selection, and keyboard shortcuts
-- 📡 **Series Monitoring** - Automatically track series for new episodes with auto-download and Telegram alerts
-- �🐳 **Docker Ready** - Easy deployment with docker-compose
+- Full Xtream Codes proxy for merged and per-source playback
+- Multi-source support with dedicated routes per provider
+- Merged playlists and virtual IDs to avoid source collisions
+- Optional stream proxy mode to hide upstream URLs from clients
+- Per-source filters for live, VOD, and series groups/channels
+- Web UI for source management, browsing, downloads, categories, and monitoring
+- Rich Browse page with search, groups, source filters, sorting, ratings, and preview playback
+- Manual and automatic custom categories with pattern matching, recent-content filters, and Telegram notifications
+- Download cart for movies and series episodes with progress tracking and retry tools
+- Jellyfin/Kodi-friendly output with `.nfo` files and poster artwork
+- Series monitoring for new episodes, scoped seasons, full-series capture, and backfill
+- Movie monitoring by title or TMDB ID with per-source and per-category restrictions
+- Download scheduling, throttling, player-profile emulation, and Telegram download notifications
+- Version check endpoint and in-app update awareness
 
 ## Quick Start
 
-### Using Docker Hub (Recommended)
+### Docker Hub
 
 ```bash
 docker run -d \
   --name xtreamfilter \
   -p 8080:5000 \
   -v ./data:/data \
+  -v ./downloads:/data/downloads \
   --restart unless-stopped \
+  -e TZ=Europe/Paris \
   spanishst/xtreamfilter:latest
 ```
 
-Or with docker-compose, create a `docker-compose.yml`:
+### docker compose
 
 ```yaml
 services:
@@ -66,626 +64,551 @@ services:
       - TZ=Europe/Paris
 ```
 
-Then run:
+Start it with:
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
-### Building from Source
-
-1. **Clone the repository:**
+### Build From Source
 
 ```bash
-git clone https://github.com/spanishst/xtreamfilter.git
+git clone https://github.com/SpanishST/xtreamfilter.git
 cd xtreamfilter
+docker compose up --build -d
 ```
 
-2. **Build and run:**
+### First Steps
 
-```bash
-docker-compose up --build -d
-```
+1. Open `http://localhost:8080`
+2. Add one or more Xtream sources
+3. Configure the dedicated route for each source
+4. Adjust filters for live, VOD, and series as needed
+5. Refresh the cache
+6. Use the displayed Xtream or M3U URLs in your IPTV client
 
-### Next Steps
+## Core Concepts
 
-1. **Open the web UI:**
+### Source Model
 
-```
-http://localhost:8080
-```
+Each provider is configured as a separate source with:
 
-2. **Add your Xtream source(s)** in the Sources section:
-   - Name, Host, Username, Password
-   - **Dedicated Route** (required): URL path for this source (e.g., `myprovider`)
+- Name
+- Host
+- Username and password
+- Dedicated route
+- Optional group prefix
+- Maximum connections
+- Per-source filters
 
-3. **Configure your filters** for each source - Live TV, VOD, and Series
+Dedicated routes are important because upstream providers can reuse the same IDs for streams, VOD items, or series.
 
-4. **Connect your IPTV player** using one of the connection URLs shown in the UI
+### Merged vs Dedicated Access
+
+XtreamFilter exposes content in two ways:
+
+- Merged access: all enabled sources appear under one virtualized endpoint
+- Dedicated access: each source keeps its own Xtream-compatible endpoint
+
+### Data Storage
+
+Runtime data is stored under `/data`, including:
+
+- `config.json` for source and option settings
+- `app.db` for cache indexes, categories, monitoring state, and related persisted data
+- cache and download metadata used by the UI and background jobs
 
 ## Connection URLs
 
-XtreamFilter provides multiple ways to connect your IPTV player:
+### Merged Xtream Endpoint
 
-### Merged Endpoint (Recommended for Multi-Source)
+Recommended when you want one combined playlist across all enabled sources.
 
-Combines all sources into a single playlist with virtual IDs that prevent conflicts:
-
-```
+```text
 Server: http://YOUR_SERVER_IP:8080/merged
 Username: proxy
 Password: proxy
 ```
 
-- All sources appear in one unified playlist
-- Virtual IDs ensure no conflicts between sources (each source gets a 10M ID range)
-- Filters from each source are applied
+### Per-Source Xtream Endpoints
 
-### Per-Source Endpoints
+Filtered endpoint:
 
-Each source has its own dedicated endpoint:
-
-**Filtered endpoint (with your filter rules applied):**
-```
+```text
 Server: http://YOUR_SERVER_IP:8080/<route>
-Username: (from your provider)
-Password: (from your provider)
+Username: <provider username>
+Password: <provider password>
 ```
 
-**Unfiltered endpoint (full catalog from this source):**
-```
+Unfiltered endpoint:
+
+```text
 Server: http://YOUR_SERVER_IP:8080/<route>/full
-Username: (from your provider)
-Password: (from your provider)
+Username: <provider username>
+Password: <provider password>
 ```
 
 ### M3U Playlists
 
-Generate M3U playlists for players that don't support Xtream API:
-
 | URL | Description |
-|-----|-------------|
-| `/playlist.m3u` | All sources combined (merged with virtual IDs) |
-| `/<route>/playlist.m3u` | Single source filtered |
-| `/<route>/full/playlist.m3u` | Single source unfiltered |
+| --- | --- |
+| `/playlist.m3u` | Merged playlist using virtual IDs |
+| `/<route>/playlist.m3u` | Filtered playlist for one source |
+| `/<route>/full/playlist.m3u` | Unfiltered playlist for one source |
 
 ## Stream Proxy Mode
 
-When enabled, all streams are proxied through the XtreamFilter server instead of redirecting clients directly to upstream servers.
+When proxy mode is enabled, clients stream through XtreamFilter instead of receiving upstream redirect URLs directly.
 
-### Benefits
+### Why use it
 
-- **Privacy**: Upstream server URLs are hidden from clients
-- **4K Performance**: Adaptive buffering optimized for 4K streams (up to 25 Mbps)
-- **Freeze Prevention**: Smart pre-buffering and dynamic buffer sizing
-- **Single Point of Control**: All traffic flows through your server
+- Hide upstream server URLs from clients
+- Centralize stream access through one server
+- Improve playback stability on problematic sources
+- Keep client configuration simple when upstream URLs change
 
-### Adaptive Buffering System
-
-The proxy includes an intelligent buffering system designed to prevent freezes when upstream servers have issues:
-
-| Feature | Value | Description |
-|---------|-------|-------------|
-| **Pre-buffer** | 4 MB | Initial buffer filled before streaming starts (~1.3s at 25 Mbps) |
-| **Min buffer** | 1 MB | Minimum adaptive buffer size |
-| **Max buffer** | 16 MB | Maximum buffer (~5s runway at 25 Mbps for 4K) |
-| **Chunk size** | 512 KB | Read chunk size for efficient memory usage |
-
-**How it works:**
-
-1. **Pre-buffering**: Before sending any data to the client, the proxy fills a 4 MB buffer to ensure smooth playback start
-2. **Throughput monitoring**: Measures upstream speed every 2 seconds, keeping 10 samples for stability
-3. **Slowdown detection**: If current throughput drops below 60% of average:
-   - Buffer doubles (e.g., 1 MB → 2 MB)
-   - On consecutive slowdowns, buffer increases 4x for faster response
-4. **Stable recovery**: After 4 stable periods (~20s), buffer reduces by 25% to optimize memory
-5. **Logging**: All buffer adjustments are logged at INFO level for monitoring
-
-**Example log output:**
-```
-Pre-buffer filled: 4096.0KB in 0.34s (11993.5 KB/s)
-Upstream slowdown detected (2285 KB/s < 11950 KB/s avg), increasing buffer: 1024KB -> 2048KB
-Upstream slowdown detected (1781 KB/s < 7832 KB/s avg), increasing buffer: 2048KB -> 8192KB
-Upstream stable (2033 KB/s), reducing buffer: 16384KB -> 12288KB
-```
-
-### Toggle
-
-Enable/disable via the web UI in the **Connection URLs** card, or via API:
+### Toggle Proxy Mode
 
 ```bash
-# Enable proxy
-curl -X POST http://localhost:8080/api/proxy/enable
+curl http://localhost:8080/api/options/proxy
 
-# Disable proxy  
-curl -X POST http://localhost:8080/api/proxy/disable
-
-# Check status
-curl http://localhost:8080/api/proxy/status
+curl -X POST http://localhost:8080/api/options/proxy \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
 ```
 
-When **disabled**, clients receive a 302 redirect to the upstream URL.
+## Filtering
 
-## Multi-Source Support
+Filters are configured per source and per content type.
 
-### Adding Sources
+### Content Types
 
-1. Open the web UI and go to the **Sources** section
-2. Click **Add Source** to add a new provider
-3. Enter the source details:
-   - **Name**: Friendly name for the source (e.g., "Provider A")
-   - **Host**: The Xtream server URL (e.g., `http://provider.example.com`)
-   - **Username/Password**: Your credentials for this provider
-   - **Prefix** (optional): Text to prepend to group names (e.g., `[ProvA] `)
-   - **Dedicated Route** (required): URL path for this source (e.g., `providera`)
-   - **Enabled**: Toggle to enable/disable this source
+- `live`
+- `vod`
+- `series`
 
-### Dedicated Source Routes
+### Filter Targets
 
-Each source **must have** a dedicated route. This ensures:
-- No ID conflicts between providers (two sources may have series with the same ID)
-- Clean separation of content per source
-- Correct playback for all content types
-
-**Example with two sources:**
-- Source "Smarters" with route `smarters`:
-  - Filtered: `http://YOUR_SERVER_IP:8080/smarters`
-  - Unfiltered: `http://YOUR_SERVER_IP:8080/smarters/full`
-- Source "Strong" with route `strong`:
-  - Filtered: `http://YOUR_SERVER_IP:8080/strong`
-  - Unfiltered: `http://YOUR_SERVER_IP:8080/strong/full`
-
-### Source Prefixing
-
-The **Prefix** option prepends text to all group names from a source, helping identify content origin when viewing in your player.
-
-**Example:**
-- Source with prefix `[US] ` → Groups become `[US] Sports`, `[US] Movies`, etc.
-
-### Per-Source Filtering
-
-Each source has its own independent filter configuration:
-- Filters are applied per-source
-- You can have different include/exclude rules per provider
-- Select a source in the filter dropdown to edit its specific filters
-
-## Filter System
-
-### Content Categories
-- **Live TV** - Television channels
-- **VOD** - Movies/Films
-- **Series** - TV series
-
-### Filter Types
-- **Include** - Only keep matching items (whitelist mode)
-- **Exclude** - Remove matching items (blacklist mode)
+- `groups`
+- `channels`
 
 ### Match Modes
-| Mode | Description | Example |
-|------|-------------|---------|
-| `starts_with` | Matches if name starts with value | `FR\|` matches "FR\| TF1" but NOT "ABC FR\| News" |
-| `ends_with` | Matches if name ends with value | `HD` matches "Canal+ HD" |
-| `contains` | Matches if name contains value anywhere | `Sports` matches "beIN Sports 1" |
-| `not_contains` | Matches if name does NOT contain value | `XXX` excludes adult content |
-| `exact` | Exact match only (case insensitive by default) | `TF1` matches only "TF1" |
-| `regex` | Regular expression pattern | `^FR\|.*` for regex patterns |
-| `all` | Matches everything | Use with "Exclude All" to start fresh |
 
-### Exclude All Feature
+| Mode | Description |
+| --- | --- |
+| `contains` | Value appears anywhere |
+| `not_contains` | Value must not appear |
+| `starts_with` | Name begins with value |
+| `ends_with` | Name ends with value |
+| `exact` | Exact match |
+| `regex` | Regular expression |
+| `all` | Match everything |
 
-The **Exclude All** option lets you start with a clean slate by excluding everything, then adding include rules to whitelist specific content:
+### Typical Patterns
 
-1. Click "Exclude All Groups" or "Exclude All Channels"
-2. Add "Include" filters for the specific content you want to keep
-
-This is useful when you only want a small subset of content from a large catalog.
-
-### Filter Examples
-
-**Include only French content (Live TV):**
-- Type: `include`, Match: `starts_with`, Value: `FR|`
-
-**Exclude adult content (all categories):**
-- Type: `exclude`, Match: `contains`, Value: `XXX`
-
-**Include specific streaming services:**
-- Type: `include`, Match: `exact`, Value: `NETFLIX SERIES`
-- Type: `include`, Match: `exact`, Value: `DISNEY+ MOVIES`
-
-**Start fresh and whitelist:**
-1. Add: Type: `exclude`, Match: `all`, Value: `*`
-2. Add: Type: `include`, Match: `starts_with`, Value: `FR|`
+- Exclude all, then whitelist selected content
+- Keep only specific streaming-service groups
+- Exclude adult content globally
+- Apply separate rules for live vs VOD vs series
 
 ## Cache System
 
-The proxy caches all data from upstream servers for fast responses:
+The application builds and refreshes a local cache of upstream categories and content.
 
-- **Default TTL:** 1 hour (3600 seconds)
-- **Background Refresh:** Automatic refresh before cache expires
-- **Real-time Progress:** Visual progress bar with step-by-step updates
-- **Cross-Worker Sync:** Progress is visible even when page is reloaded
-- **Disk Persistence:** Cache survives container restarts
-- **Per-Source Caching:** Each source is cached independently
-- **Cancel Button:** Abort stuck refreshes if needed
+- Default cache TTL: `3600` seconds
+- Refresh runs in the background
+- Progress is visible in the UI
+- Cache survives restarts
+- Automatic categories refresh after cache refresh
 
-### Cache Status
+### Cache UI shows
 
-The web UI shows:
-- Total Live Streams, Movies, and Series counts
-- Cache validity status (✅ valid, ⚠️ expired, 🔄 refreshing)
 - Last refresh time
-- Progress bar during refresh with current step and source
+- Next refresh estimate
+- Cache validity
+- Per-source item counts
+- Refresh progress and current step
 
-## Browse Content
+## Browse UI
 
-The **Browse** feature provides a rich interface to explore all your IPTV content:
+The Browse page is available at `/browse`.
 
-- **Visual Grid View** - Browse movies and series with cover art thumbnails
-- **Search & Filter** - Search by name, filter by group/category
-- **Content Details** - View descriptions, ratings, cast, and episode lists
-- **Quick Actions** - Add items to custom categories directly from the browser
-- **Pagination** - Efficiently browse large catalogs
-- ▶️ **Stream Preview** - Preview video streams directly without leaving the page
+### What it supports
 
-Access the browser at `/browse` or click the **🔍 Browse Content** button on the main page.
+- Search by title
+- TMDB-prefixed search such as `tmdb:12345`
+- Filter by content type, source, group, and custom category
+- Rating and recency filters for VOD and series
+- Sorting for catalog exploration
+- Group dropdown populated dynamically from the current source/type selection
+- Built-in playback preview for live, VOD, and playable episodes
+- Add-to-cart and add-to-category actions directly from the result cards
+- Browse-from-monitor links for both series and movies
 
-### Stream Preview Player
+### Stream Preview
 
-The Browse page includes an integrated player for quickly previewing streams before downloading or adding to your library:
+The built-in player supports:
 
-| Feature | Description |
-|---|---|
-| **MPEG-TS & HLS** | Automatic format detection using mpegts.js and hls.js |
-| **Audio tracks** | Select between available audio tracks |
-| **Custom seek bar** | Frame-accurate seeking for transcoded VOD |
-| **Keyboard shortcuts** | Space (play/pause), arrows (seek), F (fullscreen), M (mute) |
-| **Episode playback** | Play buttons on each episode row for direct streaming |
-| **Fullscreen** | Double-click or press F for fullscreen mode |
+- MPEG-TS and HLS playback
+- Audio track switching when available
+- Keyboard shortcuts
+- Episode playback from the series browser
 
 ## Custom Categories
 
-Create your own categories to organize content across all sources:
+Custom categories help you organize content across all sources.
 
 ### Manual Categories
 
-Manually curate collections by adding items one by one:
+Manual categories are curated item by item.
 
-1. Create a category with mode **Manual**
-2. Browse content and click the ➕ button to add items
-3. Items remain in the category until you remove them
+Typical flow:
+
+1. Create a category in manual mode
+2. Select accepted content types
+3. Browse the catalog and use the `+` button to link items
+4. Use the same control again to unlink them later
 
 ### Automatic Categories
 
-Automatically collect content based on search patterns:
+Automatic categories are built from pattern rules.
 
-1. Create a category with mode **Automatic**
-2. Define search patterns (contains, starts with, regex, etc.)
-3. Choose pattern logic: **Match ANY** (OR) or **Match ALL** (AND)
-4. Optionally filter by **Recently Added** (last 7, 14, 30 days, etc.)
-5. Enable **Apply source filter rules** to respect your source filters
+You can configure:
 
-**Pattern Match Types:**
-| Type | Description | Example |
-|------|-------------|---------|
-| `contains` | Name contains value | `Marvel` matches "Marvel Avengers" |
-| `starts_with` | Name starts with value | `Star Wars` matches "Star Wars: Episode IV" |
-| `ends_with` | Name ends with value | `4K` matches "Avatar 4K" |
-| `exact` | Exact match | `Inception` matches only "Inception" |
-| `regex` | Regular expression | `^The.*\(2024\)$` for regex patterns |
-| `not_contains` | Name does NOT contain | `XXX` excludes adult content |
+- Category name and icon
+- Accepted content types
+- Pattern list
+- Pattern logic: `and` or `or`
+- Recently-added window
+- Whether source filters should also apply
+- Telegram notification per category
 
-**Example:** Create a "New 4K Movies" category:
-- Mode: Automatic
-- Content Types: VOD only
-- Pattern: `contains` → `4K`
-- Recently Added: Last 7 days
-- Notify Telegram: ✅
+Automatic categories refresh when cache refresh runs, and can also be refreshed manually.
 
-Automatic categories refresh when the cache refreshes, detecting new content automatically.
+### Category Use Cases
+
+- New movies from the last 7 days
+- 4K content
+- Provider-specific highlights
+- Hand-picked favorites
+- Monitoring-only custom channels used to restrict movie or series checks
 
 ## Telegram Notifications
 
-Get notified on Telegram when automatic categories find new content:
+Telegram is used for:
+
+- automatic category notifications
+- monitoring notifications
+- optional download notifications
 
 ### Setup
 
-1. **Create a Telegram Bot:**
-   - Message [@BotFather](https://t.me/BotFather) on Telegram
-   - Send `/newbot` and follow the prompts
-   - Copy the **Bot Token** (e.g., `123456789:ABCdefGHI...`)
+1. Create a bot with [@BotFather](https://t.me/BotFather)
+2. Get your chat ID
+3. Configure token and chat ID in the UI or API
+4. Send a test notification
 
-2. **Get your Chat ID:**
-   - Message [@userinfobot](https://t.me/userinfobot) on Telegram
-   - It will reply with your **Chat ID** (e.g., `1234567890`)
-   - For groups/channels, add the bot and get the group ID
-
-3. **Configure in XtreamFilter:**
-   - Go to the main page and click **⚙️ Configure** next to "Telegram Notifications"
-   - Enter your Bot Token and Chat ID
-   - Enable notifications and click **💾 Save**
-   - Click **🔔 Test** to verify it works
-
-4. **Enable per category:**
-   - Edit an automatic category
-   - Check **📱 Send Telegram notification when new items are found**
-
-### Notification Formats
-
-| Scenario | Format |
-|----------|--------|
-| Single item with cover | Photo message with movie poster |
-| Multiple items with covers | Album (up to 10 photos) with caption |
-| Items without covers | Text message with bullet list |
-
-### API Endpoints
+### Telegram API
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/config/telegram` | GET | Get Telegram settings (token masked) |
-| `/api/config/telegram` | POST | Update Telegram settings |
-| `/api/config/telegram/test` | POST | Send a test notification |
-| `/api/config/telegram/test-diff` | POST | Send a test category update notification |
+| --- | --- | --- |
+| `/api/config/telegram` | `GET` | Get Telegram settings with masked token |
+| `/api/config/telegram` | `POST` | Update Telegram settings |
+| `/api/config/telegram/test` | `POST` | Send a basic test notification |
+| `/api/config/telegram/test-diff` | `POST` | Send a sample category-style notification |
 
 ## Download Manager
 
-Download VOD movies and series episodes locally with a built-in cart-based queue system, accessible from the Browse and Cart pages.
+The download workflow is exposed through the Browse page and the Cart page.
 
-### What Can Be Downloaded
+### Supported Downloads
 
-- **Movies (VOD)** — Add films directly from the Browse page. If a movie exists in multiple sources, a modal lets you choose which provider to download from.
-- **Series Episodes** — Three granularity levels via an episode selector:
-  - Individual episodes (checkbox selection)
-  - Full season ("Add Season" button)
-  - Entire series ("Add All Episodes" button)
+- Single VOD movie
+- Single series episode
+- Full season
+- Entire series
 
-### Cart & Queue
+### Queue Behavior
 
-Items are queued through a persistent cart (`data/cart.json`) that survives container restarts. The background download worker processes items **sequentially** (one at a time) to respect provider connection limits.
+Downloads are persisted and processed sequentially.
 
-**Item lifecycle:** `queued` → `downloading` → `completed` / `failed` / `cancelled`
+Item states include:
 
-- **Duplicate prevention** — Adding an already-queued item returns HTTP 409
-- **Crash recovery** — Items stuck in `downloading` after a restart are automatically re-queued
-- **Live progress** — The Cart page polls every 2 seconds for real-time speed, progress, and pause status
+- `queued`
+- `downloading`
+- `completed`
+- `failed`
+- `cancelled`
+- `move_failed`
 
-### Anti-Ban & Throttling
+### Download Features
 
-All settings are configurable from the Cart page UI and persisted in `config.json`:
+- Retry failed or cancelled items
+- Retry all failed items
+- Resume move step when the temp-to-final move failed
+- Track current speed, ETA-related speed, and pause state
+- Optional Telegram notifications when queueing or completing downloads
+- Duplicate prevention for active queued/downloading entries
+- Crash recovery for interrupted download state
 
-| Feature | Description |
-|---------|-------------|
-| **Bandwidth Limit** | Throttle download speed in KB/s (0 = unlimited) |
-| **Periodic Pauses** | Download for N seconds, then pause for M seconds (simulates player buffering) |
-| **CDN Burst Reconnect** | Periodically close and reopen the connection (with Range resume) to exploit initial TCP/CDN burst speeds (0 = off) |
-| **Player Profile** | Emulate real IPTV player HTTP headers to avoid provider blocks |
-| **Auto-Retry** | Up to 5 retries with 30s×N backoff on errors (429, 458, 503, 551) |
+### Throttling And Scheduling
 
-**Available Player Profiles:**
+Download options are configurable from the UI and API:
 
-| Profile | Player |
-|---------|--------|
-| `tivimate` | TiviMate 4.7.0 |
-| `smarters` | IPTV Smarters Pro |
-| `vlc` | VLC 3.0.20 |
-| `kodi` | Kodi 21.0 |
-| `xciptv` | XCIPTV 6.0.0 |
-| `ott_navigator` | OTT Navigator 1.7.1 |
-| `ffmpeg` | FFmpeg/Lavf |
+- Bandwidth limit
+- Periodic pause interval and pause duration
+- Player-profile emulation
+- Burst reconnect behavior
+- Per-day download schedule windows
 
-### File Organization
+If a download schedule is enabled, automatic monitoring downloads wait until the configured window is open.
 
-Downloads are organized automatically with Jellyfin/Kodi-compatible folder structures and metadata:
+### Output Layout
 
-```
+Downloads are organized into media-library-friendly folders and include metadata.
+
+Example layout:
+
+```text
 <download_path>/
 ├── Films/
 │   └── Movie Name/
 │       ├── Movie Name.mp4
-│       ├── Movie Name.nfo          # Jellyfin/Kodi movie metadata
-│       └── poster.jpg               # Movie poster artwork
+│       ├── Movie Name.nfo
+│       └── poster.jpg
 └── Series/
     └── Show Name/
-        ├── tvshow.nfo                # Series-level metadata
-        ├── poster.jpg                # Series poster artwork
+        ├── tvshow.nfo
+        ├── poster.jpg
         ├── S01/
         │   ├── Show Name S01E01 - Episode Title.mkv
-        │   ├── Show Name S01E01 - Episode Title.nfo
-        │   └── Show Name S01E02.mkv
+        │   └── Show Name S01E01 - Episode Title.nfo
         └── S02/
-            └── Show Name S02E01 - Pilot.mp4
+            └── Show Name S02E01 - Episode Title.mp4
 ```
 
-### Jellyfin / Kodi Metadata
-
-When downloading VOD or series content, XtreamFilter automatically fetches metadata from the Xtream API and writes Jellyfin/Kodi-compatible `.nfo` files alongside each video:
-
-| Content Type | NFO File | Contents |
-|---|---|---|
-| **Movie** | `<MovieName>.nfo` | Title, plot, year, premiered date, ratings, genres, cast, director, TMDB/IMDb IDs, poster URL |
-| **TV Show** | `tvshow.nfo` (in series root) | Series title, plot, year, premiered, ratings, genres, cast, TMDB/IMDb IDs, poster URL |
-| **Episode** | `<EpisodeName>.nfo` | Episode title, season/episode numbers, show title, plot, aired date, ratings |
-
-**NFO features:**
-- `<uniqueid type="imdb">` / `<uniqueid type="tmdb">` tags for automatic provider matching
-- `<ratings>` container with proper Kodi/Jellyfin structure
-- `<thumb aspect="poster">` and `<fanart>` image URL references
-- `<premiered>` tag for release date display and sorting
-- Poster artwork downloaded as `poster.jpg` in each movie/series folder
-- XML declaration with `encoding="UTF-8" standalone="yes"` for full compatibility
-
-### Download API
+### Download APIs
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/cart` | GET | List all cart items |
-| `/api/cart` | POST | Add item(s) to cart |
-| `/api/cart/{id}` | DELETE | Remove a single item |
-| `/api/cart/{id}/retry` | POST | Re-queue a failed/cancelled item |
-| `/api/cart/retry-all` | POST | Re-queue all failed/cancelled items |
-| `/api/cart/clear` | POST | Clear items by mode: `completed`, `failed`, `finished`, `all` |
-| `/api/cart/start` | POST | Launch the background download worker |
-| `/api/cart/cancel` | POST | Cancel the current download gracefully |
-| `/api/cart/status` | GET | Queue stats, progress, speed, pause state |
-| `/api/options/download_path` | GET/POST | Get or set download directory |
-| `/api/options/download_temp_path` | GET/POST | Get or set temp directory |
-| `/api/options/download_throttle` | GET/POST | Get or set throttle settings |
-| `/api/options/player_profiles` | GET | List available player profiles |
+| --- | --- | --- |
+| `/api/cart` | `GET` | List cart items |
+| `/api/cart` | `POST` | Add movie, episode, season, or full-series items |
+| `/api/cart/{item_id}` | `DELETE` | Remove one item |
+| `/api/cart/{item_id}/retry` | `POST` | Retry a failed, cancelled, or move-failed item |
+| `/api/cart/{item_id}/move` | `POST` | Retry only the final move step for a `move_failed` item |
+| `/api/cart/retry-all` | `POST` | Retry all failed/cancelled/move-failed items |
+| `/api/cart/clear` | `POST` | Clear items by mode |
+| `/api/cart/start` | `POST` | Start the worker manually |
+| `/api/cart/cancel` | `POST` | Request cancellation of the active download |
+| `/api/cart/status` | `GET` | Queue and active-download status |
+| `/api/cart/active-source-downloads` | `GET` | Count active downloads by source |
+| `/api/cart/series-episodes/{source_id}/{series_id}` | `GET` | Fetch season/episode structure for a series |
 
-## Series Monitoring
-
-Automatically track your favorite series for new episodes. When new episodes are detected, they can be auto-queued for download, sent as Telegram notifications, or both.
-
-### How It Works
-
-1. **Add a series to monitor** from the Browse page by clicking the 📡 **Monitor** button on any series
-2. **Choose monitoring scope:**
-   - **New episodes only** — Snapshots current episodes as "known"; only future additions trigger
-   - **Specific season** — Watch only a single season for new episodes
-   - **All episodes** — Treat every episode as new on first check (useful to download an entire series)
-3. **Choose an action:**
-   - **Download** — Auto-queue new episodes to the download cart
-   - **Notify** — Send a Telegram notification only
-   - **Both** — Download and notify
-4. **Automatic checks** — The monitor runs after each cache refresh, scanning all enabled series
-5. **Preview** — Click 👁 **Preview** on any monitored series to see all episodes with their status (new, known, downloaded)
-
-### Monitoring Features
-
-| Feature | Description |
-|---------|-------------|
-| **Multi-source** | Monitor a series across all sources or pin to a specific one |
-| **Fuzzy matching** | Finds the same series across different providers by name |
-| **TMDB/IMDb normalization** | Consistent metadata IDs across sources for accurate matching |
-| **Duplicate prevention** | Won't re-queue episodes already in the download cart |
-| **File detection** | Skips episodes that already exist on disk |
-| **Enable/Disable** | Toggle monitoring per series without removing it |
-| **Episode preview** | Modal showing all episodes grouped by season with status badges |
-
-### Monitoring API
+### Download Options APIs
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/monitor` | GET | List all monitored series |
-| `/api/monitor` | POST | Add a series to monitor |
-| `/api/monitor/{id}` | PUT | Update monitoring settings (enable/disable, scope, etc.) |
-| `/api/monitor/{id}` | DELETE | Remove a monitored series |
-| `/api/monitor/{id}/episodes` | GET | Preview episodes with status (new/known/downloaded) |
-| `/api/monitor/check` | POST | Manually trigger a monitoring check |
+| --- | --- | --- |
+| `/api/options/download_path` | `GET`, `POST` | Get or set the final download directory |
+| `/api/options/download_temp_path` | `GET`, `POST` | Get or set the temp directory |
+| `/api/options/test_path` | `POST` | Validate write access to a path |
+| `/api/options/download_throttle` | `GET`, `POST` | Get or set throttling, pause, and profile options |
+| `/api/options/player_profiles` | `GET` | List supported player profiles |
+| `/api/options/download_notifications` | `GET`, `POST` | Get or set Telegram download notification options |
+| `/api/options/download_schedule` | `GET`, `POST` | Get or set the day-by-day download schedule |
 
-## API Endpoints
+## Monitoring
 
-### Merged Endpoints
+The Monitor page is available at `/monitor` and includes separate tabs for series and movies.
 
-| Endpoint | Description |
-|----------|-------------|
-| `/merged/player_api.php` | Unified Xtream API with all sources merged |
-| `/merged/live/{user}/{pass}/{id}` | Live stream (virtual ID decoded automatically) |
-| `/merged/movie/{user}/{pass}/{id}` | Movie stream (virtual ID decoded automatically) |
-| `/merged/series/{user}/{pass}/{id}` | Series stream (virtual ID decoded automatically) |
+### Series Monitoring
 
-### Per-Source Dedicated Routes
+Series monitoring is designed for new-episode detection and optional download automation.
 
-Each source with a dedicated route exposes these endpoints:
+#### Series modes
 
-| Endpoint | Description |
-|----------|-------------|
-| `/<route>/player_api.php` | Filtered Xtream API for this source |
-| `/<route>/full/player_api.php` | Unfiltered Xtream API for this source |
-| `/<route>/live/{user}/{pass}/{id}` | Live stream |
-| `/<route>/movie/{user}/{pass}/{id}` | Movie stream |
-| `/<route>/series/{user}/{pass}/{id}` | Series stream |
-| `/<route>/full/live/{user}/{pass}/{id}` | Live stream (unfiltered path) |
-| `/<route>/full/movie/{user}/{pass}/{id}` | Movie stream (unfiltered path) |
-| `/<route>/full/series/{user}/{pass}/{id}` | Series stream (unfiltered path) |
+- `new_only`: snapshot the current set as known and only react to future episodes
+- `season`: watch one season only
+- `all`: treat all discovered episodes as candidates
 
-### M3U Playlist Endpoints
+#### Series actions
 
-| Endpoint | Description |
-|----------|-------------|
-| `/playlist.m3u` | Merged playlist from all sources (virtual IDs) |
-| `/<route>/playlist.m3u` | Filtered playlist for single source |
-| `/<route>/full/playlist.m3u` | Unfiltered playlist for single source |
+- `download`
+- `notify`
+- `both`
 
-### Root Endpoints
+#### Series features
 
-| Endpoint | Description |
-|----------|-------------|
-| `/player_api.php` | Serves first configured source (or redirects) |
-| `/full/player_api.php` | Serves first source unfiltered |
-| `/live/{user}/{pass}/{id}` | Live stream (auto-routes to correct source) |
-| `/movie/{user}/{pass}/{id}` | Movie stream (auto-routes to correct source) |
-| `/series/{user}/{pass}/{id}` | Series stream (auto-routes to correct source) |
+- Multi-source matching
+- Optional restriction to selected sources
+- Optional restriction to custom categories used as monitoring channels
+- Episode preview grouped by season
+- Enable or disable without deleting the monitor entry
+- Backfill support when editing an existing monitor entry
 
-### Web Interface & Management
+Backfill can queue:
 
-| Endpoint | Description |
-|----------|-------------|
-| `/` | Web configuration UI |
-| `/health` | Health check |
+- all known episodes
+- all known episodes from one season
+- no backfill
 
-### Source Management API
+### Movie Monitoring
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/sources` | GET | List all sources |
-| `/api/sources` | POST | Add a new source |
-| `/api/sources/<id>` | PUT | Update a source |
-| `/api/sources/<id>` | DELETE | Delete a source |
-| `/api/sources/<id>/filters` | GET | Get filters for a source |
-| `/api/sources/<id>/filters` | POST | Update all filters for a source |
+Movie monitoring watches for a VOD title to become available.
 
-### Cache Management API
+#### How movie monitoring works
+
+1. Add a movie from the Monitor page
+2. Search by title or `tmdb:<id>`
+3. Optionally rename the local canonical title used for downloads
+4. Restrict the search to selected sources
+5. Optionally restrict those sources to selected VOD categories
+6. Optionally restrict matching further through custom categories
+7. Choose whether the result should notify, download, or do both
+
+When a matching movie is found, it is marked as found or downloaded depending on the configured action and whether it was queued or already present on disk.
+
+### Monitoring Triggering
+
+Monitoring checks run:
+
+- after cache refresh in the background loop
+- when manually triggered through `/api/monitor/check`
+
+### Monitoring APIs
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/cache/status` | GET | Cache status, stats, and refresh progress |
-| `/api/cache/refresh` | POST | Trigger background cache refresh |
-| `/api/cache/cancel-refresh` | POST | Cancel/clear stuck refresh state |
-| `/api/cache/clear` | POST | Clear all cached data |
+| --- | --- | --- |
+| `/api/monitor` | `GET` | List monitored series |
+| `/api/monitor` | `POST` | Add a monitored series |
+| `/api/monitor/{id}` | `PUT` | Update a monitored series |
+| `/api/monitor/{id}` | `DELETE` | Delete a monitored series |
+| `/api/monitor/{id}/episodes` | `GET` | Preview detected episodes and their status |
+| `/api/monitor/series-meta/{source_id}/{series_id}` | `GET` | Fetch series metadata used by the UI |
+| `/api/monitor/check` | `POST` | Trigger a manual monitoring run |
+| `/api/monitor/movies` | `GET` | List monitored movies |
+| `/api/monitor/movies` | `POST` | Add a monitored movie |
+| `/api/monitor/movies/{movie_id}` | `PUT` | Update a monitored movie |
+| `/api/monitor/movies/{movie_id}` | `DELETE` | Delete a monitored movie |
+| `/api/monitor/movie-lookup` | `GET` | Search the VOD cache by title or TMDB ID for movie setup |
+| `/api/monitor/custom-categories` | `GET` | List custom categories usable as monitoring channels |
+| `/api/monitor/vod-categories` | `GET` | List VOD categories grouped by enabled source |
 
-### Categories API
+## Public Routes And APIs
+
+### Xtream And Playlist Routes
+
+| Route | Description |
+| --- | --- |
+| `/merged/player_api.php` | Merged Xtream API for all enabled sources |
+| `/merged/live/{username}/{password}/{stream_id}` | Merged live stream route |
+| `/merged/movie/{username}/{password}/{stream_id}` | Merged movie stream route |
+| `/merged/series/{username}/{password}/{stream_id}` | Merged series stream route |
+| `/player_api.php` | Root Xtream API helper route |
+| `/full/player_api.php` | Root unfiltered Xtream helper route |
+| `/{source_route}/player_api.php` | Filtered Xtream API for one dedicated source |
+| `/{source_route}/full/player_api.php` | Unfiltered Xtream API for one dedicated source |
+| `/{source_route}/playlist.m3u` | Filtered M3U playlist for one source |
+| `/playlist.m3u` | Merged M3U playlist |
+| `/merged/xmltv.php` | Merged XMLTV/EPG output |
+
+### Web UI Routes
+
+| Route | Description |
+| --- | --- |
+| `/` | Main configuration UI |
+| `/browse` | Catalog browser |
+| `/cart` | Download cart and queue UI |
+| `/monitor` | Series and movie monitoring UI |
+
+### Health And Version
+
+| Route | Method | Description |
+| --- | --- | --- |
+| `/health` | `GET` | Liveness check |
+| `/api/version` | `GET` | Current version, latest release, and update availability |
+
+### Source Management
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/categories` | GET | List all categories |
-| `/api/categories` | POST | Create a new category |
-| `/api/categories/<id>` | PUT | Update a category |
-| `/api/categories/<id>` | DELETE | Delete a category |
-| `/api/categories/<id>/items` | POST | Add item to manual category |
-| `/api/categories/<id>/items` | DELETE | Remove item from manual category |
-| `/api/categories/refresh` | POST | Refresh all automatic categories |
+| --- | --- | --- |
+| `/api/sources` | `GET` | List sources |
+| `/api/sources` | `POST` | Create a source |
+| `/api/sources/{source_id}` | `GET` | Get one source |
+| `/api/sources/{source_id}` | `PUT` | Update one source |
+| `/api/sources/{source_id}` | `DELETE` | Delete one source |
+| `/api/sources/{source_id}/filters` | `GET` | Get source filters |
+| `/api/sources/{source_id}/filters` | `POST` | Replace source filters |
+| `/api/sources/{source_id}/filters/add` | `POST` | Add one filter rule |
+| `/api/sources/{source_id}/filters/delete` | `POST` | Delete one filter rule |
 
-### Browse API
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/browse` | GET | Browse content UI |
-| `/api/browse` | GET | Browse content (paginated, with filters) |
-
-### Proxy Management API
+### Cache Management
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/proxy/status` | GET | Check if stream proxy is enabled |
-| `/api/proxy/enable` | POST | Enable stream proxying |
-| `/api/proxy/disable` | POST | Disable stream proxying (use redirects) |
+| --- | --- | --- |
+| `/api/cache/status` | `GET` | Cache status and counts |
+| `/api/cache/refresh` | `POST` | Trigger a background refresh |
+| `/api/cache/cancel-refresh` | `POST` | Clear refresh state |
+| `/api/cache/clear` | `POST` | Clear the cached data |
 
-## Configuration
+### Browse APIs
 
-Configuration is stored in `data/config.json`:
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/groups` | `GET` | Lightweight group list for a content type and source |
+| `/channels` | `GET` | Lightweight channel/item list |
+| `/api/browse` | `GET` | Main browse/search endpoint |
+| `/api/browse/groups` | `GET` | Group list with counts for current source/type |
+
+### Categories APIs
+
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/api/categories` | `GET` | List categories with full data |
+| `/api/categories` | `POST` | Create a category |
+| `/api/categories/summary` | `GET` | Lightweight category list for nav and quick state |
+| `/api/categories/{category_id}` | `GET` | Get one category |
+| `/api/categories/{category_id}` | `PUT` | Update one category |
+| `/api/categories/{category_id}` | `DELETE` | Delete one category |
+| `/api/categories/{category_id}/items` | `POST` | Add an item to a manual category |
+| `/api/categories/{category_id}/items/{content_type}/{source_id}/{item_id}` | `DELETE` | Remove an item from a manual category |
+| `/api/categories/refresh` | `POST` | Refresh automatic categories |
+
+### General Options APIs
+
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/api/options` | `GET`, `POST` | Get or update the options object |
+| `/api/options/proxy` | `GET`, `POST` | Get or set proxy mode |
+| `/api/options/refresh_interval` | `GET`, `POST` | Get or set background refresh interval |
+
+## Configuration Overview
+
+Configuration is primarily stored in `/data/config.json`.
+
+Important areas:
+
+- `sources`: provider definitions and per-source filters
+- `content_types`: global enablement of live, VOD, and series
+- `options.proxy_streams`: stream proxy toggle
+- `options.telegram`: Telegram credentials and enablement
+- `options.download_path` and `options.download_temp_path`: file-system destinations
+- `options.download_*`: throttling, pause, profile, notifications, and scheduling
+
+Example shape:
 
 ```json
 {
   "sources": [
     {
-      "id": "abc123",
-      "name": "My Provider",
+      "id": "abc12345",
+      "name": "Provider A",
       "host": "http://provider.example.com",
-      "username": "myuser",
-      "password": "mypass",
+      "username": "user",
+      "password": "pass",
       "enabled": true,
-      "prefix": "",
-      "route": "myprovider",
+      "prefix": "[A] ",
+      "route": "providera",
+      "max_connections": 1,
       "filters": {
         "live": { "groups": [], "channels": [] },
         "vod": { "groups": [], "channels": [] },
@@ -699,52 +622,17 @@ Configuration is stored in `data/config.json`:
     "series": true
   },
   "options": {
-    "proxy_streams": false
+    "proxy_streams": true,
+    "refresh_interval": 3600,
+    "telegram": {
+      "enabled": false,
+      "bot_token": "",
+      "chat_id": ""
+    },
+    "download_path": "/data/downloads",
+    "download_temp_path": "/data/downloads/.tmp"
   }
 }
-```
-
-Cache is stored in `data/api_cache.json` and automatically rebuilt on startup.
-
-## Architecture
-
-XtreamFilter is built on a modern async Python stack for maximum performance:
-
-| Component | Technology | Purpose |
-|-----------|------------|--------|
-| **Web Framework** | FastAPI 0.115+ | High-performance async API framework |
-| **ASGI Server** | Uvicorn | Lightning-fast async server |
-| **HTTP Client** | httpx | Async HTTP with connection pooling |
-| **Runtime** | Python 3.13+ | Latest Python with performance improvements |
-
-## Performance Tuning
-
-For 4K streams and large catalogs, the application is optimized with:
-
-- **Fully async**: All I/O operations are non-blocking for high concurrency
-- **Connection pooling**: Reuses connections to upstream servers (100 max, 20 per host)
-- **Adaptive buffering**: Dynamic buffer sizing from 1 MB to 16 MB based on upstream speed
-- **Pre-buffering**: 4 MB initial buffer before streaming starts
-- **Smart timeouts**: 30s connect, 600s read for large streams
-- **Retry mechanism**: Automatic retry with exponential backoff on upstream failures
-- **Keep-alive**: 65 seconds for connection reuse
-- **Streaming response**: Memory-efficient async generators for large streams
-
-## Docker Compose
-
-```yaml
-services:
-  xtreamfilter:
-    build: .
-    container_name: xtreamfilter
-    ports:
-      - "8080:5000"
-    volumes:
-      - ./data:/data
-      - ./downloads:/data/downloads
-    restart: unless-stopped
-    environment:
-      - TZ=Europe/Paris
 ```
 
 ## Development
@@ -752,24 +640,11 @@ services:
 Run locally without Docker:
 
 ```bash
-pip install fastapi uvicorn[standard] httpx jinja2 python-multipart lxml rapidfuzz packaging
+pip install fastapi uvicorn[standard] httpx jinja2 python-multipart lxml rapidfuzz packaging aiosqlite
 uvicorn app.main:app --host 0.0.0.0 --port 5000 --reload
 ```
 
-The app will be available at `http://localhost:5000`
-
-### Dependencies
-
-| Package | Version | Purpose |
-|---------|---------|--------|
-| fastapi | ≥0.115.0 | Async web framework |
-| uvicorn[standard] | ≥0.34.0 | ASGI server |
-| httpx | ≥0.28.0 | Async HTTP client |
-| jinja2 | ≥3.1.0 | Template engine |
-| python-multipart | ≥0.0.9 | Form data parsing |
-| lxml | ≥5.0.0 | XML/EPG parsing |
-| rapidfuzz | ≥3.0.0 | Fuzzy string matching |
-| packaging | ≥24.0 | Version comparison |
+The application will then be available at `http://localhost:5000`.
 
 ## Running Tests
 

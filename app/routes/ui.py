@@ -17,7 +17,7 @@ templates = Jinja2Templates(directory=os.path.join(os.path.dirname(os.path.dirna
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request, cfg: ConfigService = Depends(get_config_service)):
     config = cfg.config
-    return templates.TemplateResponse("index.html", {"request": request, "config": config})
+    return templates.TemplateResponse(request, "index.html", {"config": config})
 
 
 @router.post("/save")
@@ -50,14 +50,14 @@ async def save(
 
 @router.get("/browse", response_class=HTMLResponse)
 async def browse_page(request: Request):
-    return templates.TemplateResponse("browse.html", {"request": request})
+    return templates.TemplateResponse(request, "browse.html")
 
 
 @router.get("/cart", response_class=HTMLResponse)
 async def cart_page(request: Request):
-    return templates.TemplateResponse("cart.html", {"request": request})
+    return templates.TemplateResponse(request, "cart.html")
 
 
 @router.get("/monitor", response_class=HTMLResponse)
 async def monitor_page(request: Request):
-    return templates.TemplateResponse("monitor.html", {"request": request})
+    return templates.TemplateResponse(request, "monitor.html")

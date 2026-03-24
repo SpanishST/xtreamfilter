@@ -1865,7 +1865,7 @@
             if (dropdown && dropdown.classList.contains('show')) {
                 const itemCats = categories.filter(cat => {
                     const items = cat.mode === 'manual' ? cat.items : cat.cached_items;
-                    return (items || []).some(i => i.source_id === sourceId && i.item_id === String(itemId) && i.content_type === cType);
+                    return (items || []).some(i => i.source_id === sourceId && String(i.id) === String(itemId) && i.content_type === cType);
                 });
                 dropdown.innerHTML = categories.filter(c => c.mode === 'manual').map(cat => {
                     const isIn = itemCats.some(ic => ic.id === cat.id);

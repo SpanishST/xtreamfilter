@@ -5,8 +5,6 @@
 
 XtreamFilter is a Docker-first Xtream Codes proxy and media workflow tool for IPTV libraries. It lets you combine multiple providers, apply per-source filters, expose merged or dedicated Xtream endpoints, browse the resulting catalog in a web UI, organize content with custom categories, monitor series and movies, and download VOD or episodes to local storage.
 
-The current release line is `0.5.6`.
-
 ## Screenshots
 
 ![Browse content Interface](app3.png)

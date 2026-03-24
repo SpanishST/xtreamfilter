@@ -1312,6 +1312,18 @@
             renderBrowseNav();
             document.getElementById('empty-state').innerHTML = '<p>Use the filters above and click <strong>Search</strong> to find content.</p>';
             document.getElementById('empty-state').style.display = 'block';
+            // Pre-fill search from URL params (e.g. ?search=Title&type=series)
+            const _urlParams = new URLSearchParams(window.location.search);
+            const _preSearch = _urlParams.get('search');
+            const _preType  = _urlParams.get('type');
+            if (_preSearch || _preType) {
+                if (_preType && ['live', 'vod', 'series'].includes(_preType)) setContentType(_preType);
+                if (_preSearch) {
+                    document.getElementById('search-input').value = _preSearch;
+                    // Defer until sources/groups are loaded
+                    setTimeout(() => applyFilters(), 400);
+                }
+            }
             document.querySelectorAll('.icon-option').forEach(opt => {
                 opt.addEventListener('click', function() {
                     document.querySelectorAll('.icon-option').forEach(o => o.classList.remove('selected'));

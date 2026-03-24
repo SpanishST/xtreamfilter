@@ -28,6 +28,7 @@
         .series-cover { width: 120px; min-height: 160px; flex-shrink: 0; background: rgba(0, 0, 0, 0.3); display: flex; align-items: center; justify-content: center; }
         .series-cover img { width: 100%; height: 100%; object-fit: cover; }
         .series-cover .placeholder { font-size: 3em; opacity: 0.3; }
+        .series-cover:hover .cover-search-hint { opacity: 1 !important; }
 
         .series-details { padding: 15px; flex: 1; display: flex; flex-direction: column; gap: 8px; }
         .series-name { font-size: 1.1em; font-weight: 600; color: #fff; line-height: 1.3; }
@@ -601,8 +602,12 @@
                     ? '<span class="series-badge badge-new">' + entry.last_new_count + ' new</span>'
                     : '';
 
+                const browseUrl = '/browse?type=series&search=' + encodeURIComponent(entry.canonical_name || entry.series_name);
                 html += '<div class="series-card' + disabledClass + '">' +
-                    '<div class="series-cover">' + coverHtml + '</div>' +
+                    '<a href="' + browseUrl + '" title="Search in Browse" style="display:block;text-decoration:none;">' +
+                    '<div class="series-cover" style="position:relative;cursor:pointer;">' + coverHtml +
+                    '<div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.55);text-align:center;font-size:0.72em;color:#fff;padding:4px 0;opacity:0;transition:opacity 0.2s;" class="cover-search-hint">🔍 Browse</div>' +
+                    '</div></a>' +
                     '<div class="series-details">' +
                     '<div class="series-name">' + escapeHtml(entry.canonical_name || entry.series_name) + '</div>' +
                     '<div class="series-meta">' +
@@ -621,6 +626,7 @@
                     '<input type="checkbox" ' + (entry.enabled ? 'checked' : '') + ' onchange="toggleEnabled(\'' + entry.id + '\', this.checked)">' +
                     '<span class="toggle-slider"></span>' +
                     '</label>' +
+                    '<a href="' + browseUrl + '" class="btn btn-secondary btn-small" title="Find in Browse">🔍</a>' +
                     '<button class="btn btn-secondary btn-small" onclick="previewEpisodes(\'' + entry.id + '\', \'' + escapeAttr(entry.series_name) + '\')">👁 Preview</button>' +
                     '<button class="btn btn-secondary btn-small" onclick="openEditModal(\'' + entry.id + '\')">✏️ Edit</button>' +
                     '<button class="btn btn-danger btn-small" onclick="deleteMonitored(\'' + entry.id + '\', \'' + escapeAttr(entry.series_name) + '\')">🗑</button>' +
@@ -1092,8 +1098,12 @@
                     ? '<button class="btn btn-secondary btn-small" onclick="resetMovieStatus(\'' + m.id + '\')" title="Reset to watching — will detect again on next check">🔁 Re-watch</button>'
                     : '';
 
+                const movieBrowseUrl = '/browse?type=vod&search=' + encodeURIComponent(m.canonical_name || m.movie_name);
                 html += '<div class="series-card' + disabledClass + '">' +
-                    '<div class="series-cover">' + coverHtml + '</div>' +
+                    '<a href="' + movieBrowseUrl + '" title="Search in Browse" style="display:block;text-decoration:none;">' +
+                    '<div class="series-cover" style="position:relative;cursor:pointer;">' + coverHtml +
+                    '<div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.55);text-align:center;font-size:0.72em;color:#fff;padding:4px 0;opacity:0;transition:opacity 0.2s;" class="cover-search-hint">🔍 Browse</div>' +
+                    '</div></a>' +
                     '<div class="series-details">' +
                     '<div class="series-name">' + escapeHtml(m.canonical_name || m.movie_name) + '</div>' +
                     '<div class="series-meta">' +
@@ -1110,6 +1120,7 @@
                     '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleMovieEnabled(\'' + m.id + '\', this.checked)">' +
                     '<span class="toggle-slider"></span>' +
                     '</label>' +
+                    '<a href="' + movieBrowseUrl + '" class="btn btn-secondary btn-small" title="Find in Browse">🔍</a>' +
                     reWatchBtn +
                     '<button class="btn btn-secondary btn-small" onclick="openEditMovieModal(\'' + m.id + '\')">✏️ Edit</button>' +
                     '<button class="btn btn-danger btn-small" onclick="deleteMovieMonitor(\'' + m.id + '\', \'' + escapeAttr(m.canonical_name || m.movie_name) + '\')">🗑</button>' +

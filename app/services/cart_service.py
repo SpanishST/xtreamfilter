@@ -27,6 +27,7 @@ from app.models.xtream import PLAYER_PROFILES
 if TYPE_CHECKING:
     from app.services.config_service import ConfigService
     from app.services.http_client import HttpClientService
+    from app.services.jellyfin_service import JellyfinService
     from app.services.notification_service import NotificationService
     from app.services.xtream_service import XtreamService
 
@@ -426,11 +427,13 @@ class CartService:
         http_client: "HttpClientService",
         notification_service: "NotificationService",
         xtream_service: "XtreamService",
+        jellyfin_service: "JellyfinService | None" = None,
     ):
         self.config_service = config_service
         self.http_client = http_client
         self.notification_service = notification_service
         self.xtream_service = xtream_service
+        self.jellyfin_service = jellyfin_service
         self.db_path = os.path.join(config_service.data_dir, DB_NAME)
         # Late-bound by main.py after MonitorService is constructed
         self.monitor_service = None
@@ -1116,11 +1119,7 @@ class CartService:
                     move_ok = await self._move_temp_to_destination(item, temp_path, file_path)
                     if not move_ok:
                         continue
-                    # Write Jellyfin-compatible NFO metadata + poster
-                    await self._write_metadata(item, file_path)
-                    # Embed metadata directly into the video container (MKV/MP4)
-                    await self._embed_container_metadata(item, file_path)
-                    await self.notification_service.send_download_file_notification(item)
+                    await self._finalize_completed_download(item)
 
                 if pause_interval > 0 and pause_duration > 0:
                     self._download_progress["paused"] = True
@@ -1153,7 +1152,7 @@ class CartService:
         # Only send queue-complete notification if queue is actually empty
         remaining_queued = [i for i in self._download_cart if i.get("status") == "queued"]
         if not remaining_queued:
-            await self.notification_service.send_download_queue_complete_notification(self._download_cart)
+            await self._handle_download_queue_complete()
 
     async def _move_temp_to_destination(self, item: dict, temp_path: str, file_path: str) -> bool:
         item_name = item.get("name", "unknown")
@@ -1225,6 +1224,34 @@ class CartService:
         self.save_cart()
         logger.info(f"[MOVE] ✅ Completed: '{item_name}' -> {file_path} ({dest_size / 1024 / 1024:.1f} MB)")
         return True
+
+    async def _trigger_jellyfin_refresh(self, trigger: str) -> None:
+        if self.jellyfin_service is None:
+            return
+        try:
+            result = await self.jellyfin_service.trigger_library_refresh(trigger)
+        except Exception as exc:
+            logger.error(f"Jellyfin refresh failed after {trigger} trigger: {exc}")
+            return
+        if not result.get("ok", False) and not result.get("skipped", False):
+            logger.warning(
+                "Jellyfin refresh failed after %s trigger: %s",
+                trigger,
+                result.get("message", "Unknown error"),
+            )
+
+    async def _finalize_completed_download(self, item: dict) -> None:
+        file_path = item.get("file_path")
+        if file_path:
+            # Write Jellyfin-compatible metadata before requesting a library scan.
+            await self._write_metadata(item, file_path)
+            await self._embed_container_metadata(item, file_path)
+        await self.notification_service.send_download_file_notification(item)
+        await self._trigger_jellyfin_refresh("file")
+
+    async def _handle_download_queue_complete(self) -> None:
+        await self.notification_service.send_download_queue_complete_notification(self._download_cart)
+        await self._trigger_jellyfin_refresh("queue")
 
     # ------------------------------------------------------------------
     # Metadata / NFO writing (Jellyfin-compatible)

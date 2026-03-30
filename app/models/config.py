@@ -68,6 +68,17 @@ class TelegramConfig(BaseModel):
     chat_id: str = ""
 
 
+class JellyfinConfig(BaseModel):
+    """Jellyfin library refresh settings."""
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = False
+    base_url: str = ""
+    api_key: str = ""
+    trigger_file: bool = False
+    trigger_queue: bool = False
+
+
 class DaySchedule(BaseModel):
     """Download schedule for a single day of the week."""
     model_config = ConfigDict(extra="allow")
@@ -101,6 +112,7 @@ class Options(BaseModel):
     refresh_interval: int = 3600
     proxy_streams: bool = True
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    jellyfin: JellyfinConfig = Field(default_factory=JellyfinConfig)
     download_path: str = "/data/downloads"
     download_temp_path: str = "/data/downloads/.tmp"
     download_bandwidth_limit: int = 0

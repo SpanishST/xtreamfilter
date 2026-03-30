@@ -299,6 +299,8 @@ Telegram is used for:
 - monitoring notifications
 - optional download notifications
 
+Jellyfin can also be used to trigger a full library scan after successful downloads.
+
 ### Setup
 
 1. Create a bot with [@BotFather](https://t.me/BotFather)
@@ -314,6 +316,14 @@ Telegram is used for:
 | `/api/config/telegram` | `POST` | Update Telegram settings |
 | `/api/config/telegram/test` | `POST` | Send a basic test notification |
 | `/api/config/telegram/test-diff` | `POST` | Send a sample category-style notification |
+
+### Jellyfin API
+
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/api/config/jellyfin` | `GET` | Get Jellyfin settings with masked API key |
+| `/api/config/jellyfin` | `POST` | Update Jellyfin base URL, API key, and trigger settings |
+| `/api/config/jellyfin/test` | `POST` | Validate the configured Jellyfin connection |
 
 ## Download Manager
 
@@ -346,6 +356,7 @@ Item states include:
 - Resume move step when the temp-to-final move failed
 - Track current speed, ETA-related speed, and pause state
 - Optional Telegram notifications when queueing or completing downloads
+- Optional Jellyfin full-library refresh after completed downloads
 - Duplicate prevention for active queued/downloading entries
 - Crash recovery for interrupted download state
 
@@ -413,6 +424,8 @@ Example layout:
 | `/api/options/player_profiles` | `GET` | List supported player profiles |
 | `/api/options/download_notifications` | `GET`, `POST` | Get or set Telegram download notification options |
 | `/api/options/download_schedule` | `GET`, `POST` | Get or set the day-by-day download schedule |
+
+Jellyfin refresh settings are available from the main Settings page and use Jellyfin's server-wide `/Library/Refresh` API.
 
 ## Monitoring
 
@@ -589,6 +602,7 @@ Important areas:
 - `content_types`: global enablement of live, VOD, and series
 - `options.proxy_streams`: stream proxy toggle
 - `options.telegram`: Telegram credentials and enablement
+- `options.jellyfin`: Jellyfin base URL, API key, and refresh triggers
 - `options.download_path` and `options.download_temp_path`: file-system destinations
 - `options.download_*`: throttling, pause, profile, notifications, and scheduling
 
@@ -626,6 +640,13 @@ Example shape:
       "enabled": false,
       "bot_token": "",
       "chat_id": ""
+    },
+    "jellyfin": {
+      "enabled": false,
+      "base_url": "http://jellyfin:8096",
+      "api_key": "",
+      "trigger_file": true,
+      "trigger_queue": true
     },
     "download_path": "/data/downloads",
     "download_temp_path": "/data/downloads/.tmp"

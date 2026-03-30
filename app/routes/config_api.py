@@ -6,10 +6,11 @@ import os
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
-from app.dependencies import get_config_service, get_http_client, get_notification_service
+from app.dependencies import get_config_service, get_http_client, get_jellyfin_service, get_notification_service
 from app.models.xtream import PLAYER_PROFILES
 from app.services.config_service import ConfigService
 from app.services.http_client import HttpClientService
+from app.services.jellyfin_service import JellyfinService
 from app.services.notification_service import NotificationService
 
 router = APIRouter(tags=["config"])
@@ -163,6 +164,76 @@ async def test_telegram_diff_notification(
         return {"status": "ok", "message": msg}
     except Exception as e:
         return JSONResponse(status_code=500, content={"status": "error", "message": f"Failed to send: {e}"})
+
+
+# ---- Jellyfin ----
+
+@router.get("/api/config/jellyfin")
+async def get_jellyfin_config(jellyfin: JellyfinService = Depends(get_jellyfin_service)):
+    return jellyfin.get_masked_config()
+
+
+@router.post("/api/config/jellyfin")
+async def update_jellyfin_config(
+    request: Request,
+    cfg: ConfigService = Depends(get_config_service),
+    jellyfin: JellyfinService = Depends(get_jellyfin_service),
+):
+    data = await request.json()
+    if "options" not in cfg.config:
+        cfg.config["options"] = {}
+
+    current = cfg.get_jellyfin_config()
+    updated = current.copy()
+
+    if "enabled" in data:
+        updated["enabled"] = bool(data["enabled"])
+    if "trigger_file" in data:
+        updated["trigger_file"] = bool(data["trigger_file"])
+    if "trigger_queue" in data:
+        updated["trigger_queue"] = bool(data["trigger_queue"])
+    if "base_url" in data:
+        normalized_url = jellyfin.normalize_base_url(data.get("base_url"))
+        if normalized_url and not normalized_url.startswith(("http://", "https://")):
+            return JSONResponse(status_code=400, content={"status": "error", "message": "Base URL must start with http:// or https://"})
+        updated["base_url"] = normalized_url
+    if "api_key" in data:
+        api_key = str(data.get("api_key", "")).strip()
+        if api_key:
+            updated["api_key"] = api_key
+
+    cfg.config["options"]["jellyfin"] = updated
+    cfg.save()
+    return {"status": "ok", "message": "Jellyfin settings updated"}
+
+
+@router.post("/api/config/jellyfin/test")
+async def test_jellyfin_connection(
+    request: Request,
+    jellyfin: JellyfinService = Depends(get_jellyfin_service),
+):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    base_url = data.get("base_url") if "base_url" in data else None
+    api_key = data.get("api_key")
+    if isinstance(api_key, str) and not api_key.strip():
+        api_key = None
+
+    result = await jellyfin.test_connection(base_url=base_url, api_key=api_key)
+    if result.get("ok"):
+        return {
+            "status": "ok",
+            "message": result["message"],
+            "server_name": result.get("server_name"),
+            "version": result.get("version"),
+        }
+    return JSONResponse(
+        status_code=result.get("status_code", 500),
+        content={"status": "error", "message": result.get("message", "Jellyfin test failed")},
+    )
 
 
 # ---- Download paths ----

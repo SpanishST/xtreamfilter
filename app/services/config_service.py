@@ -1,6 +1,7 @@
 """Configuration service — loads, saves, migrates, and provides access to AppConfig."""
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -34,6 +35,29 @@ class ConfigService:
             "series": {"groups": [], "channels": []},
         }
 
+    @staticmethod
+    def _default_telegram_config() -> dict:
+        return {"enabled": False, "bot_token": "", "chat_id": ""}
+
+    @staticmethod
+    def _default_jellyfin_config() -> dict:
+        return {
+            "enabled": False,
+            "base_url": "",
+            "api_key": "",
+            "trigger_file": False,
+            "trigger_queue": False,
+        }
+
+    @classmethod
+    def _merge_defaults(cls, target: dict, defaults: dict) -> dict:
+        for key, default_value in defaults.items():
+            if key not in target:
+                target[key] = copy.deepcopy(default_value)
+            elif isinstance(default_value, dict) and isinstance(target.get(key), dict):
+                cls._merge_defaults(target[key], default_value)
+        return target
+
     @classmethod
     def _default_config(cls) -> dict:
         return {
@@ -46,7 +70,8 @@ class ConfigService:
                 "cache_ttl": 3600,
                 "refresh_interval": 3600,
                 "proxy_streams": True,
-                "telegram": {"enabled": False, "bot_token": "", "chat_id": ""},
+                "telegram": cls._default_telegram_config(),
+                "jellyfin": cls._default_jellyfin_config(),
             },
         }
 
@@ -63,10 +88,8 @@ class ConfigService:
                 with open(self.config_file) as f:
                     config = json.load(f)
 
-                # Ensure top-level keys exist
-                for key in default:
-                    if key not in config:
-                        config[key] = default[key]
+                # Ensure top-level and nested default keys exist
+                config = self._merge_defaults(config, default)
 
                 # Migrate old single-source → multi-source
                 if not config.get("sources") and config.get("xtream", {}).get("host"):
@@ -193,9 +216,18 @@ class ConfigService:
     refresh_interval = property(get_refresh_interval)
 
     def get_telegram_config(self) -> dict:
-        return self._config.get("options", {}).get(
-            "telegram", {"enabled": False, "bot_token": "", "chat_id": ""}
-        )
+        telegram = self._config.get("options", {}).get("telegram", {})
+        merged = self._default_telegram_config()
+        if isinstance(telegram, dict):
+            merged.update(telegram)
+        return merged
+
+    def get_jellyfin_config(self) -> dict:
+        jellyfin = self._config.get("options", {}).get("jellyfin", {})
+        merged = self._default_jellyfin_config()
+        if isinstance(jellyfin, dict):
+            merged.update(jellyfin)
+        return merged
 
     def get_download_path(self) -> str:
         return self._config.get("options", {}).get("download_path", "/data/downloads")

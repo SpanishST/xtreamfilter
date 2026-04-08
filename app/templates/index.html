@@ -805,6 +805,13 @@
                     <button type="button" class="btn btn-secondary btn-sm" onclick="openTelegramModal()">⚙️ Configure</button>
                     <span style="color: #666; font-size: 0.8em;">(Get notified when automatic categories find new items)</span>
                 </div>
+
+                <!-- Jellyfin Refresh -->
+                <div style="display: flex; align-items: center; gap: 15px; padding: 10px; background: rgba(255,255,255,0.03); border-radius: 8px;">
+                    <span style="color: #888;">🎞️ Jellyfin Refresh:</span>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="openJellyfinModal()">⚙️ Configure</button>
+                    <span style="color: #666; font-size: 0.8em;">(Trigger a Jellyfin library scan after successful downloads)</span>
+                </div>
                 
                 <!-- Refresh Interval -->
                 <div style="display: flex; align-items: center; gap: 15px; padding: 10px; background: rgba(255,255,255,0.03); border-radius: 8px; flex-wrap: wrap;">
@@ -1060,6 +1067,58 @@
                 </div>
                 
                 <div id="telegram-status" style="margin-top: 15px; display: none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Jellyfin Settings Modal -->
+    <div class="modal" id="jellyfin-modal">
+        <div class="modal-content" style="max-width: 560px;">
+            <div class="modal-header">
+                <h3>🎞️ Jellyfin Library Refresh</h3>
+                <button class="modal-close" onclick="closeJellyfinModal()">✕</button>
+            </div>
+            <div class="modal-body" style="padding: 20px;">
+                <p style="color: #aaa; margin-bottom: 20px;">
+                    Configure a Jellyfin server to trigger a full library scan after completed downloads.
+                </p>
+
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                        <input type="checkbox" id="jellyfin-enabled" style="width: auto;">
+                        <span>Enable Jellyfin library refresh</span>
+                    </label>
+                </div>
+
+                <div class="form-group">
+                    <label>Jellyfin Base URL</label>
+                    <input type="text" id="jellyfin-base-url" placeholder="http://jellyfin:8096">
+                    <small style="color: #888;">Use the base URL of your Jellyfin server, including http:// or https://</small>
+                </div>
+
+                <div class="form-group">
+                    <label>API Key</label>
+                    <input type="password" id="jellyfin-api-key" placeholder="Paste a Jellyfin API key">
+                    <small style="color: #888;">Leave this blank when editing other fields to keep the current saved key.</small>
+                </div>
+
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; margin-bottom: 10px;">
+                        <input type="checkbox" id="jellyfin-trigger-file" style="width: auto;">
+                        <span>Trigger after each completed file</span>
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                        <input type="checkbox" id="jellyfin-trigger-queue" style="width: auto;">
+                        <span>Trigger when the whole queue finishes</span>
+                    </label>
+                </div>
+
+                <div style="display: flex; gap: 10px; margin-top: 20px;">
+                    <button class="btn btn-secondary" onclick="testJellyfinConnection()">🧪 Test</button>
+                    <button class="btn btn-primary" onclick="saveJellyfinSettings()">💾 Save</button>
+                </div>
+
+                <div id="jellyfin-status" style="margin-top: 15px; display: none;"></div>
             </div>
         </div>
     </div>
@@ -2150,6 +2209,7 @@
             if (e.key === 'Escape') {
                 closeBrowser();
                 closeTelegramModal();
+                closeJellyfinModal();
             }
         });
         
@@ -2163,6 +2223,12 @@
         document.getElementById('telegram-modal').addEventListener('click', function(e) {
             if (e.target === this) {
                 closeTelegramModal();
+            }
+        });
+
+        document.getElementById('jellyfin-modal').addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeJellyfinModal();
             }
         });
         
@@ -2277,6 +2343,118 @@
             
             statusEl.textContent = message;
         }
+
+        // ============================================
+        // JELLYFIN REFRESH
+        // ============================================
+
+        function openJellyfinModal() {
+            document.getElementById('jellyfin-modal').classList.add('active');
+            loadJellyfinSettings();
+        }
+
+        function closeJellyfinModal() {
+            document.getElementById('jellyfin-modal').classList.remove('active');
+            document.getElementById('jellyfin-status').style.display = 'none';
+        }
+
+        function loadJellyfinSettings() {
+            fetch('/api/config/jellyfin')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('jellyfin-enabled').checked = data.enabled || false;
+                    document.getElementById('jellyfin-base-url').value = data.base_url || '';
+                    document.getElementById('jellyfin-trigger-file').checked = data.trigger_file || false;
+                    document.getElementById('jellyfin-trigger-queue').checked = data.trigger_queue || false;
+                    const keyField = document.getElementById('jellyfin-api-key');
+                    keyField.value = '';
+                    keyField.placeholder = data.api_key_masked ? `Current: ${data.api_key_masked}` : 'Paste a Jellyfin API key';
+                })
+                .catch(() => {});
+        }
+
+        function saveJellyfinSettings() {
+            const payload = {
+                enabled: document.getElementById('jellyfin-enabled').checked,
+                base_url: document.getElementById('jellyfin-base-url').value.trim(),
+                trigger_file: document.getElementById('jellyfin-trigger-file').checked,
+                trigger_queue: document.getElementById('jellyfin-trigger-queue').checked,
+            };
+
+            const apiKey = document.getElementById('jellyfin-api-key').value;
+            if (apiKey) {
+                payload.api_key = apiKey;
+            }
+
+            fetch('/api/config/jellyfin', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            })
+            .then(r => r.json().then(data => ({status: r.status, data})))
+            .then(({status, data}) => {
+                if (status === 200) {
+                    showJellyfinStatus('success', data.message || 'Jellyfin settings saved');
+                    document.getElementById('jellyfin-api-key').value = '';
+                    loadJellyfinSettings();
+                } else {
+                    showJellyfinStatus('error', data.message || 'Failed to save Jellyfin settings');
+                }
+            })
+            .catch(() => {
+                showJellyfinStatus('error', 'Failed to save Jellyfin settings');
+            });
+        }
+
+        function testJellyfinConnection() {
+            showJellyfinStatus('info', 'Testing Jellyfin connection...');
+
+            const payload = {
+                base_url: document.getElementById('jellyfin-base-url').value.trim(),
+            };
+            const apiKey = document.getElementById('jellyfin-api-key').value;
+            if (apiKey) {
+                payload.api_key = apiKey;
+            }
+
+            fetch('/api/config/jellyfin/test', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            })
+            .then(r => r.json().then(data => ({status: r.status, data})))
+            .then(({status, data}) => {
+                if (status === 200) {
+                    showJellyfinStatus('success', data.message || 'Connected to Jellyfin');
+                } else {
+                    showJellyfinStatus('error', data.message || 'Failed to connect to Jellyfin');
+                }
+            })
+            .catch(() => {
+                showJellyfinStatus('error', 'Failed to connect to Jellyfin');
+            });
+        }
+
+        function showJellyfinStatus(type, message) {
+            const statusEl = document.getElementById('jellyfin-status');
+            statusEl.style.display = 'block';
+            statusEl.style.padding = '10px';
+            statusEl.style.borderRadius = '4px';
+
+            if (type === 'success') {
+                statusEl.style.background = 'rgba(34, 197, 94, 0.2)';
+                statusEl.style.color = '#22c55e';
+            } else if (type === 'error') {
+                statusEl.style.background = 'rgba(239, 68, 68, 0.2)';
+                statusEl.style.color = '#ef4444';
+            } else {
+                statusEl.style.background = 'rgba(59, 130, 246, 0.2)';
+                statusEl.style.color = '#3b82f6';
+            }
+
+            statusEl.textContent = message;
+        }
+
         function checkVersion() {
             fetch('/api/version').then(r => r.json()).then(data => {
                 const badge = document.getElementById('version-badge');

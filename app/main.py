@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request
 
 from app.services.config_service import ConfigService
 from app.services.http_client import HttpClientService
+from app.services.jellyfin_service import JellyfinService
 from app.services.cache_service import CacheService
 from app.services.epg_service import EpgService
 from app.services.xtream_service import XtreamService
@@ -167,9 +168,11 @@ async def lifespan(app: FastAPI):
 
     notif = NotificationService(cfg, http)
 
+    jellyfin = JellyfinService(cfg, http)
+
     cat = CategoryService(cfg, cache, notif)
 
-    cart = CartService(cfg, http, notif, xtream)
+    cart = CartService(cfg, http, notif, xtream, jellyfin)
     cart.load_cart()
     # Recover stuck downloads
     recovered = 0
@@ -197,6 +200,7 @@ async def lifespan(app: FastAPI):
     app.state.epg_service = epg_svc
     app.state.xtream_service = xtream
     app.state.notification_service = notif
+    app.state.jellyfin_service = jellyfin
     app.state.category_service = cat
     app.state.cart_service = cart
     app.state.monitor_service = monitor

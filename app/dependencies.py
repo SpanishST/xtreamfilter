@@ -9,6 +9,7 @@ from app.services.category_service import CategoryService
 from app.services.config_service import ConfigService
 from app.services.epg_service import EpgService
 from app.services.http_client import HttpClientService
+from app.services.jellyfin_service import JellyfinService
 from app.services.m3u_service import M3uService
 from app.services.monitor_service import MonitorService
 from app.services.notification_service import NotificationService
@@ -37,6 +38,10 @@ def get_xtream_service(request: Request) -> XtreamService:
 
 def get_notification_service(request: Request) -> NotificationService:
     return request.app.state.notification_service
+
+
+def get_jellyfin_service(request: Request) -> JellyfinService:
+    return request.app.state.jellyfin_service
 
 
 def get_category_service(request: Request) -> CategoryService:

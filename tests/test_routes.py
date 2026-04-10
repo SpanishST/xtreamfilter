@@ -35,10 +35,10 @@ def _build_app(data_dir: str):
     cfg.load()
     init_db(os.path.join(data_dir, DB_NAME))
     http = HttpClientService()
-    cache = CacheService(cfg, http)
+    notif = NotificationService(cfg, http)
+    cache = CacheService(cfg, http, notif)
     epg_svc = EpgService(cfg, http, cache)
     xtream = XtreamService(cfg, cache, http)
-    notif = NotificationService(cfg, http)
     jellyfin = JellyfinService(cfg, http)
     cat = CategoryService(cfg, cache, notif)
     cart = CartService(cfg, http, notif, xtream, jellyfin)
@@ -451,6 +451,101 @@ def test_cache_status(client):
     assert r.status_code == 200
     data = r.json()
     assert "counts" in data
+
+
+def test_cache_status_exposes_refresh_report(client):
+    client.app.state.cache_service.save_refresh_progress(
+        {
+            "in_progress": False,
+            "status": "partial",
+            "current_source": 1,
+            "total_sources": 2,
+            "current_source_name": "Source A",
+            "current_step": "Complete with warnings",
+            "percent": 100,
+            "started_at": "2026-04-10T09:00:00",
+            "finished_at": "2026-04-10T09:01:00",
+            "last_error": "Source B: VOD streams failed with HTTP 400",
+            "source_results": [
+                {
+                    "source_id": "src-a",
+                    "source_name": "Source A",
+                    "status": "partial",
+                    "last_refresh": "2026-04-10T09:01:00",
+                    "counts": {
+                        "live_categories": 1,
+                        "vod_categories": 1,
+                        "series_categories": 0,
+                        "live_streams": 12,
+                        "vod_streams": 5,
+                        "series": 0,
+                    },
+                    "errors": [
+                        {
+                            "key": "vod_streams",
+                            "label": "VOD streams",
+                            "type": "http_error",
+                            "status_code": 400,
+                            "message": "HTTP 400 while fetching get_vod_streams",
+                            "preserved_existing": True,
+                        }
+                    ],
+                    "steps": [
+                        {
+                            "key": "live_categories",
+                            "label": "Live categories",
+                            "status": "success",
+                            "count": 1,
+                            "duration_ms": 10,
+                            "preserved_existing": False,
+                            "error": None,
+                        },
+                        {
+                            "key": "vod_streams",
+                            "label": "VOD streams",
+                            "status": "failed",
+                            "count": 5,
+                            "duration_ms": 25,
+                            "preserved_existing": True,
+                            "error": {
+                                "type": "http_error",
+                                "status_code": 400,
+                                "message": "HTTP 400 while fetching get_vod_streams",
+                            },
+                        },
+                    ],
+                }
+            ],
+            "summary": {
+                "total_sources": 2,
+                "successful_sources": 0,
+                "partial_sources": 1,
+                "failed_sources": 1,
+                "pending_sources": 0,
+                "running_sources": 0,
+                "processed_steps": 2,
+                "successful_steps": 1,
+                "failed_steps": 1,
+                "preserved_steps": 1,
+                "total_steps": 12,
+                "live_categories": 1,
+                "vod_categories": 1,
+                "series_categories": 0,
+                "live_streams": 12,
+                "vod_streams": 5,
+                "series": 0,
+            },
+        }
+    )
+
+    r = client.get("/api/cache/status")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["last_refresh_outcome"] == "partial"
+    assert data["last_refresh_summary"]["failed_sources"] == 1
+    assert data["refresh_progress"]["last_error"] == "Source B: VOD streams failed with HTTP 400"
+    assert data["refresh_progress"]["source_results"][0]["errors"][0]["status_code"] == 400
+    assert data["refresh_progress"]["source_results"][0]["steps"][1]["preserved_existing"] is True
 
 
 def test_cache_clear(client):

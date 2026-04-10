@@ -53,6 +53,8 @@ async def cache_status(cache: CacheService = Depends(get_cache_service)):
         "last_refresh": last_refresh,
         "next_refresh": next_refresh,
         "cache_valid": cache_valid,
+        "last_refresh_outcome": refresh_progress.get("status", "idle"),
+        "last_refresh_summary": refresh_progress.get("summary", {}),
         "refresh_in_progress": refresh_in_progress,
         "refresh_progress": refresh_progress,
         "ttl_seconds": ttl,

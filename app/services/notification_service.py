@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import hashlib
 import json
 import logging
@@ -161,6 +162,17 @@ class NotificationService:
             {"name": g["name"], "cover": g["cover"], "sources": g["sources"], "count": len(g["sources"])}
             for g in groups
         ]
+
+    @staticmethod
+    def _escape_html(value) -> str:
+        return html.escape(str(value or ""), quote=True)
+
+    @staticmethod
+    def _cache_refresh_error_reason(error: dict) -> str:
+        status_code = error.get("status_code")
+        if status_code:
+            return f"HTTP {status_code}"
+        return str(error.get("message") or error.get("type") or "Unknown error")
 
     @staticmethod
     def _format_grouped_item_line(grouped_item: dict) -> str:
@@ -427,6 +439,106 @@ class NotificationService:
             logger.info(f"Telegram movie monitor notification sent for '{movie_name}'")
         except Exception as e:
             logger.error(f"Failed to send movie monitor notification: {e}")
+
+    # ------------------------------------------------------------------
+    # Cache refresh notifications
+    # ------------------------------------------------------------------
+
+    async def send_cache_refresh_failure_notification(self, refresh_progress: dict) -> None:
+        creds = self._get_telegram_credentials()
+        if not creds:
+            return
+
+        status = refresh_progress.get("status")
+        if status not in {"partial", "failed"}:
+            return
+
+        source_results = refresh_progress.get("source_results") or []
+        affected_sources = [
+            source
+            for source in source_results
+            if source.get("status") in {"partial", "failed"} or source.get("errors")
+        ]
+        if not affected_sources:
+            return
+
+        summary = refresh_progress.get("summary") or {}
+        dedupe_payload = {
+            "status": status,
+            "sources": [
+                {
+                    "source_id": source.get("source_id", ""),
+                    "status": source.get("status", "failed"),
+                    "errors": [
+                        {
+                            "key": error.get("key", ""),
+                            "status_code": error.get("status_code"),
+                            "message": error.get("message", ""),
+                            "type": error.get("type", ""),
+                            "preserved_existing": bool(error.get("preserved_existing", False)),
+                        }
+                        for error in (source.get("errors") or [])
+                    ],
+                }
+                for source in affected_sources
+            ],
+        }
+        if not await self._should_send_deduped("cache_refresh_failure", dedupe_payload, ttl_seconds=900):
+            logger.info("Skipped duplicate cache refresh failure notification")
+            return
+
+        bot_token, chat_id = creds
+        headline = "⚠️ <b>Cache refresh completed with warnings</b>" if status == "partial" else "❌ <b>Cache refresh failed</b>"
+        total_sources = summary.get("total_sources") or refresh_progress.get("total_sources") or len(source_results)
+        successful_sources = summary.get("successful_sources", 0)
+        partial_sources = summary.get("partial_sources", 0)
+        failed_sources = summary.get("failed_sources", 0)
+        preserved_steps = summary.get("preserved_steps", 0)
+
+        text = headline + "\n\n"
+        text += f"Sources processed: {total_sources}\n"
+        text += f"✅ Successful: {successful_sources}\n"
+        if partial_sources:
+            text += f"⚠️ Partial: {partial_sources}\n"
+        if failed_sources:
+            text += f"❌ Failed: {failed_sources}\n"
+        if preserved_steps:
+            text += f"🛟 Preserved stale steps: {preserved_steps}\n"
+
+        if refresh_progress.get("last_error"):
+            text += f"\nLast error: {self._escape_html(refresh_progress['last_error'])}\n"
+
+        text += "\n<b>Affected sources:</b>\n"
+        for source in affected_sources[:8]:
+            source_name = self._escape_html(source.get("source_name") or source.get("source_id") or "Unknown source")
+            source_status = source.get("status", "failed")
+            source_icon = "⚠️" if source_status == "partial" else "❌"
+            text += f"{source_icon} <b>{source_name}</b>\n"
+            errors = source.get("errors") or []
+            if not errors:
+                text += "  • No detailed step errors available\n"
+            for error in errors[:3]:
+                label = self._escape_html(error.get("label") or error.get("key") or "Step")
+                reason = self._escape_html(self._cache_refresh_error_reason(error))
+                stale_note = " (kept previous data)" if error.get("preserved_existing") else ""
+                text += f"  • {label}: {reason}{stale_note}\n"
+            if len(errors) > 3:
+                text += f"  • ... and {len(errors) - 3} more issue(s)\n"
+            text += "\n"
+
+        if len(affected_sources) > 8:
+            text += f"... and {len(affected_sources) - 8} more source(s)\n"
+
+        if len(text) > 4000:
+            text = text[:3990] + "\n..."
+
+        try:
+            client = await self.http_client.get_client()
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+            logger.info("Telegram cache refresh failure notification sent")
+        except Exception as e:
+            logger.error(f"Failed to send cache refresh failure notification: {e}")
 
     # ------------------------------------------------------------------
     # Test notification

@@ -217,6 +217,241 @@
             color: #888;
             margin-top: 5px;
         }
+
+        .refresh-feedback {
+            display: none;
+            margin-top: 15px;
+            padding: 16px;
+            border-radius: 12px;
+            background: rgba(0, 0, 0, 0.22);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .refresh-feedback.active {
+            display: block;
+        }
+
+        .refresh-feedback-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .refresh-feedback-title {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 600;
+            color: #fff;
+        }
+
+        .refresh-feedback-time {
+            font-size: 0.8em;
+            color: #888;
+        }
+
+        .refresh-feedback-summary {
+            margin-top: 12px;
+            color: #ccc;
+            font-size: 0.9em;
+            line-height: 1.5;
+        }
+
+        .refresh-feedback-error {
+            display: none;
+            margin-top: 12px;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 71, 87, 0.35);
+            background: rgba(255, 71, 87, 0.12);
+            color: #ff9aa5;
+            font-size: 0.9em;
+        }
+
+        .refresh-source-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .refresh-source-card {
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            overflow: hidden;
+        }
+
+        .refresh-source-card summary {
+            list-style: none;
+            cursor: pointer;
+            padding: 12px 14px;
+        }
+
+        .refresh-source-card summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .refresh-source-card[open] summary {
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .refresh-source-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .refresh-source-name {
+            color: #fff;
+            font-weight: 600;
+        }
+
+        .refresh-source-meta {
+            margin-top: 5px;
+            color: #888;
+            font-size: 0.8em;
+        }
+
+        .refresh-source-counts {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .refresh-count-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 8px;
+            border-radius: 999px;
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            color: #bfefff;
+            font-size: 0.78em;
+        }
+
+        .refresh-source-body {
+            padding: 12px 14px 14px;
+        }
+
+        .refresh-error-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .refresh-error-item {
+            padding: 10px 12px;
+            border-radius: 8px;
+            background: rgba(255, 71, 87, 0.08);
+            border: 1px solid rgba(255, 71, 87, 0.25);
+            color: #ffd5db;
+            font-size: 0.85em;
+        }
+
+        .refresh-error-note {
+            margin-top: 4px;
+            color: #ffb5bf;
+            font-size: 0.8em;
+        }
+
+        .refresh-step-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 8px;
+        }
+
+        .refresh-step-item {
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .refresh-step-success {
+            border-color: rgba(46, 213, 115, 0.25);
+            background: rgba(46, 213, 115, 0.08);
+        }
+
+        .refresh-step-failed {
+            border-color: rgba(255, 71, 87, 0.25);
+            background: rgba(255, 71, 87, 0.08);
+        }
+
+        .refresh-step-running {
+            border-color: rgba(0, 212, 255, 0.25);
+            background: rgba(0, 212, 255, 0.08);
+        }
+
+        .refresh-step-label {
+            color: #fff;
+            font-size: 0.84em;
+            font-weight: 600;
+        }
+
+        .refresh-step-meta {
+            margin-top: 6px;
+            color: #b0b0b0;
+            font-size: 0.78em;
+        }
+
+        .refresh-step-error {
+            margin-top: 6px;
+            color: #ff9aa5;
+            font-size: 0.78em;
+            line-height: 1.4;
+        }
+
+        .refresh-status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 10px;
+            border-radius: 999px;
+            font-size: 0.78em;
+            font-weight: 700;
+            border: 1px solid transparent;
+            white-space: nowrap;
+        }
+
+        .refresh-status-running {
+            background: rgba(0, 212, 255, 0.12);
+            border-color: rgba(0, 212, 255, 0.28);
+            color: #79e6ff;
+        }
+
+        .refresh-status-success {
+            background: rgba(46, 213, 115, 0.12);
+            border-color: rgba(46, 213, 115, 0.28);
+            color: #7ff0aa;
+        }
+
+        .refresh-status-partial {
+            background: rgba(255, 193, 7, 0.12);
+            border-color: rgba(255, 193, 7, 0.28);
+            color: #ffd866;
+        }
+
+        .refresh-status-failed {
+            background: rgba(255, 71, 87, 0.12);
+            border-color: rgba(255, 71, 87, 0.28);
+            color: #ff9aa5;
+        }
+
+        .refresh-status-cancelled,
+        .refresh-status-pending,
+        .refresh-status-idle {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: rgba(255, 255, 255, 0.16);
+            color: #c7c7c7;
+        }
         
         /* Filter Builder */
         .filter-builder {
@@ -737,6 +972,19 @@
                     Source <span id="refresh-progress-source">0</span> of <span id="refresh-progress-total">0</span>
                 </div>
             </div>
+
+            <div id="refresh-feedback" class="refresh-feedback">
+                <div class="refresh-feedback-header">
+                    <div class="refresh-feedback-title">
+                        <span id="refresh-feedback-title">Last refresh</span>
+                        <span id="refresh-feedback-status" class="refresh-status-pill refresh-status-idle">Idle</span>
+                    </div>
+                    <div id="refresh-feedback-time" class="refresh-feedback-time"></div>
+                </div>
+                <div id="refresh-feedback-summary" class="refresh-feedback-summary"></div>
+                <div id="refresh-feedback-error" class="refresh-feedback-error"></div>
+                <div id="refresh-source-list" class="refresh-source-list"></div>
+            </div>
             
             <div style="margin-top: 15px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
                 <span style="color: #888; font-size: 0.85em;">Last refresh: <span id="cache-last-refresh">Never</span></span>
@@ -1198,6 +1446,7 @@
         let filtersData = { live: {groups: [], channels: []}, vod: {groups: [], channels: []}, series: {groups: [], channels: []} };
         // Track refresh polling interval
         let refreshPollInterval = null;
+        let refreshPollIntervalMs = null;
         
         // Load sources, filters and cache status on page load
         loadSources();
@@ -1514,17 +1763,277 @@
                 setTimeout(() => btn.textContent = 'Copy', 2000);
             });
         }
+
+        function parseJsonResponse(response) {
+            return response.json()
+                .catch(() => ({}))
+                .then(data => {
+                    if (!response.ok) {
+                        throw new Error(data.message || `Request failed (${response.status})`);
+                    }
+                    return data;
+                });
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function formatRelativeTime(value) {
+            if (!value) return 'Never';
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) return 'Unknown';
+            const diffMinutes = Math.floor((Date.now() - date.getTime()) / 60000);
+            if (diffMinutes < 1) return 'Just now';
+            if (diffMinutes < 60) return `${diffMinutes} min ago`;
+            const diffHours = Math.floor(diffMinutes / 60);
+            if (diffHours < 24) return `${diffHours}h ${diffMinutes % 60}m ago`;
+            const diffDays = Math.floor(diffHours / 24);
+            return `${diffDays}d ${diffHours % 24}h ago`;
+        }
+
+        function formatDurationMs(value) {
+            if (value === null || value === undefined) return '';
+            if (value >= 1000) {
+                return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}s`;
+            }
+            return `${value}ms`;
+        }
+
+        function setRefreshPolling(intervalMs) {
+            if (refreshPollInterval && refreshPollIntervalMs === intervalMs) {
+                return;
+            }
+            if (refreshPollInterval) {
+                clearInterval(refreshPollInterval);
+            }
+            refreshPollInterval = setInterval(loadCacheStatus, intervalMs);
+            refreshPollIntervalMs = intervalMs;
+        }
+
+        function clearRefreshPolling() {
+            if (refreshPollInterval) {
+                clearInterval(refreshPollInterval);
+                refreshPollInterval = null;
+            }
+            refreshPollIntervalMs = null;
+        }
+
+        function getRefreshStatusMeta(status) {
+            switch (status) {
+                case 'running':
+                    return { label: 'Refreshing', icon: '🔄', className: 'refresh-status-running' };
+                case 'success':
+                    return { label: 'Successful', icon: '✅', className: 'refresh-status-success' };
+                case 'partial':
+                    return { label: 'Warnings', icon: '⚠️', className: 'refresh-status-partial' };
+                case 'failed':
+                    return { label: 'Failed', icon: '❌', className: 'refresh-status-failed' };
+                case 'cancelled':
+                    return { label: 'Cancelled', icon: '⏹️', className: 'refresh-status-cancelled' };
+                case 'pending':
+                    return { label: 'Pending', icon: '⏳', className: 'refresh-status-pending' };
+                default:
+                    return { label: 'Idle', icon: '⏳', className: 'refresh-status-idle' };
+            }
+        }
+
+        function getRefreshCountLabel(key) {
+            return {
+                live_categories: 'Live cats',
+                vod_categories: 'VOD cats',
+                series_categories: 'Series cats',
+                live_streams: 'Live',
+                vod_streams: 'VOD',
+                series: 'Series'
+            }[key] || key;
+        }
+
+        function buildRefreshSummaryText(progress) {
+            const summary = progress.summary || {};
+            const totalSources = summary.total_sources || progress.total_sources || 0;
+            const parts = [];
+            const contentParts = [];
+            const lead = {
+                running: 'Refresh is running.',
+                success: 'Refresh completed successfully.',
+                partial: 'Refresh completed with warnings.',
+                failed: 'Refresh failed.',
+                cancelled: 'Refresh was cancelled.'
+            }[progress.status] || '';
+
+            if (progress.in_progress) {
+                const totalSteps = summary.total_steps || (totalSources * 6);
+                parts.push(`${summary.processed_steps || 0}/${totalSteps || 0} steps finished`);
+                if (totalSources) {
+                    parts.push(`source ${Math.min(progress.current_source || 0, totalSources)} of ${totalSources}`);
+                }
+            } else if (totalSources) {
+                parts.push(`${summary.successful_sources || 0} successful`);
+                if (summary.partial_sources) parts.push(`${summary.partial_sources} with warnings`);
+                if (summary.failed_sources) parts.push(`${summary.failed_sources} failed`);
+            }
+
+            if (summary.live_streams) contentParts.push(`${summary.live_streams} live`);
+            if (summary.vod_streams) contentParts.push(`${summary.vod_streams} vod`);
+            if (summary.series) contentParts.push(`${summary.series} series`);
+            if (summary.preserved_steps) contentParts.push(`${summary.preserved_steps} stale step${summary.preserved_steps === 1 ? '' : 's'} kept`);
+
+            return [lead, parts.join(' • '), contentParts.join(' • ')].filter(Boolean).join(' ');
+        }
+
+        function showRefreshRequestError(message) {
+            const errorEl = document.getElementById('refresh-feedback-error');
+            const container = document.getElementById('refresh-feedback');
+            if (!message) {
+                errorEl.style.display = 'none';
+                errorEl.textContent = '';
+                return;
+            }
+            container.style.display = 'block';
+            container.classList.add('active');
+            errorEl.style.display = 'block';
+            errorEl.textContent = message;
+        }
+
+        function renderRefreshDetails(progress) {
+            const container = document.getElementById('refresh-feedback');
+            const titleEl = document.getElementById('refresh-feedback-title');
+            const statusEl = document.getElementById('refresh-feedback-status');
+            const timeEl = document.getElementById('refresh-feedback-time');
+            const summaryEl = document.getElementById('refresh-feedback-summary');
+            const errorEl = document.getElementById('refresh-feedback-error');
+            const listEl = document.getElementById('refresh-source-list');
+            const sourceResults = Array.isArray(progress.source_results) ? progress.source_results : [];
+            const shouldShow = Boolean(progress.in_progress || progress.last_error || sourceResults.length || progress.finished_at);
+
+            if (!shouldShow) {
+                container.classList.remove('active');
+                container.style.display = 'none';
+                listEl.innerHTML = '';
+                return;
+            }
+
+            const status = progress.in_progress ? 'running' : (progress.status || 'idle');
+            const meta = getRefreshStatusMeta(status);
+            container.style.display = 'block';
+            container.classList.add('active');
+            titleEl.textContent = progress.in_progress ? 'Refresh in progress' : 'Last refresh';
+            statusEl.className = `refresh-status-pill ${meta.className}`;
+            statusEl.textContent = `${meta.icon} ${meta.label}`;
+            timeEl.textContent = progress.in_progress
+                ? `Started ${formatRelativeTime(progress.started_at)}`
+                : (progress.finished_at ? `Finished ${formatRelativeTime(progress.finished_at)}` : '');
+            summaryEl.textContent = buildRefreshSummaryText(progress);
+
+            if (progress.last_error && (progress.status === 'failed' || progress.status === 'partial' || progress.in_progress)) {
+                errorEl.style.display = 'block';
+                errorEl.textContent = progress.last_error;
+            } else if (!errorEl.textContent) {
+                errorEl.style.display = 'none';
+            }
+
+            if (!sourceResults.length) {
+                listEl.innerHTML = '';
+                return;
+            }
+
+            listEl.innerHTML = sourceResults.map(source => {
+                const sourceMeta = getRefreshStatusMeta(source.status || 'pending');
+                const counts = source.counts || {};
+                const errors = Array.isArray(source.errors) ? source.errors : [];
+                const countHtml = Object.entries(counts)
+                    .filter(([, value]) => Number(value) > 0)
+                    .map(([key, value]) => `
+                        <span class="refresh-count-chip">${escapeHtml(getRefreshCountLabel(key))}: <strong>${Number(value)}</strong></span>
+                    `)
+                    .join('');
+                const metaParts = [];
+                if (source.last_refresh) {
+                    metaParts.push(`Last source refresh ${formatRelativeTime(source.last_refresh)}`);
+                }
+                if (errors.length) {
+                    metaParts.push(`${errors.length} issue${errors.length === 1 ? '' : 's'}`);
+                }
+
+                const errorHtml = errors.length ? `
+                    <div class="refresh-error-list">
+                        ${errors.map(error => {
+                            const reason = error.status_code
+                                ? `HTTP ${error.status_code}`
+                                : (error.message || error.type || 'Unknown error');
+                            return `
+                                <div class="refresh-error-item">
+                                    <strong>${escapeHtml(error.label || error.key || 'Step')}</strong>: ${escapeHtml(reason)}
+                                    <div class="refresh-error-note">${error.preserved_existing ? 'Previous cached data kept for this step.' : 'No cached fallback was available for this step.'}</div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                ` : '';
+
+                const stepsHtml = (Array.isArray(source.steps) ? source.steps : []).map(step => {
+                    const stepMeta = getRefreshStatusMeta(step.status || 'pending');
+                    const stepBits = [];
+                    if (step.status === 'success' || step.status === 'failed') {
+                        stepBits.push(`${Number(step.count || 0)} item${Number(step.count || 0) === 1 ? '' : 's'}`);
+                    }
+                    const duration = formatDurationMs(step.duration_ms);
+                    if (duration) stepBits.push(duration);
+                    if (step.preserved_existing) stepBits.push('kept previous data');
+                    const stepReason = step.error
+                        ? (step.error.status_code ? `HTTP ${step.error.status_code}` : (step.error.message || step.error.type || 'Unknown error'))
+                        : '';
+                    return `
+                        <div class="refresh-step-item refresh-step-${escapeHtml(step.status || 'pending')}">
+                            <div class="refresh-step-label">${escapeHtml(step.label || step.key || 'Step')}</div>
+                            <div class="refresh-step-meta">${escapeHtml(stepBits.join(' • ') || stepMeta.label)}</div>
+                            ${stepReason ? `<div class="refresh-step-error">${escapeHtml(stepReason)}</div>` : ''}
+                        </div>
+                    `;
+                }).join('');
+
+                const openAttr = ['running', 'failed', 'partial'].includes(source.status) ? 'open' : '';
+                return `
+                    <details class="refresh-source-card" ${openAttr}>
+                        <summary>
+                            <div class="refresh-source-row">
+                                <div>
+                                    <div class="refresh-source-name">${escapeHtml(source.source_name || source.source_id || 'Unknown source')}</div>
+                                    <div class="refresh-source-meta">${escapeHtml(metaParts.join(' • ') || 'Awaiting refresh')}</div>
+                                </div>
+                                <span class="refresh-status-pill ${sourceMeta.className}">${sourceMeta.icon} ${escapeHtml(sourceMeta.label)}</span>
+                            </div>
+                            ${countHtml ? `<div class="refresh-source-counts">${countHtml}</div>` : ''}
+                        </summary>
+                        <div class="refresh-source-body">
+                            ${errorHtml}
+                            <div class="refresh-step-list">${stepsHtml}</div>
+                        </div>
+                    </details>
+                `;
+            }).join('');
+        }
         
         function loadCacheStatus() {
-            fetch('/api/cache/status')
-                .then(r => r.json())
+            return fetch('/api/cache/status')
+                .then(parseJsonResponse)
                 .then(data => {
+                    showRefreshRequestError('');
                     document.getElementById('cache-live').textContent = data.counts.live_streams || 0;
                     document.getElementById('cache-vod').textContent = data.counts.vod_streams || 0;
                     document.getElementById('cache-series').textContent = data.counts.series || 0;
                     document.getElementById('cache-ttl').textContent = data.ttl_seconds || 3600;
                     
                     const progressContainer = document.getElementById('refresh-progress-container');
+                    const progress = data.refresh_progress || {};
+                    const outcome = data.last_refresh_outcome || progress.status || 'idle';
+                    renderRefreshDetails(progress);
                     
                     // Status indicator
                     let status = '⏳';
@@ -1538,7 +2047,6 @@
                         
                         // Show and update progress bar
                         progressContainer.style.display = 'block';
-                        const progress = data.refresh_progress || {};
                         const percent = Math.min(progress.percent || 0, 100);
                         document.getElementById('refresh-progress-bar').style.width = percent + '%';
                         document.getElementById('refresh-progress-percent').textContent = percent + '%';
@@ -1546,10 +2054,27 @@
                         document.getElementById('refresh-progress-source').textContent = progress.current_source || 0;
                         document.getElementById('refresh-progress-total').textContent = progress.total_sources || 0;
                         
-                        // Start fast polling if not already running
-                        if (!refreshPollInterval) {
-                            refreshPollInterval = setInterval(loadCacheStatus, 1000);
+                        setRefreshPolling(1000);
+                    } else if (outcome === 'partial') {
+                        status = '⚠️';
+                        statusTitle = 'Last refresh completed with warnings';
+                        document.getElementById('refresh-cache-btn').disabled = false;
+                        document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                        document.getElementById('cancel-refresh-btn').style.display = 'none';
+                        progressContainer.style.display = 'none';
+                        if (data.cache_valid) {
+                            clearRefreshPolling();
+                        } else {
+                            setRefreshPolling(5000);
                         }
+                    } else if (outcome === 'failed') {
+                        status = '❌';
+                        statusTitle = 'Last refresh failed';
+                        document.getElementById('refresh-cache-btn').disabled = false;
+                        document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                        document.getElementById('cancel-refresh-btn').style.display = 'none';
+                        progressContainer.style.display = 'none';
+                        setRefreshPolling(5000);
                     } else if (data.cache_valid) {
                         status = '✅';
                         statusTitle = 'Cache is fresh';
@@ -1557,11 +2082,7 @@
                         document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
                         document.getElementById('cancel-refresh-btn').style.display = 'none';
                         progressContainer.style.display = 'none';
-                        // Stop fast polling
-                        if (refreshPollInterval) {
-                            clearInterval(refreshPollInterval);
-                            refreshPollInterval = null;
-                        }
+                        clearRefreshPolling();
                     } else {
                         status = '🕐';
                         statusTitle = 'Cache is stale — auto-refresh pending';
@@ -1569,36 +2090,23 @@
                         document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
                         document.getElementById('cancel-refresh-btn').style.display = 'none';
                         progressContainer.style.display = 'none';
-                        // Keep polling so we notice when the background refresh fires
-                        if (!refreshPollInterval) {
-                            refreshPollInterval = setInterval(loadCacheStatus, 5000);
-                        }
+                        setRefreshPolling(5000);
                     }
                     const statusEl = document.getElementById('cache-status');
                     statusEl.textContent = status;
                     statusEl.title = statusTitle;
                     
                     // Last refresh time
-                    if (data.last_refresh) {
-                        const lastTime = new Date(data.last_refresh);
-                        const now = new Date();
-                        const diffMinutes = Math.floor((now - lastTime) / 60000);
-                        if (diffMinutes < 1) {
-                            document.getElementById('cache-last-refresh').textContent = 'Just now';
-                        } else if (diffMinutes < 60) {
-                            document.getElementById('cache-last-refresh').textContent = diffMinutes + ' min ago';
-                        } else {
-                            const diffHours = Math.floor(diffMinutes / 60);
-                            document.getElementById('cache-last-refresh').textContent = diffHours + 'h ' + (diffMinutes % 60) + 'm ago';
-                        }
-                    } else {
-                        document.getElementById('cache-last-refresh').textContent = 'Never';
-                    }
+                    document.getElementById('cache-last-refresh').textContent = formatRelativeTime(data.last_refresh);
                 })
-                .catch(() => {});
+                .catch((error) => {
+                    showRefreshRequestError(error.message || 'Failed to load cache status');
+                    setRefreshPolling(5000);
+                });
         }
         
         function refreshCache() {
+            showRefreshRequestError('');
             document.getElementById('refresh-cache-btn').disabled = true;
             document.getElementById('refresh-cache-btn').textContent = '⏳ Starting...';
             document.getElementById('refresh-progress-container').style.display = 'block';
@@ -1607,26 +2115,18 @@
             document.getElementById('refresh-progress-step').textContent = 'Starting...';
             
             fetch('/api/cache/refresh', { method: 'POST' })
-                .then(r => r.json())
-                .then(data => {
+                .then(parseJsonResponse)
+                .then(() => {
                     document.getElementById('refresh-cache-btn').textContent = '⏳ Refreshing...';
-                    // Poll for completion every second
-                    const pollInterval = setInterval(() => {
-                        fetch('/api/cache/status')
-                            .then(r => r.json())
-                            .then(status => {
-                                loadCacheStatus();
-                                if (!status.refresh_in_progress) {
-                                    clearInterval(pollInterval);
-                                }
-                            });
-                    }, 1000);
+                    setRefreshPolling(1000);
+                    return loadCacheStatus();
                 })
-                .catch(() => {
+                .catch((error) => {
                     document.getElementById('refresh-cache-btn').disabled = false;
                     document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
                     document.getElementById('cancel-refresh-btn').style.display = 'none';
                     document.getElementById('refresh-progress-container').style.display = 'none';
+                    showRefreshRequestError(error.message || 'Failed to start cache refresh');
                 });
         }
         
@@ -1634,19 +2134,18 @@
             if (!confirm('Cancel the current refresh? Use this if the refresh appears stuck.')) return;
             
             fetch('/api/cache/cancel-refresh', { method: 'POST' })
-                .then(r => r.json())
+                .then(parseJsonResponse)
                 .then(() => {
                     document.getElementById('refresh-cache-btn').disabled = false;
                     document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
                     document.getElementById('cancel-refresh-btn').style.display = 'none';
                     document.getElementById('refresh-progress-container').style.display = 'none';
-                    if (refreshPollInterval) {
-                        clearInterval(refreshPollInterval);
-                        refreshPollInterval = null;
-                    }
+                    clearRefreshPolling();
                     loadCacheStatus();
                 })
-                .catch(() => {});
+                .catch((error) => {
+                    showRefreshRequestError(error.message || 'Failed to cancel cache refresh');
+                });
         }
         
         function clearCache() {

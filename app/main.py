@@ -158,15 +158,15 @@ async def lifespan(app: FastAPI):
 
     http = HttpClientService()
 
-    cache = CacheService(cfg, http)
+    notif = NotificationService(cfg, http)
+
+    cache = CacheService(cfg, http, notif)
     cache.load_cache_from_disk()
 
     epg_svc = EpgService(cfg, http, cache)
     epg_svc.load_epg_cache_from_disk()
 
     xtream = XtreamService(cfg, cache, http)
-
-    notif = NotificationService(cfg, http)
 
     jellyfin = JellyfinService(cfg, http)
 

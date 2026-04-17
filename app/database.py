@@ -125,12 +125,17 @@ CREATE TABLE IF NOT EXISTS refresh_progress (
     current_source_name TEXT NOT NULL DEFAULT '',
     current_step        TEXT NOT NULL DEFAULT '',
     percent             INTEGER NOT NULL DEFAULT 0,
-    started_at          TEXT
+    started_at          TEXT,
+    status              TEXT NOT NULL DEFAULT 'idle',
+    source_results      TEXT NOT NULL DEFAULT '[]',
+    summary             TEXT NOT NULL DEFAULT '{}',
+    finished_at         TEXT,
+    last_error          TEXT NOT NULL DEFAULT ''
 );
 
 INSERT OR IGNORE INTO refresh_progress
     (id, in_progress, current_source, total_sources,
-     current_source_name, current_step, percent, started_at)
+    current_source_name, current_step, percent, started_at)
 VALUES (1, 0, 0, 0, '', '', 0, NULL);
 
 -- ── Custom categories ─────────────────────────────────────────────────────
@@ -345,6 +350,11 @@ _COLUMN_UPGRADES: list[tuple[str, str, str]] = [
     ("monitored_series", "canonical_name", "TEXT"),
     ("monitored_series", "custom_category_ids", "TEXT"),
     ("monitored_movies", "custom_category_ids", "TEXT"),
+    ("refresh_progress", "status", "TEXT NOT NULL DEFAULT 'idle'"),
+    ("refresh_progress", "source_results", "TEXT NOT NULL DEFAULT '[]'"),
+    ("refresh_progress", "summary", "TEXT NOT NULL DEFAULT '{}'"),
+    ("refresh_progress", "finished_at", "TEXT"),
+    ("refresh_progress", "last_error", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 

@@ -273,3 +273,50 @@ class TestMigrationSentinel:
                 assert row["done"] == 1
             finally:
                 conn.close()
+
+
+class TestSchemaUpgrades:
+
+    def test_init_db_upgrades_legacy_refresh_progress_table(self):
+        """Legacy refresh_progress rows upgrade cleanly without startup failures."""
+        with tempfile.TemporaryDirectory() as d:
+            db_path = os.path.join(d, DB_NAME)
+            conn = db_connect(db_path)
+            try:
+                conn.execute(
+                    """CREATE TABLE refresh_progress (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        in_progress INTEGER NOT NULL DEFAULT 0,
+                        current_source INTEGER NOT NULL DEFAULT 0,
+                        total_sources INTEGER NOT NULL DEFAULT 0,
+                        current_source_name TEXT NOT NULL DEFAULT '',
+                        current_step TEXT NOT NULL DEFAULT '',
+                        percent INTEGER NOT NULL DEFAULT 0,
+                        started_at TEXT
+                    )"""
+                )
+                conn.execute(
+                    """INSERT INTO refresh_progress
+                       (id, in_progress, current_source, total_sources,
+                        current_source_name, current_step, percent, started_at)
+                       VALUES (1, 0, 0, 0, '', '', 0, NULL)"""
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            init_db(db_path)
+
+            conn = db_connect(db_path)
+            try:
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(refresh_progress)")}
+                assert {"status", "source_results", "summary", "finished_at", "last_error"}.issubset(columns)
+                row = conn.execute(
+                    "SELECT status, source_results, summary, last_error FROM refresh_progress WHERE id = 1"
+                ).fetchone()
+                assert row["status"] == "idle"
+                assert row["source_results"] == "[]"
+                assert row["summary"] == "{}"
+                assert row["last_error"] == ""
+            finally:
+                conn.close()

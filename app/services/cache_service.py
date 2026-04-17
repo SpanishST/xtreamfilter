@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ from app.database import DB_NAME, db_connect
 
 if TYPE_CHECKING:
     from app.services.config_service import ConfigService
+    from app.services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +28,29 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
+REFRESH_STEP_DEFINITIONS: list[tuple[str, str, str]] = [
+    ("live_categories", "Live categories", "get_live_categories"),
+    ("vod_categories", "VOD categories", "get_vod_categories"),
+    ("series_categories", "Series categories", "get_series_categories"),
+    ("live_streams", "Live streams", "get_live_streams"),
+    ("vod_streams", "VOD streams", "get_vod_streams"),
+    ("series", "Series", "get_series"),
+]
+REFRESH_SOURCE_KEYS = tuple(step[0] for step in REFRESH_STEP_DEFINITIONS)
+
 
 class CacheService:
     """Manages the in-memory API cache, disk persistence, and stream-source mapping."""
 
-    def __init__(self, config_service: "ConfigService", http_client: "HttpClientService | None" = None):
+    def __init__(
+        self,
+        config_service: "ConfigService",
+        http_client: "HttpClientService | None" = None,
+        notification_service: "NotificationService | None" = None,
+    ):
         self.config_service = config_service
         self.http_client = http_client
+        self.notification_service = notification_service
         self.data_dir = config_service.data_dir
         self.db_path = os.path.join(self.data_dir, DB_NAME)
 
@@ -40,13 +58,7 @@ class CacheService:
             "sources": {},
             "last_refresh": None,
             "refresh_in_progress": False,
-            "refresh_progress": {
-                "current_source": 0,
-                "total_sources": 0,
-                "current_source_name": "",
-                "current_step": "",
-                "percent": 0,
-            },
+            "refresh_progress": self._default_refresh_progress(),
         }
         self._cache_lock = asyncio.Lock()
 
@@ -62,18 +74,201 @@ class CacheService:
         # Pre-built source names
         self._source_names: dict[str, str] = {}
 
+    @staticmethod
+    def _empty_source_cache() -> dict[str, Any]:
+        return {
+            "live_categories": [],
+            "vod_categories": [],
+            "series_categories": [],
+            "live_streams": [],
+            "vod_streams": [],
+            "series": [],
+            "last_refresh": None,
+        }
+
+    @staticmethod
+    def _default_refresh_summary(total_sources: int = 0) -> dict[str, Any]:
+        return {
+            "total_sources": total_sources,
+            "successful_sources": 0,
+            "partial_sources": 0,
+            "failed_sources": 0,
+            "pending_sources": 0,
+            "running_sources": 0,
+            "processed_steps": 0,
+            "successful_steps": 0,
+            "failed_steps": 0,
+            "preserved_steps": 0,
+            "total_steps": total_sources * len(REFRESH_STEP_DEFINITIONS),
+            "live_categories": 0,
+            "vod_categories": 0,
+            "series_categories": 0,
+            "live_streams": 0,
+            "vod_streams": 0,
+            "series": 0,
+        }
+
+    def _default_refresh_progress(self) -> dict[str, Any]:
+        return {
+            "in_progress": False,
+            "status": "idle",
+            "current_source": 0,
+            "total_sources": 0,
+            "current_source_name": "",
+            "current_step": "",
+            "percent": 0,
+            "started_at": None,
+            "finished_at": None,
+            "last_error": "",
+            "source_results": [],
+            "summary": self._default_refresh_summary(),
+        }
+
+    def _normalise_refresh_progress(self, progress_data: dict | None = None) -> dict[str, Any]:
+        progress = self._default_refresh_progress()
+        if not progress_data:
+            return progress
+
+        progress["in_progress"] = bool(progress_data.get("in_progress", progress["in_progress"]))
+        progress["current_source"] = int(progress_data.get("current_source", progress["current_source"]) or 0)
+        progress["total_sources"] = int(progress_data.get("total_sources", progress["total_sources"]) or 0)
+        progress["current_source_name"] = str(progress_data.get("current_source_name", progress["current_source_name"]) or "")
+        progress["current_step"] = str(progress_data.get("current_step", progress["current_step"]) or "")
+        progress["percent"] = int(progress_data.get("percent", progress["percent"]) or 0)
+        progress["started_at"] = progress_data.get("started_at")
+        progress["finished_at"] = progress_data.get("finished_at")
+        progress["last_error"] = str(progress_data.get("last_error", progress["last_error"]) or "")
+
+        status = progress_data.get("status")
+        if not status:
+            status = "running" if progress["in_progress"] else "idle"
+        progress["status"] = str(status)
+
+        source_results = progress_data.get("source_results", progress["source_results"])
+        if isinstance(source_results, str):
+            try:
+                source_results = json.loads(source_results)
+            except (TypeError, json.JSONDecodeError):
+                source_results = []
+        if not isinstance(source_results, list):
+            source_results = []
+        progress["source_results"] = source_results
+
+        if progress["total_sources"] == 0 and source_results:
+            progress["total_sources"] = len(source_results)
+
+        summary = progress_data.get("summary", {})
+        if isinstance(summary, str):
+            try:
+                summary = json.loads(summary)
+            except (TypeError, json.JSONDecodeError):
+                summary = {}
+        if not isinstance(summary, dict):
+            summary = {}
+        default_summary = self._default_refresh_summary(progress["total_sources"])
+        for key in default_summary:
+            if key in summary:
+                default_summary[key] = summary[key]
+        progress["summary"] = default_summary
+        return progress
+
+    def _build_source_result(self, source_id: str, source_name: str, last_refresh: str | None) -> dict[str, Any]:
+        return {
+            "source_id": source_id,
+            "source_name": source_name,
+            "status": "pending",
+            "last_refresh": last_refresh,
+            "counts": {key: 0 for key in REFRESH_SOURCE_KEYS},
+            "errors": [],
+            "steps": [
+                {
+                    "key": key,
+                    "label": label,
+                    "status": "pending",
+                    "count": 0,
+                    "duration_ms": None,
+                    "preserved_existing": False,
+                    "error": None,
+                }
+                for key, label, _ in REFRESH_STEP_DEFINITIONS
+            ],
+        }
+
+    @staticmethod
+    def _build_source_counts(source_cache: dict[str, Any]) -> dict[str, int]:
+        return {
+            key: len(source_cache.get(key, []))
+            for key in REFRESH_SOURCE_KEYS
+        }
+
+    def _build_refresh_summary(self, source_results: list[dict], total_sources: int) -> dict[str, Any]:
+        summary = self._default_refresh_summary(total_sources)
+        for source_result in source_results:
+            source_status = source_result.get("status", "pending")
+            if source_status == "success":
+                summary["successful_sources"] += 1
+            elif source_status == "partial":
+                summary["partial_sources"] += 1
+            elif source_status == "failed":
+                summary["failed_sources"] += 1
+            elif source_status == "running":
+                summary["running_sources"] += 1
+            else:
+                summary["pending_sources"] += 1
+
+            for key, value in source_result.get("counts", {}).items():
+                if key in summary:
+                    summary[key] += int(value or 0)
+
+            for step in source_result.get("steps", []):
+                step_status = step.get("status", "pending")
+                if step_status in {"success", "failed"}:
+                    summary["processed_steps"] += 1
+                if step_status == "success":
+                    summary["successful_steps"] += 1
+                elif step_status == "failed":
+                    summary["failed_steps"] += 1
+                    if step.get("preserved_existing"):
+                        summary["preserved_steps"] += 1
+        return summary
+
+    @staticmethod
+    def _derive_source_status(source_result: dict[str, Any]) -> str:
+        statuses = {step.get("status", "pending") for step in source_result.get("steps", [])}
+        if "running" in statuses:
+            return "running"
+        has_success = "success" in statuses
+        has_failure = "failed" in statuses
+        if has_success and has_failure:
+            return "partial"
+        if has_success:
+            return "success"
+        if has_failure:
+            return "failed"
+        return "pending"
+
+    @staticmethod
+    def _format_step_error(source_name: str, step_label: str, error: dict[str, Any]) -> str:
+        status_code = error.get("status_code")
+        if status_code:
+            return f"{source_name}: {step_label} failed with HTTP {status_code}"
+        message = error.get("message") or error.get("type") or "Unknown error"
+        return f"{source_name}: {step_label} failed - {message}"
+
     # ------------------------------------------------------------------
     # Progress helpers  (SQLite replaces refresh_progress.json)
     # ------------------------------------------------------------------
 
     def save_refresh_progress(self, progress_data: dict) -> None:
+        progress_data = self._normalise_refresh_progress(progress_data)
         conn = db_connect(self.db_path)
         try:
             conn.execute(
                 """INSERT OR REPLACE INTO refresh_progress
                    (id, in_progress, current_source, total_sources,
-                    current_source_name, current_step, percent, started_at)
-                   VALUES (1,?,?,?,?,?,?,?)""",
+                    current_source_name, current_step, percent, started_at,
+                    status, source_results, summary, finished_at, last_error)
+                   VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     int(progress_data.get("in_progress", False)),
                     progress_data.get("current_source", 0),
@@ -82,9 +277,15 @@ class CacheService:
                     progress_data.get("current_step", ""),
                     progress_data.get("percent", 0),
                     progress_data.get("started_at"),
+                    progress_data.get("status", "idle"),
+                    json.dumps(progress_data.get("source_results", []), ensure_ascii=False),
+                    json.dumps(progress_data.get("summary", {}), ensure_ascii=False),
+                    progress_data.get("finished_at"),
+                    progress_data.get("last_error", ""),
                 ),
             )
             conn.commit()
+            self._api_cache["refresh_progress"] = progress_data
         except Exception as e:
             logger.warning(f"Failed to save progress: {e}")
         finally:
@@ -95,11 +296,12 @@ class CacheService:
         try:
             row = conn.execute(
                 "SELECT in_progress, current_source, total_sources, "
-                "current_source_name, current_step, percent, started_at "
+                "current_source_name, current_step, percent, started_at, "
+                "status, source_results, summary, finished_at, last_error "
                 "FROM refresh_progress WHERE id = 1"
             ).fetchone()
             if row:
-                return {
+                return self._normalise_refresh_progress({
                     "in_progress": bool(row["in_progress"]),
                     "current_source": row["current_source"],
                     "total_sources": row["total_sources"],
@@ -107,32 +309,32 @@ class CacheService:
                     "current_step": row["current_step"],
                     "percent": row["percent"],
                     "started_at": row["started_at"],
-                }
+                    "status": row["status"],
+                    "source_results": row["source_results"],
+                    "summary": row["summary"],
+                    "finished_at": row["finished_at"],
+                    "last_error": row["last_error"],
+                })
         except Exception:
             pass
         finally:
             conn.close()
-        return {
-            "in_progress": False,
-            "current_source": 0,
-            "total_sources": 0,
-            "current_source_name": "",
-            "current_step": "",
-            "percent": 0,
-            "started_at": None,
-        }
+        return self._default_refresh_progress()
 
-    def clear_refresh_progress(self) -> None:
-        conn = db_connect(self.db_path)
-        try:
-            conn.execute(
-                "UPDATE refresh_progress SET in_progress=0, current_step='', percent=0 WHERE id=1"
-            )
-            conn.commit()
-        except Exception:
-            pass
-        finally:
-            conn.close()
+    def clear_refresh_progress(self, status: str = "cancelled", last_error: str = "") -> None:
+        progress = self.load_refresh_progress()
+        progress["in_progress"] = False
+        progress["status"] = status
+        progress["current_step"] = "Cancelled" if status == "cancelled" else ""
+        progress["current_source_name"] = ""
+        progress["percent"] = 0 if status == "cancelled" else progress.get("percent", 0)
+        progress["finished_at"] = datetime.now().isoformat()
+        progress["last_error"] = last_error or progress.get("last_error", "")
+        progress["summary"] = self._build_refresh_summary(
+            progress.get("source_results", []),
+            progress.get("total_sources", 0),
+        )
+        self.save_refresh_progress(progress)
 
     # ------------------------------------------------------------------
     # Disk persistence  (SQLite replaces api_cache.json)
@@ -541,42 +743,132 @@ class CacheService:
         password: str,
         action: str,
         retries: int = 2,
-    ) -> Any:
+    ) -> dict[str, Any]:
         url = f"{host}/player_api.php"
         params = {"username": username, "password": password, "action": action}
+        last_error: dict[str, Any] | None = None
         for attempt in range(retries + 1):
+            start_time = time.time()
             try:
                 async with httpx.AsyncClient(
                     headers=HEADERS,
                     timeout=httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0),
                     follow_redirects=True,
                 ) as client:
-                    start_time = time.time()
                     response = await client.get(url, params=params)
-                    elapsed = time.time() - start_time
+                    elapsed_ms = int((time.time() - start_time) * 1000)
                     if response.status_code == 200:
-                        data = response.json()
+                        try:
+                            data = response.json()
+                        except ValueError as exc:
+                            last_error = {
+                                "type": "parse_error",
+                                "message": str(exc),
+                                "status_code": 200,
+                                "attempt": attempt + 1,
+                                "duration_ms": elapsed_ms,
+                            }
+                            logger.error(f"Invalid JSON for {action}: {exc} (attempt {attempt + 1}/{retries + 1})")
+                            if attempt < retries:
+                                await asyncio.sleep(2**attempt)
+                            continue
+
+                        if not isinstance(data, list):
+                            last_error = {
+                                "type": "invalid_payload",
+                                "message": f"Expected a list response for {action}",
+                                "status_code": 200,
+                                "attempt": attempt + 1,
+                                "duration_ms": elapsed_ms,
+                            }
+                            logger.error(
+                                f"Unexpected payload for {action}: {type(data).__name__} "
+                                f"(attempt {attempt + 1}/{retries + 1})"
+                            )
+                            if attempt < retries:
+                                await asyncio.sleep(2**attempt)
+                            continue
+
                         logger.debug(
-                            f"Fetched {action}: {len(data) if isinstance(data, list) else 'ok'} items in {elapsed:.1f}s"
+                            f"Fetched {action}: {len(data)} items in {elapsed_ms / 1000:.1f}s"
                         )
-                        return data
+                        return {
+                            "ok": True,
+                            "action": action,
+                            "data": data,
+                            "status_code": 200,
+                            "duration_ms": elapsed_ms,
+                            "attempts": attempt + 1,
+                            "error": None,
+                        }
                     else:
-                        logger.warning(f"Fetch {action} failed with status {response.status_code} in {elapsed:.1f}s")
+                        last_error = {
+                            "type": "http_error",
+                            "message": f"HTTP {response.status_code} while fetching {action}",
+                            "status_code": response.status_code,
+                            "attempt": attempt + 1,
+                            "duration_ms": elapsed_ms,
+                        }
+                        logger.warning(
+                            f"Fetch {action} failed with status {response.status_code} "
+                            f"in {elapsed_ms / 1000:.1f}s"
+                        )
             except httpx.TimeoutException:
+                last_error = {
+                    "type": "timeout",
+                    "message": "Request timed out",
+                    "attempt": attempt + 1,
+                    "duration_ms": int((time.time() - start_time) * 1000),
+                }
                 logger.error(f"Timeout fetching {action} (attempt {attempt + 1}/{retries + 1})")
             except httpx.RemoteProtocolError as e:
+                last_error = {
+                    "type": "protocol_error",
+                    "message": str(e),
+                    "attempt": attempt + 1,
+                    "duration_ms": int((time.time() - start_time) * 1000),
+                }
                 logger.error(f"Protocol error fetching {action}: {e} (attempt {attempt + 1}/{retries + 1})")
             except httpx.ReadError as e:
+                last_error = {
+                    "type": "read_error",
+                    "message": str(e),
+                    "attempt": attempt + 1,
+                    "duration_ms": int((time.time() - start_time) * 1000),
+                }
                 logger.error(f"Read error fetching {action}: {e} (attempt {attempt + 1}/{retries + 1})")
             except httpx.ConnectError as e:
+                last_error = {
+                    "type": "connection_error",
+                    "message": str(e),
+                    "attempt": attempt + 1,
+                    "duration_ms": int((time.time() - start_time) * 1000),
+                }
                 logger.error(f"Connection error fetching {action}: {e}")
                 break
             except Exception as e:
+                last_error = {
+                    "type": "unexpected_error",
+                    "message": str(e),
+                    "attempt": attempt + 1,
+                    "duration_ms": int((time.time() - start_time) * 1000),
+                }
                 logger.error(f"Error fetching {action}: {e}")
                 break
             if attempt < retries:
                 await asyncio.sleep(2**attempt)
-        return None
+        return {
+            "ok": False,
+            "action": action,
+            "data": None,
+            "status_code": (last_error or {}).get("status_code"),
+            "duration_ms": (last_error or {}).get("duration_ms"),
+            "attempts": retries + 1,
+            "error": last_error or {
+                "type": "unknown_error",
+                "message": f"Unknown error while fetching {action}",
+            },
+        }
 
     # ------------------------------------------------------------------
     # Full cache refresh
@@ -599,20 +891,6 @@ class CacheService:
                         return False
                 except (ValueError, TypeError):
                     pass
-
-        progress: dict[str, Any] = {
-            "in_progress": True,
-            "current_source": 0,
-            "total_sources": 0,
-            "current_source_name": "",
-            "current_step": "Initializing...",
-            "percent": 0,
-            "started_at": datetime.now().isoformat(),
-        }
-        self.save_refresh_progress(progress)
-
-        async with self._cache_lock:
-            self._api_cache["refresh_in_progress"] = True
 
         config = self.config_service.config
         sources = config.get("sources", [])
@@ -642,17 +920,63 @@ class CacheService:
             logger.info("Cannot refresh - no valid sources configured")
             async with self._cache_lock:
                 self._api_cache["refresh_in_progress"] = False
-            self.clear_refresh_progress()
+            self.save_refresh_progress(
+                {
+                    "in_progress": False,
+                    "status": "failed",
+                    "current_source": 0,
+                    "total_sources": 0,
+                    "current_source_name": "",
+                    "current_step": "No valid sources configured",
+                    "percent": 0,
+                    "started_at": datetime.now().isoformat(),
+                    "finished_at": datetime.now().isoformat(),
+                    "last_error": "No valid sources configured",
+                    "source_results": [],
+                    "summary": self._default_refresh_summary(),
+                }
+            )
             return False
 
         total_sources = len(enabled_sources)
-        progress["total_sources"] = total_sources
+
+        async with self._cache_lock:
+            existing_sources_snapshot = copy.deepcopy(self._api_cache.get("sources", {}))
+            previous_last_refresh = self._api_cache.get("last_refresh")
+            self._api_cache["refresh_in_progress"] = True
+
+        source_results = [
+            self._build_source_result(
+                source.get("id", "default"),
+                source.get("name", source.get("id", "default")),
+                existing_sources_snapshot.get(source.get("id", "default"), {}).get("last_refresh"),
+            )
+            for source in enabled_sources
+        ]
+        progress = self._normalise_refresh_progress(
+            {
+                "in_progress": True,
+                "status": "running",
+                "current_source": 0,
+                "total_sources": total_sources,
+                "current_source_name": "",
+                "current_step": "Initializing...",
+                "percent": 0,
+                "started_at": datetime.now().isoformat(),
+                "finished_at": None,
+                "last_error": "",
+                "source_results": source_results,
+                "summary": self._build_refresh_summary(source_results, total_sources),
+            }
+        )
         self.save_refresh_progress(progress)
 
         logger.info(f"Starting full refresh at {datetime.now().isoformat()} for {total_sources} source(s)")
 
         new_sources_cache: dict[str, dict] = {}
-        total_stats = {"live_cats": 0, "live_streams": 0, "vod_cats": 0, "vod_streams": 0, "series_cats": 0, "series": 0}
+        any_source_updated = False
+        finished_at = datetime.now().isoformat()
+        final_status = "failed"
 
         try:
             for source_idx, source in enumerate(enabled_sources):
@@ -661,105 +985,154 @@ class CacheService:
                 host = source.get("host", "").rstrip("/")
                 username = source.get("username", "")
                 password = source.get("password", "")
+                source_result = progress["source_results"][source_idx]
+                source_result["status"] = "running"
 
-                progress = self.load_refresh_progress()
                 progress["current_source"] = source_idx + 1
                 progress["current_source_name"] = source_name
+                progress["current_step"] = f"{source_name}: Initializing"
+                progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
                 self.save_refresh_progress(progress)
 
                 logger.info(f"Refreshing source: {source_name}")
 
-                try:
+                existing_source_cache = copy.deepcopy(
+                    existing_sources_snapshot.get(source_id, self._empty_source_cache())
+                )
+                source_cache = copy.deepcopy(existing_source_cache)
+                source_updated = False
 
-                    def update_step(step_name: str, step_num: int) -> None:
-                        p = self.load_refresh_progress()
-                        p["current_step"] = f"{source_name}: {step_name}"
-                        base_percent = (source_idx / total_sources) * 100
-                        step_percent = (step_num / 6) * (100 / total_sources)
-                        p["percent"] = int(base_percent + step_percent)
-                        self.save_refresh_progress(p)
-                        logger.info(f"[{source_name}] Step {step_num}/6: {step_name} (progress: {p['percent']}%)")
+                for step_idx, (cache_key, label, action) in enumerate(REFRESH_STEP_DEFINITIONS):
+                    step_result = source_result["steps"][step_idx]
+                    step_result["status"] = "running"
+                    step_result["error"] = None
+                    step_result["duration_ms"] = None
+                    step_result["preserved_existing"] = False
+                    progress["current_step"] = f"{source_name}: {label}"
+                    progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
+                    progress["percent"] = int(
+                        (progress["summary"].get("processed_steps", 0) / max(progress["summary"].get("total_steps", 1), 1))
+                        * 100
+                    )
+                    self.save_refresh_progress(progress)
+                    logger.info(
+                        f"[{source_name}] Step {step_idx + 1}/{len(REFRESH_STEP_DEFINITIONS)}: {label} "
+                        f"(progress: {progress['percent']}%)"
+                    )
 
-                    update_step("Live categories", 0)
-                    live_cats = await self.fetch_from_upstream(host, username, password, "get_live_categories") or []
+                    fetch_result = await self.fetch_from_upstream(host, username, password, action)
+                    step_result["duration_ms"] = fetch_result.get("duration_ms")
+                    if fetch_result.get("ok"):
+                        data = fetch_result.get("data") or []
+                        source_cache[cache_key] = data
+                        step_result["status"] = "success"
+                        step_result["count"] = len(data)
+                        source_updated = True
+                    else:
+                        error = dict(fetch_result.get("error") or {})
+                        step_result["status"] = "failed"
+                        step_result["error"] = error
+                        step_result["preserved_existing"] = source_id in existing_sources_snapshot
+                        step_result["count"] = len(source_cache.get(cache_key, []))
+                        source_result["errors"].append(
+                            {
+                                "key": cache_key,
+                                "label": label,
+                                "preserved_existing": step_result["preserved_existing"],
+                                **error,
+                            }
+                        )
+                        progress["last_error"] = self._format_step_error(source_name, label, error)
 
-                    update_step("VOD categories", 1)
-                    vod_cats = await self.fetch_from_upstream(host, username, password, "get_vod_categories") or []
+                    source_result["counts"] = self._build_source_counts(source_cache)
+                    source_result["status"] = self._derive_source_status(source_result)
+                    progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
+                    progress["percent"] = int(
+                        (progress["summary"].get("processed_steps", 0) / max(progress["summary"].get("total_steps", 1), 1))
+                        * 100
+                    )
+                    self.save_refresh_progress(progress)
 
-                    update_step("Series categories", 2)
-                    series_cats = await self.fetch_from_upstream(host, username, password, "get_series_categories") or []
+                if source_updated:
+                    any_source_updated = True
+                    source_cache["last_refresh"] = datetime.now().isoformat()
 
-                    update_step("Live streams", 3)
-                    live_streams = await self.fetch_from_upstream(host, username, password, "get_live_streams") or []
+                source_result["counts"] = self._build_source_counts(source_cache)
+                source_result["last_refresh"] = source_cache.get("last_refresh")
+                source_result["status"] = self._derive_source_status(source_result)
 
-                    update_step("VOD streams", 4)
-                    vod_streams = await self.fetch_from_upstream(host, username, password, "get_vod_streams") or []
+                if source_updated or source_id in existing_sources_snapshot:
+                    new_sources_cache[source_id] = source_cache
 
-                    update_step("Series", 5)
-                    series = await self.fetch_from_upstream(host, username, password, "get_series") or []
+            summary = self._build_refresh_summary(progress["source_results"], total_sources)
+            failed_sources = summary.get("failed_sources", 0)
+            partial_sources = summary.get("partial_sources", 0)
 
-                    new_sources_cache[source_id] = {
-                        "live_categories": live_cats,
-                        "vod_categories": vod_cats,
-                        "series_categories": series_cats,
-                        "live_streams": live_streams,
-                        "vod_streams": vod_streams,
-                        "series": series,
-                        "last_refresh": datetime.now().isoformat(),
-                    }
-                    total_stats["live_cats"] += len(live_cats)
-                    total_stats["live_streams"] += len(live_streams)
-                    total_stats["vod_cats"] += len(vod_cats)
-                    total_stats["vod_streams"] += len(vod_streams)
-                    total_stats["series_cats"] += len(series_cats)
-                    total_stats["series"] += len(series)
-
-                except Exception as e:
-                    logger.error(f"Failed to refresh source {source_id}: {e}")
-
-            if new_sources_cache:
+            if new_sources_cache or existing_sources_snapshot:
                 async with self._cache_lock:
                     self._api_cache["sources"] = new_sources_cache
-                    self._api_cache["last_refresh"] = datetime.now().isoformat()
+                    self._api_cache["last_refresh"] = datetime.now().isoformat() if any_source_updated else previous_last_refresh
                     self._api_cache["refresh_in_progress"] = False
                 self._inject_source_info()
                 await self.rebuild_stream_source_map()
                 self._rebuild_stream_index()
                 self.save_cache_to_disk()
 
-                self.save_refresh_progress(
-                    {
-                        "in_progress": True,
-                        "current_source": total_sources,
-                        "total_sources": total_sources,
-                        "current_source_name": "Categories",
-                        "current_step": "Refreshing automatic categories...",
-                        "percent": 95,
-                    }
-                )
-                if on_cache_refreshed:
+                if on_cache_refreshed and any_source_updated:
+                    progress["in_progress"] = True
+                    progress["current_source"] = total_sources
+                    progress["current_source_name"] = "Categories"
+                    progress["current_step"] = "Refreshing automatic categories..."
+                    progress["percent"] = min(progress.get("percent", 0), 95)
+                    progress["summary"] = summary
+                    self.save_refresh_progress(progress)
                     await on_cache_refreshed()
 
+                if failed_sources or partial_sources:
+                    final_status = "partial" if any_source_updated or partial_sources else "failed"
+                else:
+                    final_status = "success" if any_source_updated else "failed"
+
                 logger.info(
-                    f"Refresh complete. Total: {total_stats['live_streams']} live, "
-                    f"{total_stats['vod_streams']} vod, {total_stats['series']} series"
+                    f"Refresh complete with status={final_status}. Total: {summary['live_streams']} live, "
+                    f"{summary['vod_streams']} vod, {summary['series']} series"
                 )
             else:
                 logger.warning("Refresh completed but no data was fetched from any source")
                 async with self._cache_lock:
                     self._api_cache["refresh_in_progress"] = False
+                final_status = "failed"
+        except Exception as exc:
+            logger.error(f"Cache refresh failed unexpectedly: {exc}")
+            progress["last_error"] = progress.get("last_error") or str(exc)
+            final_status = "partial" if any_source_updated else "failed"
+            async with self._cache_lock:
+                self._api_cache["refresh_in_progress"] = False
         finally:
+            finished_at = datetime.now().isoformat()
+            progress["in_progress"] = False
+            progress["status"] = final_status
+            progress["current_source"] = total_sources
+            progress["current_source_name"] = ""
+            progress["current_step"] = {
+                "success": "Complete",
+                "partial": "Complete with warnings",
+                "failed": "Refresh failed",
+            }.get(final_status, "Complete")
+            progress["percent"] = 100 if total_sources else 0
+            progress["finished_at"] = finished_at
+            progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
+            if final_status == "failed" and not progress.get("last_error"):
+                progress["last_error"] = "Refresh failed for every source"
             self.save_refresh_progress(
-                {
-                    "in_progress": False,
-                    "current_source": total_sources,
-                    "total_sources": total_sources,
-                    "current_source_name": "",
-                    "current_step": "Complete",
-                    "percent": 100,
-                }
+                progress
             )
-        return True
+            if final_status in {"partial", "failed"} and self.notification_service:
+                try:
+                    await self.notification_service.send_cache_refresh_failure_notification(progress)
+                except Exception as exc:
+                    logger.error(f"Failed to dispatch cache refresh notification: {exc}")
+        return final_status in {"success", "partial"}
 
     # ------------------------------------------------------------------
     # Clear

@@ -41,7 +41,12 @@ async def proxy_stream(upstream_url: str, request: Request, stream_type: str = "
     • **vod / series** → adaptive pre-buffering for smoother downloads.
     """
     upstream_headers = dict(HEADERS)
-    if "range" in request.headers:
+    # Never forward client Range requests for live streams: byte offsets are
+    # meaningless on a live broadcast, and a forwarded Range causes the player
+    # to "resume" from an arbitrary point that the upstream serves as the
+    # current live edge — which the player then appends after its existing
+    # buffer, producing a visible multi-second rewind/replay.
+    if stream_type != "live" and "range" in request.headers:
         upstream_headers["Range"] = request.headers["range"]
     if "accept" in request.headers:
         upstream_headers["Accept"] = request.headers["accept"]
@@ -57,13 +62,28 @@ async def proxy_stream(upstream_url: str, request: Request, stream_type: str = "
         upstream_response = await client.send(req, stream=True)
 
         response_headers: dict[str, str] = {}
-        for header in ("content-type", "content-length", "content-range", "accept-ranges", "content-disposition"):
+        # For live we deliberately strip every header that would advertise
+        # the resource as seekable / finite (accept-ranges, content-length,
+        # content-range). Many IPTV upstreams falsely advertise these on
+        # .ts live endpoints, which makes players attempt range-based
+        # resumes on transient stalls and causes apparent "rewinds".
+        if stream_type == "live":
+            allowed_headers = ("content-type", "content-disposition")
+        else:
+            allowed_headers = ("content-type", "content-length", "content-range",
+                               "accept-ranges", "content-disposition")
+        for header in allowed_headers:
             if header in upstream_response.headers:
                 response_headers[header] = upstream_response.headers[header]
         if "content-type" not in response_headers:
             response_headers["content-type"] = "video/mp2t" if stream_type == "live" else "video/mp4"
         response_headers["X-Accel-Buffering"] = "no"
         response_headers["Cache-Control"] = "no-cache, no-store"
+        if stream_type == "live":
+            # Tell the client the resource is not byte-seekable so it never
+            # tries to "fix" a stall via a Range request.
+            response_headers["Accept-Ranges"] = "none"
+            response_headers["Pragma"] = "no-cache"
 
         # ----- live: zero-copy passthrough -----
         if stream_type == "live":
@@ -82,7 +102,7 @@ async def proxy_stream(upstream_url: str, request: Request, stream_type: str = "
 
             return StreamingResponse(
                 generate_live(),
-                status_code=upstream_response.status_code,
+                status_code=200,
                 headers=response_headers,
                 media_type=response_headers.get("content-type", "application/octet-stream"),
             )

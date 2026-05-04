@@ -1694,8 +1694,10 @@
                                     <span>Source Enabled</span>
                                 </label>
                             </div>
-                            <div style="display: flex; gap: 10px; margin-top: 20px;">
+                            <div id="source-test-status" style="display: none; margin-top: 15px;"></div>
+                            <div style="display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap;">
                                 <button class="btn btn-primary" onclick="saveSourceEdit('${sourceId}')">Save</button>
+                                <button class="btn btn-secondary" onclick="testSource()">🧪 Test</button>
                                 <button class="btn btn-secondary" onclick="closeSourceEdit()">Cancel</button>
                             </div>
                         </div>
@@ -1708,6 +1710,79 @@
         function closeSourceEdit() {
             const modal = document.getElementById('source-edit-modal');
             if (modal) modal.remove();
+        }
+
+        function showSourceTestStatus(type, html) {
+            const el = document.getElementById('source-test-status');
+            if (!el) return;
+            el.style.display = 'block';
+            el.style.padding = '10px';
+            el.style.borderRadius = '4px';
+            if (type === 'success') {
+                el.style.background = 'rgba(34, 197, 94, 0.15)';
+                el.style.color = '#22c55e';
+                el.style.border = '1px solid rgba(34, 197, 94, 0.3)';
+            } else if (type === 'error') {
+                el.style.background = 'rgba(239, 68, 68, 0.15)';
+                el.style.color = '#ef4444';
+                el.style.border = '1px solid rgba(239, 68, 68, 0.3)';
+            } else {
+                el.style.background = 'rgba(59, 130, 246, 0.15)';
+                el.style.color = '#3b82f6';
+                el.style.border = '1px solid rgba(59, 130, 246, 0.3)';
+            }
+            el.innerHTML = html;
+        }
+
+        function testSource() {
+            const payload = {
+                host: document.getElementById('edit-source-host').value.trim(),
+                username: document.getElementById('edit-source-username').value.trim(),
+                password: document.getElementById('edit-source-password').value
+            };
+            if (!payload.host || !payload.username || !payload.password) {
+                showSourceTestStatus('error', 'Host, username and password are required.');
+                return;
+            }
+            showSourceTestStatus('info', '⏳ Testing connection...');
+            fetch('/api/sources/test', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            })
+            .then(r => r.json().then(data => ({status: r.status, data})))
+            .then(({status, data}) => {
+                if (status === 200) {
+                    const ui = data.user_info || {};
+                    let exp = '—';
+                    if (ui.exp_date) {
+                        const ts = parseInt(ui.exp_date, 10);
+                        if (!isNaN(ts) && ts > 0) {
+                            exp = new Date(ts * 1000).toLocaleString();
+                        } else {
+                            exp = ui.exp_date;
+                        }
+                    }
+                    const formats = Array.isArray(ui.allowed_output_formats) && ui.allowed_output_formats.length
+                        ? ui.allowed_output_formats.join(', ') : '—';
+                    const trial = ui.is_trial && String(ui.is_trial) !== '0' ? ' (trial)' : '';
+                    showSourceTestStatus('success',
+                        `<strong>✅ ${data.message || 'Connected'}</strong><br>` +
+                        `<div style="margin-top:6px; font-size: 0.9em; color: inherit;">` +
+                        `User: <code>${ui.username || '—'}</code>${trial}<br>` +
+                        `Status: ${ui.status || '—'}<br>` +
+                        `Connections: ${ui.active_cons ?? '?'} / ${ui.max_connections ?? '?'}<br>` +
+                        `Expires: ${exp}<br>` +
+                        `Allowed formats: ${formats}` +
+                        `</div>`
+                    );
+                } else {
+                    showSourceTestStatus('error', `❌ ${data.message || 'Test failed'}`);
+                }
+            })
+            .catch(() => {
+                showSourceTestStatus('error', '❌ Failed to reach the server.');
+            });
         }
         
         function saveSourceEdit(sourceId) {

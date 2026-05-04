@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import uuid
 
+import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
@@ -41,6 +42,103 @@ async def add_source(request: Request, cfg: ConfigService = Depends(get_config_s
     config.setdefault("sources", []).append(new_source)
     cfg.save()
     return {"status": "ok", "source": new_source, "sources": config["sources"]}
+
+
+@router.post("/test")
+async def test_source(request: Request):
+    """Test Xtream source credentials without triggering a cache refresh.
+
+    Body: ``{host, username, password}``. Works for both saved sources
+    (modal pre-fills the fields) and unsaved edits.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    host = str(data.get("host", "") or "").strip().rstrip("/")
+    username = str(data.get("username", "") or "").strip()
+    password = str(data.get("password", "") or "")
+
+    if not host or not username or not password:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": "Host, username and password are required"},
+        )
+
+    if not (host.startswith("http://") or host.startswith("https://")):
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": "Host must start with http:// or https://"},
+        )
+
+    url = f"{host}/player_api.php"
+    params = {"username": username, "password": password}
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0),
+            follow_redirects=True,
+            headers={"Connection": "close"},
+        ) as client:
+            resp = await client.get(url, params=params)
+    except httpx.HTTPError as e:
+        return JSONResponse(
+            status_code=502,
+            content={"status": "error", "message": f"Connection failed: {e}"},
+        )
+
+    if resp.status_code != 200:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "status": "error",
+                "message": f"Server returned HTTP {resp.status_code}",
+            },
+        )
+
+    try:
+        payload = resp.json()
+    except Exception:
+        return JSONResponse(
+            status_code=502,
+            content={"status": "error", "message": "Invalid JSON response from provider"},
+        )
+
+    user_info = payload.get("user_info") if isinstance(payload, dict) else None
+    if not isinstance(user_info, dict):
+        return JSONResponse(
+            status_code=502,
+            content={"status": "error", "message": "Provider returned no user_info"},
+        )
+
+    auth_ok = str(user_info.get("auth", "1")) not in ("0", "false", "False")
+    status_str = str(user_info.get("status", "")).lower()
+    if not auth_ok or status_str in ("banned", "disabled", "expired"):
+        msg = user_info.get("message") or f"Authentication failed (status: {user_info.get('status', 'unknown')})"
+        return JSONResponse(
+            status_code=401,
+            content={"status": "error", "message": msg, "user_info": user_info},
+        )
+
+    allowed = user_info.get("allowed_output_formats", [])
+    if isinstance(allowed, str):
+        allowed = [allowed]
+
+    return {
+        "status": "ok",
+        "message": "Connection successful",
+        "user_info": {
+            "username": user_info.get("username"),
+            "status": user_info.get("status"),
+            "active_cons": user_info.get("active_cons"),
+            "max_connections": user_info.get("max_connections"),
+            "exp_date": user_info.get("exp_date"),
+            "is_trial": user_info.get("is_trial"),
+            "allowed_output_formats": allowed,
+        },
+        "server_info": payload.get("server_info") if isinstance(payload, dict) else None,
+    }
 
 
 @router.get("/{source_id}")

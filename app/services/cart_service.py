@@ -1252,6 +1252,9 @@ class CartService:
     async def _handle_download_queue_complete(self) -> None:
         await self.notification_service.send_download_queue_complete_notification(self._download_cart)
         await self._trigger_jellyfin_refresh("queue")
+        if self.config_service.config.get("options", {}).get("download_clear_on_queue_complete", False):
+            self._download_cart[:] = [i for i in self._download_cart if i.get("status") == "downloading"]
+            self.save_cart()
 
     # ------------------------------------------------------------------
     # Metadata / NFO writing (Jellyfin-compatible)

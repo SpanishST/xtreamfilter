@@ -362,6 +362,7 @@ async def get_download_notifications_api(cfg: ConfigService = Depends(get_config
         "telegram_configured": bool(tg.get("enabled") and tg.get("bot_token") and tg.get("chat_id")),
         "notify_file": opts.get("download_notify_file", False),
         "notify_queue": opts.get("download_notify_queue", False),
+        "clear_on_queue_complete": opts.get("download_clear_on_queue_complete", False),
     }
 
 
@@ -372,11 +373,13 @@ async def set_download_notifications_api(request: Request, cfg: ConfigService = 
         cfg.config["options"] = {}
     cfg.config["options"]["download_notify_file"] = bool(data.get("notify_file", False))
     cfg.config["options"]["download_notify_queue"] = bool(data.get("notify_queue", False))
+    cfg.config["options"]["download_clear_on_queue_complete"] = bool(data.get("clear_on_queue_complete", False))
     cfg.save()
     return {
         "status": "ok",
         "notify_file": cfg.config["options"]["download_notify_file"],
         "notify_queue": cfg.config["options"]["download_notify_queue"],
+        "clear_on_queue_complete": cfg.config["options"]["download_clear_on_queue_complete"],
     }
 
 

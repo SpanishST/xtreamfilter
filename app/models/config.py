@@ -122,6 +122,7 @@ class Options(BaseModel):
     download_burst_reconnect: int = 0
     download_notify_file: bool = False
     download_notify_queue: bool = False
+    download_clear_on_queue_complete: bool = False
     download_schedule: DownloadSchedule = Field(default_factory=DownloadSchedule)
 
 

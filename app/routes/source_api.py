@@ -149,6 +149,90 @@ async def get_source(source_id: str, cfg: ConfigService = Depends(get_config_ser
     return JSONResponse({"error": "Source not found"}, status_code=404)
 
 
+@router.get("/{source_id}/info")
+async def get_source_info(source_id: str, cfg: ConfigService = Depends(get_config_service)):
+    """Return live subscription details for a saved source.
+
+    Calls the upstream Xtream ``player_api.php`` (no action) which returns
+    ``user_info`` (status, expiry, trial flag, active/max connections,
+    allowed output formats, created_at, message) and ``server_info``
+    (timezone, server URL, ports, time_now, etc.).
+    """
+    source = cfg.get_source_by_id(source_id) if hasattr(cfg, "get_source_by_id") else None
+    if source is None:
+        for s in cfg.config.get("sources", []):
+            if s.get("id") == source_id:
+                source = s
+                break
+    if not source:
+        return JSONResponse({"error": "Source not found"}, status_code=404)
+
+    host = str(source.get("host", "") or "").strip().rstrip("/")
+    username = str(source.get("username", "") or "").strip()
+    password = str(source.get("password", "") or "")
+
+    if not host or not username or not password:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": "Source is missing host/username/password"},
+        )
+
+    url = f"{host}/player_api.php"
+    params = {"username": username, "password": password}
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0),
+            follow_redirects=True,
+            headers={"Connection": "close"},
+        ) as client:
+            resp = await client.get(url, params=params)
+    except httpx.HTTPError as e:
+        return JSONResponse(
+            status_code=502,
+            content={"status": "error", "message": f"Connection failed: {e}"},
+        )
+
+    if resp.status_code != 200:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "status": "error",
+                "message": f"Server returned HTTP {resp.status_code}",
+            },
+        )
+
+    try:
+        payload = resp.json()
+    except Exception:
+        return JSONResponse(
+            status_code=502,
+            content={"status": "error", "message": "Invalid JSON response from provider"},
+        )
+
+    user_info = payload.get("user_info") if isinstance(payload, dict) else None
+    server_info = payload.get("server_info") if isinstance(payload, dict) else None
+
+    if not isinstance(user_info, dict):
+        return JSONResponse(
+            status_code=502,
+            content={"status": "error", "message": "Provider returned no user_info"},
+        )
+
+    allowed = user_info.get("allowed_output_formats", [])
+    if isinstance(allowed, str):
+        allowed = [allowed]
+    user_info = {**user_info, "allowed_output_formats": allowed}
+
+    return {
+        "status": "ok",
+        "source_id": source_id,
+        "source_name": source.get("name"),
+        "user_info": user_info,
+        "server_info": server_info if isinstance(server_info, dict) else {},
+    }
+
+
 @router.put("/{source_id}")
 async def update_source(source_id: str, request: Request, cfg: ConfigService = Depends(get_config_service)):
     data = await request.json()

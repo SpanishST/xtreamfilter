@@ -224,6 +224,10 @@
                         <input type="checkbox" id="notify-queue" onchange="saveNotifySettings()" style="width:16px; height:16px; accent-color:#00d4ff;">
                         Notify when the entire queue finishes (with recap)
                     </label>
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:0.9em;">
+                        <input type="checkbox" id="notify-clear-on-complete" onchange="saveNotifySettings()" style="width:16px; height:16px; accent-color:#00d4ff;">
+                        Clear finished from queue after notification sent
+                    </label>
                 </div>
             </div>
 
@@ -487,6 +491,7 @@
                     document.getElementById('telegram-notify-section').style.display = '';
                     document.getElementById('notify-file').checked = !!data.notify_file;
                     document.getElementById('notify-queue').checked = !!data.notify_queue;
+                    document.getElementById('notify-clear-on-complete').checked = !!data.clear_on_queue_complete;
                 }
             } catch (e) { console.error('Error loading notification settings:', e); }
         }
@@ -494,11 +499,12 @@
         async function saveNotifySettings() {
             const notifyFile = document.getElementById('notify-file').checked;
             const notifyQueue = document.getElementById('notify-queue').checked;
+            const clearOnComplete = document.getElementById('notify-clear-on-complete').checked;
             try {
                 const resp = await fetch('/api/options/download_notifications', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ notify_file: notifyFile, notify_queue: notifyQueue })
+                    body: JSON.stringify({ notify_file: notifyFile, notify_queue: notifyQueue, clear_on_queue_complete: clearOnComplete })
                 });
                 if (resp.ok) {
                     showToast('Notification settings saved', 'success');

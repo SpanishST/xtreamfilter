@@ -1447,6 +1447,10 @@
         // Track refresh polling interval
         let refreshPollInterval = null;
         let refreshPollIntervalMs = null;
+        // Cache of subscription info per source { [sourceId]: { user_info, server_info, fetched_at } }
+        const subscriptionInfoCache = {};
+        // Last refresh progress payload (kept so we can re-render after async fetches)
+        let lastRefreshProgress = null;
         
         // Load sources, filters and cache status on page load
         loadSources();
@@ -1472,8 +1476,33 @@
                     renderSources();
                     renderConnectionInfo();
                     updateFilterSourceSelect();
+                    prefetchAllSubscriptions();
                 })
                 .catch(() => {});
+        }
+
+        function prefetchAllSubscriptions(force = false) {
+            const now = Date.now();
+            const STALE_MS = 5 * 60 * 1000; // re-fetch if older than 5 min
+            const promises = sourcesData
+                .filter(s => s.enabled !== false && s.host && s.username && s.password)
+                .filter(s => force || !subscriptionInfoCache[s.id] || (now - subscriptionInfoCache[s.id].fetched_at > STALE_MS))
+                .map(s => fetch(`/api/sources/${s.id}/info`)
+                    .then(r => r.ok ? r.json() : null)
+                    .then(data => {
+                        if (data && data.status === 'ok') {
+                            subscriptionInfoCache[s.id] = {
+                                user_info: data.user_info || {},
+                                server_info: data.server_info || {},
+                                fetched_at: Date.now(),
+                            };
+                        }
+                    })
+                    .catch(() => {}));
+            if (!promises.length) return Promise.resolve();
+            return Promise.all(promises).then(() => {
+                if (lastRefreshProgress) renderRefreshDetails(lastRefreshProgress);
+            });
         }
         
         function renderSources() {
@@ -1497,6 +1526,7 @@
                                 ${routeBadge}
                             </div>
                             <div style="display: flex; gap: 5px;">
+                                <button class="btn btn-secondary btn-sm" onclick="showSubscriptionInfo('${source.id}')" title="Subscription details">📊 Info</button>
                                 <button class="btn btn-secondary btn-sm" onclick="editSource('${source.id}')">✏️ Edit</button>
                                 <button class="btn btn-danger btn-sm" onclick="deleteSource('${source.id}')">🗑️</button>
                             </div>
@@ -1694,8 +1724,10 @@
                                     <span>Source Enabled</span>
                                 </label>
                             </div>
-                            <div style="display: flex; gap: 10px; margin-top: 20px;">
+                            <div id="source-test-status" style="display: none; margin-top: 15px;"></div>
+                            <div style="display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap;">
                                 <button class="btn btn-primary" onclick="saveSourceEdit('${sourceId}')">Save</button>
+                                <button class="btn btn-secondary" onclick="testSource()">🧪 Test</button>
                                 <button class="btn btn-secondary" onclick="closeSourceEdit()">Cancel</button>
                             </div>
                         </div>
@@ -1708,6 +1740,235 @@
         function closeSourceEdit() {
             const modal = document.getElementById('source-edit-modal');
             if (modal) modal.remove();
+        }
+
+        function closeSubscriptionInfo() {
+            const modal = document.getElementById('subscription-info-modal');
+            if (modal) modal.remove();
+        }
+
+        function _fmtTs(ts) {
+            const n = parseInt(ts, 10);
+            if (!n || isNaN(n) || n <= 0) return null;
+            return new Date(n * 1000);
+        }
+
+        function _humanRemaining(ms) {
+            if (ms <= 0) return 'expired';
+            const sec = Math.floor(ms / 1000);
+            const days = Math.floor(sec / 86400);
+            const hours = Math.floor((sec % 86400) / 3600);
+            const minutes = Math.floor((sec % 3600) / 60);
+            if (days > 0) return `${days}d ${hours}h`;
+            if (hours > 0) return `${hours}h ${minutes}m`;
+            return `${minutes}m`;
+        }
+
+        function _renderSubscription(sourceName, ui, srv) {
+            const expDate = _fmtTs(ui.exp_date);
+            const createdDate = _fmtTs(ui.created_at);
+            const serverNow = _fmtTs(srv.time_now ? Math.floor(new Date(srv.time_now.replace(' ', 'T')).getTime() / 1000) : null);
+            let expStr = '—';
+            let remainingStr = '';
+            let expColor = '#e0e0e0';
+            if (expDate) {
+                expStr = expDate.toLocaleString();
+                const remaining = expDate.getTime() - Date.now();
+                remainingStr = _humanRemaining(remaining);
+                if (remaining <= 0) expColor = '#ef4444';
+                else if (remaining < 7 * 86400 * 1000) expColor = '#f59e0b';
+                else expColor = '#22c55e';
+            } else if (ui.exp_date === null || ui.exp_date === '0' || ui.exp_date === 0) {
+                expStr = 'Never (unlimited)';
+                expColor = '#22c55e';
+            }
+
+            const createdStr = createdDate ? createdDate.toLocaleString() : '—';
+            const status = ui.status || '—';
+            const statusLower = String(status).toLowerCase();
+            const statusColor = statusLower === 'active' ? '#22c55e'
+                : (statusLower === 'expired' || statusLower === 'banned' || statusLower === 'disabled') ? '#ef4444'
+                : '#f59e0b';
+            const trial = ui.is_trial && String(ui.is_trial) !== '0';
+            const active = ui.active_cons ?? '?';
+            const max = ui.max_connections ?? '?';
+            const formats = Array.isArray(ui.allowed_output_formats) && ui.allowed_output_formats.length
+                ? ui.allowed_output_formats.join(', ') : '—';
+
+            const row = (label, value, color) => `
+                <div style="display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.06);">
+                    <span style="color: #888;">${label}</span>
+                    <span style="color: ${color || '#e0e0e0'}; text-align: right; word-break: break-word;">${value}</span>
+                </div>`;
+
+            return `
+                <div class="modal active" id="subscription-info-modal" onclick="if(event.target===this)closeSubscriptionInfo()">
+                    <div class="modal-content" style="max-width: 560px;">
+                        <div class="modal-header">
+                            <h3>📊 Subscription — ${sourceName || 'Source'}</h3>
+                            <button class="modal-close" onclick="closeSubscriptionInfo()">✕</button>
+                        </div>
+                        <div class="modal-body" style="padding: 20px;">
+                            <h4 style="color:#00d4ff; margin-bottom:8px;">Account</h4>
+                            ${row('Username', `<code>${ui.username || '—'}</code>`)}
+                            ${row('Status', `<strong>${status}</strong>${trial ? ' <span style="color:#f59e0b;">(trial)</span>' : ''}`, statusColor)}
+                            ${row('Expires', `${expStr}${remainingStr ? ` <span style="color:#888;">(${remainingStr})</span>` : ''}`, expColor)}
+                            ${row('Created', createdStr)}
+                            ${row('Connections', `${active} / ${max}`)}
+                            ${row('Allowed formats', formats)}
+                            ${ui.message ? row('Message', ui.message) : ''}
+
+                            <h4 style="color:#00d4ff; margin: 18px 0 8px;">Server</h4>
+                            ${row('URL', `<code>${srv.url || '—'}</code>${srv.port ? `:${srv.port}` : ''}`)}
+                            ${srv.https_port ? row('HTTPS port', srv.https_port) : ''}
+                            ${srv.server_protocol ? row('Protocol', srv.server_protocol) : ''}
+                            ${srv.timezone ? row('Timezone', srv.timezone) : ''}
+                            ${srv.time_now ? row('Server time', srv.time_now) : ''}
+                            ${srv.timestamp_now ? row('Timestamp', srv.timestamp_now) : ''}
+
+                            <details style="margin-top: 18px;">
+                                <summary style="cursor:pointer; color:#888;">Raw response</summary>
+                                <pre style="margin-top:8px; max-height: 240px; overflow:auto; background: rgba(0,0,0,0.4); padding:10px; border-radius:6px; font-size:0.8em; color:#b0b0b0;">${JSON.stringify({user_info: ui, server_info: srv}, null, 2)}</pre>
+                            </details>
+
+                            <div style="display:flex; gap:10px; margin-top:20px; justify-content:flex-end;">
+                                <button class="btn btn-secondary" onclick="showSubscriptionInfo('${ui._source_id}')">🔄 Refresh</button>
+                                <button class="btn btn-secondary" onclick="closeSubscriptionInfo()">Close</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function showSubscriptionInfo(sourceId) {
+            // Remove any existing modal first
+            closeSubscriptionInfo();
+            const source = sourcesData.find(s => s.id === sourceId);
+            const name = source ? (source.name || source.id) : sourceId;
+            // Loading placeholder
+            const loadingHtml = `
+                <div class="modal active" id="subscription-info-modal" onclick="if(event.target===this)closeSubscriptionInfo()">
+                    <div class="modal-content" style="max-width: 560px;">
+                        <div class="modal-header">
+                            <h3>📊 Subscription — ${name}</h3>
+                            <button class="modal-close" onclick="closeSubscriptionInfo()">✕</button>
+                        </div>
+                        <div class="modal-body" style="padding: 30px; text-align: center; color:#888;">
+                            ⏳ Fetching subscription details from provider…
+                        </div>
+                    </div>
+                </div>`;
+            document.body.insertAdjacentHTML('beforeend', loadingHtml);
+
+            fetch(`/api/sources/${sourceId}/info`)
+                .then(r => r.json().then(data => ({status: r.status, data})))
+                .then(({status, data}) => {
+                    closeSubscriptionInfo();
+                    if (status !== 200 || data.status === 'error') {
+                        const msg = data.message || `HTTP ${status}`;
+                        document.body.insertAdjacentHTML('beforeend', `
+                            <div class="modal active" id="subscription-info-modal" onclick="if(event.target===this)closeSubscriptionInfo()">
+                                <div class="modal-content" style="max-width: 480px;">
+                                    <div class="modal-header">
+                                        <h3>📊 Subscription — ${name}</h3>
+                                        <button class="modal-close" onclick="closeSubscriptionInfo()">✕</button>
+                                    </div>
+                                    <div class="modal-body" style="padding:20px;">
+                                        <div style="background: rgba(239,68,68,0.15); color:#ef4444; border:1px solid rgba(239,68,68,0.3); padding:12px; border-radius:6px;">
+                                            ❌ ${msg}
+                                        </div>
+                                        <div style="display:flex; gap:10px; margin-top:20px; justify-content:flex-end;">
+                                            <button class="btn btn-secondary" onclick="showSubscriptionInfo('${sourceId}')">🔄 Retry</button>
+                                            <button class="btn btn-secondary" onclick="closeSubscriptionInfo()">Close</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>`);
+                        return;
+                    }
+                    const ui = data.user_info || {};
+                    ui._source_id = sourceId;
+                    const srv = data.server_info || {};
+                    document.body.insertAdjacentHTML('beforeend', _renderSubscription(data.source_name || name, ui, srv));
+                })
+                .catch(err => {
+                    closeSubscriptionInfo();
+                    alert('Failed to fetch subscription info: ' + err);
+                });
+        }
+
+        function showSourceTestStatus(type, html) {
+            const el = document.getElementById('source-test-status');
+            if (!el) return;
+            el.style.display = 'block';
+            el.style.padding = '10px';
+            el.style.borderRadius = '4px';
+            if (type === 'success') {
+                el.style.background = 'rgba(34, 197, 94, 0.15)';
+                el.style.color = '#22c55e';
+                el.style.border = '1px solid rgba(34, 197, 94, 0.3)';
+            } else if (type === 'error') {
+                el.style.background = 'rgba(239, 68, 68, 0.15)';
+                el.style.color = '#ef4444';
+                el.style.border = '1px solid rgba(239, 68, 68, 0.3)';
+            } else {
+                el.style.background = 'rgba(59, 130, 246, 0.15)';
+                el.style.color = '#3b82f6';
+                el.style.border = '1px solid rgba(59, 130, 246, 0.3)';
+            }
+            el.innerHTML = html;
+        }
+
+        function testSource() {
+            const payload = {
+                host: document.getElementById('edit-source-host').value.trim(),
+                username: document.getElementById('edit-source-username').value.trim(),
+                password: document.getElementById('edit-source-password').value
+            };
+            if (!payload.host || !payload.username || !payload.password) {
+                showSourceTestStatus('error', 'Host, username and password are required.');
+                return;
+            }
+            showSourceTestStatus('info', '⏳ Testing connection...');
+            fetch('/api/sources/test', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            })
+            .then(r => r.json().then(data => ({status: r.status, data})))
+            .then(({status, data}) => {
+                if (status === 200) {
+                    const ui = data.user_info || {};
+                    let exp = '—';
+                    if (ui.exp_date) {
+                        const ts = parseInt(ui.exp_date, 10);
+                        if (!isNaN(ts) && ts > 0) {
+                            exp = new Date(ts * 1000).toLocaleString();
+                        } else {
+                            exp = ui.exp_date;
+                        }
+                    }
+                    const formats = Array.isArray(ui.allowed_output_formats) && ui.allowed_output_formats.length
+                        ? ui.allowed_output_formats.join(', ') : '—';
+                    const trial = ui.is_trial && String(ui.is_trial) !== '0' ? ' (trial)' : '';
+                    showSourceTestStatus('success',
+                        `<strong>✅ ${data.message || 'Connected'}</strong><br>` +
+                        `<div style="margin-top:6px; font-size: 0.9em; color: inherit;">` +
+                        `User: <code>${ui.username || '—'}</code>${trial}<br>` +
+                        `Status: ${ui.status || '—'}<br>` +
+                        `Connections: ${ui.active_cons ?? '?'} / ${ui.max_connections ?? '?'}<br>` +
+                        `Expires: ${exp}<br>` +
+                        `Allowed formats: ${formats}` +
+                        `</div>`
+                    );
+                } else {
+                    showSourceTestStatus('error', `❌ ${data.message || 'Test failed'}`);
+                }
+            })
+            .catch(() => {
+                showSourceTestStatus('error', '❌ Failed to reach the server.');
+            });
         }
         
         function saveSourceEdit(sourceId) {
@@ -1957,6 +2218,28 @@
                 if (source.last_refresh) {
                     metaParts.push(`Last source refresh ${formatRelativeTime(source.last_refresh)}`);
                 }
+                const subInfo = subscriptionInfoCache[source.source_id];
+                let expiryHtml = '';
+                if (subInfo) {
+                    const ts = parseInt(subInfo.user_info.exp_date, 10);
+                    if (ts && !isNaN(ts) && ts > 0) {
+                        const expDate = new Date(ts * 1000);
+                        const remainingMs = expDate.getTime() - Date.now();
+                        const sec = Math.max(0, Math.floor(remainingMs / 1000));
+                        const days = Math.floor(sec / 86400);
+                        const hours = Math.floor((sec % 86400) / 3600);
+                        let label;
+                        if (remainingMs <= 0) label = 'expired';
+                        else if (days > 0) label = `${days}d ${hours}h`;
+                        else label = `${hours}h`;
+                        const color = remainingMs <= 0 ? '#ef4444'
+                            : (remainingMs < 7 * 86400 * 1000 ? '#f59e0b' : '#22c55e');
+                        const iso = expDate.toLocaleString();
+                        expiryHtml = `<span style="color:${color}; margin-left:8px;" title="Expires ${escapeHtml(iso)}">⏳ ${escapeHtml(label)}</span>`;
+                    } else if (subInfo.user_info.exp_date === null || subInfo.user_info.exp_date === '0' || subInfo.user_info.exp_date === 0) {
+                        expiryHtml = `<span style="color:#22c55e; margin-left:8px;" title="No expiration">⏳ unlimited</span>`;
+                    }
+                }
                 if (errors.length) {
                     metaParts.push(`${errors.length} issue${errors.length === 1 ? '' : 's'}`);
                 }
@@ -2004,7 +2287,7 @@
                         <summary>
                             <div class="refresh-source-row">
                                 <div>
-                                    <div class="refresh-source-name">${escapeHtml(source.source_name || source.source_id || 'Unknown source')}</div>
+                                    <div class="refresh-source-name">${escapeHtml(source.source_name || source.source_id || 'Unknown source')}${expiryHtml}</div>
                                     <div class="refresh-source-meta">${escapeHtml(metaParts.join(' • ') || 'Awaiting refresh')}</div>
                                 </div>
                                 <span class="refresh-status-pill ${sourceMeta.className}">${sourceMeta.icon} ${escapeHtml(sourceMeta.label)}</span>
@@ -2033,7 +2316,13 @@
                     const progressContainer = document.getElementById('refresh-progress-container');
                     const progress = data.refresh_progress || {};
                     const outcome = data.last_refresh_outcome || progress.status || 'idle';
+                    const wasInProgress = lastRefreshProgress && lastRefreshProgress.in_progress;
+                    lastRefreshProgress = progress;
                     renderRefreshDetails(progress);
+                    // When a refresh just completed, force-refresh subscription info
+                    if (wasInProgress && !progress.in_progress) {
+                        prefetchAllSubscriptions(true);
+                    }
                     
                     // Status indicator
                     let status = '⏳';

@@ -17,6 +17,7 @@ from app.database import DB_NAME, db_connect
 if TYPE_CHECKING:
     from app.services.config_service import ConfigService
     from app.services.notification_service import NotificationService
+    from app.services.cart_service import CartService
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class CacheService:
         self.config_service = config_service
         self.http_client = http_client
         self.notification_service = notification_service
+        self.cart_service: "CartService | None" = None
         self.data_dir = config_service.data_dir
         self.db_path = os.path.join(self.data_dir, DB_NAME)
 
@@ -891,6 +893,101 @@ class CacheService:
                         return False
                 except (ValueError, TypeError):
                     pass
+
+        # If a download is currently active in the cart, delay the refresh
+        # until it completes so we don't compete with it for upstream
+        # bandwidth / rate limits. We keep `in_progress=True` so concurrent
+        # refresh triggers coalesce into a single waiter.
+        if self.cart_service is not None and self.cart_service.is_download_active():
+            logger.info("Cache refresh delayed: download in progress in cart")
+            wait_started_at = datetime.now().isoformat()
+            async with self._cache_lock:
+                self._api_cache["refresh_in_progress"] = True
+            self.save_refresh_progress(
+                {
+                    "in_progress": True,
+                    "status": "waiting",
+                    "current_source": 0,
+                    "total_sources": 0,
+                    "current_source_name": "",
+                    "current_step": "Waiting for active download to finish",
+                    "percent": 0,
+                    "started_at": wait_started_at,
+                    "finished_at": None,
+                    "last_error": "",
+                    "source_results": [],
+                    "summary": self._default_refresh_summary(),
+                }
+            )
+
+            max_wait_seconds = 24 * 3600  # safety cap
+            poll_interval = 30
+            heartbeat_interval = 300  # refresh started_at every 5min so the
+                                      # 600s staleness guard at the top keeps
+                                      # coalescing concurrent refresh triggers
+            waited = 0
+            last_heartbeat = 0
+            try:
+                while self.cart_service.is_download_active():
+                    if waited >= max_wait_seconds:
+                        logger.warning(
+                            "Cache refresh waited %ss for downloads to finish; aborting",
+                            waited,
+                        )
+                        async with self._cache_lock:
+                            self._api_cache["refresh_in_progress"] = False
+                        self.save_refresh_progress(
+                            {
+                                "in_progress": False,
+                                "status": "failed",
+                                "current_source": 0,
+                                "total_sources": 0,
+                                "current_source_name": "",
+                                "current_step": "Aborted: download still active after wait",
+                                "percent": 0,
+                                "started_at": wait_started_at,
+                                "finished_at": datetime.now().isoformat(),
+                                "last_error": "Cache refresh aborted: download still in progress",
+                                "source_results": [],
+                                "summary": self._default_refresh_summary(),
+                            }
+                        )
+                        return False
+                    await asyncio.sleep(poll_interval)
+                    waited += poll_interval
+                    if waited - last_heartbeat >= heartbeat_interval:
+                        last_heartbeat = waited
+                        self.save_refresh_progress(
+                            {
+                                "in_progress": True,
+                                "status": "waiting",
+                                "current_source": 0,
+                                "total_sources": 0,
+                                "current_source_name": "",
+                                "current_step": (
+                                    f"Waiting for active download to finish "
+                                    f"({waited // 60} min)"
+                                ),
+                                "percent": 0,
+                                "started_at": datetime.now().isoformat(),
+                                "finished_at": None,
+                                "last_error": "",
+                                "source_results": [],
+                                "summary": self._default_refresh_summary(),
+                            }
+                        )
+            except asyncio.CancelledError:
+                async with self._cache_lock:
+                    self._api_cache["refresh_in_progress"] = False
+                self.clear_refresh_progress(
+                    status="cancelled",
+                    last_error="Cancelled while waiting for downloads",
+                )
+                raise
+
+            logger.info(
+                "Download finished after %ss, resuming cache refresh", waited
+            )
 
         config = self.config_service.config
         sources = config.get("sources", [])

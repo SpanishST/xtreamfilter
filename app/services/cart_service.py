@@ -476,6 +476,16 @@ class CartService:
     def progress(self) -> dict:
         return self._download_progress
 
+    def is_download_active(self) -> bool:
+        """Return True if a download worker is running or an item is mid-download.
+
+        Used by other services (e.g. cache refresh) to avoid competing with
+        an in-progress download for bandwidth / upstream rate limits.
+        """
+        if self._download_task is not None and not self._download_task.done():
+            return True
+        return any(item.get("status") == "downloading" for item in self._download_cart)
+
     # ------------------------------------------------------------------
     # Download schedule
     # ------------------------------------------------------------------

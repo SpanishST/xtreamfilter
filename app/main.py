@@ -190,6 +190,7 @@ async def lifespan(app: FastAPI):
     monitor.load_monitored()
     monitor.load_monitored_movies()
     cart.monitor_service = monitor  # late bind for canonical name lookup
+    cache.cart_service = cart  # late bind so refresh can defer to active downloads
 
     m3u = M3uService(cfg, cache)
 

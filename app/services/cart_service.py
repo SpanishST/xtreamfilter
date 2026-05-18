@@ -1165,6 +1165,17 @@ class CartService:
             await self._handle_download_queue_complete()
 
     async def _move_temp_to_destination(self, item: dict, temp_path: str, file_path: str) -> bool:
+        """Move the completed temp file to its final destination.
+
+        The filesystem work (which may stream gigabytes across a CIFS mount
+        and block for minutes) runs in a worker thread so the asyncio event
+        loop — and the rest of the HTTP API — stays responsive.
+        """
+        return await asyncio.to_thread(
+            self._move_temp_to_destination_sync, item, temp_path, file_path
+        )
+
+    def _move_temp_to_destination_sync(self, item: dict, temp_path: str, file_path: str) -> bool:
         item_name = item.get("name", "unknown")
         if not os.path.exists(temp_path):
             item["status"] = "move_failed"

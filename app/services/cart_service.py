@@ -961,7 +961,7 @@ class CartService:
                 timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
                 max_retries = 5
                 retry_base_delay = 30
-                RETRYABLE_CODES = {429, 458, 503, 551}
+                RETRYABLE_CODES = {429, 458, 500, 502, 503, 504, 551}
 
                 downloaded = 0
                 total = 0
@@ -1194,35 +1194,100 @@ class CartService:
         try:
             safe_makedirs(dest_dir)
         except Exception as e:
+            logger.exception(
+                "[MOVE] safe_makedirs failed for '%s' (dest_dir=%s)", item_name, dest_dir
+            )
             item["status"] = "move_failed"
             item["error"] = f"Cannot create destination directory: {e}"
             item["temp_path"] = temp_path
             self.save_cart()
             return False
+
+        logger.info(
+            "[MOVE] Starting move for '%s' (%s -> %s, %.1f MB)",
+            item_name, temp_path, file_path, temp_size / 1024 / 1024,
+        )
+
         moved = False
+        move_error: Exception | None = None
+        copy_error: Exception | None = None
         try:
             shutil.move(temp_path, file_path)
             moved = True
-        except Exception:
+        except Exception as exc:
+            move_error = exc
+            logger.warning(
+                "[MOVE] shutil.move failed for '%s' (%s -> %s): %r",
+                item_name, temp_path, file_path, exc,
+            )
+            # shutil.move may have already copied the bytes to dest before
+            # failing on the source unlink (common on CIFS). If the
+            # destination is already there with the right size, accept it
+            # rather than copying everything a second time.
             try:
-                shutil.copy2(temp_path, file_path)
-                moved = True
-            except Exception:
-                pass
+                if os.path.exists(file_path) and os.path.getsize(file_path) == temp_size:
+                    logger.info(
+                        "[MOVE] Destination already complete for '%s' despite move error; "
+                        "accepting and removing temp", item_name,
+                    )
+                    moved = True
+            except OSError as size_exc:
+                logger.warning(
+                    "[MOVE] Could not stat destination after move error for '%s': %r",
+                    item_name, size_exc,
+                )
+
+            if not moved:
+                try:
+                    shutil.copy2(temp_path, file_path)
+                    moved = True
+                except Exception as cexc:
+                    copy_error = cexc
+                    logger.exception(
+                        "[MOVE] shutil.copy2 fallback failed for '%s' (%s -> %s)",
+                        item_name, temp_path, file_path,
+                    )
         if not moved:
+            detail = f"move={move_error!r}"
+            if copy_error is not None:
+                detail += f"; copy={copy_error!r}"
             item["status"] = "move_failed"
-            item["error"] = "Download OK but failed to move file to destination. Temp file preserved."
+            item["error"] = (
+                "Download OK but failed to move file to destination. "
+                f"Temp file preserved. ({detail})"
+            )
             item["temp_path"] = temp_path
             self.save_cart()
             return False
         if not os.path.exists(file_path):
+            logger.error(
+                "[MOVE] Destination file missing after move for '%s' (expected %s)",
+                item_name, file_path,
+            )
             item["status"] = "move_failed"
             item["error"] = "Destination file missing after move operation"
             item["temp_path"] = temp_path
             self.save_cart()
             return False
+        # CIFS/SMB clients sometimes serve stale metadata immediately after a
+        # write; retry the size check a few times before declaring mismatch
+        # (which is destructive — it deletes the destination).
         dest_size = os.path.getsize(file_path)
         if dest_size != temp_size:
+            for retry in range(5):
+                time.sleep(1.0)
+                dest_size = os.path.getsize(file_path)
+                if dest_size == temp_size:
+                    logger.info(
+                        "[MOVE] Size match for '%s' after %d retry(ies)",
+                        item_name, retry + 1,
+                    )
+                    break
+        if dest_size != temp_size:
+            logger.error(
+                "[MOVE] Size mismatch for '%s' (temp=%d, dest=%d) — removing dest, preserving temp",
+                item_name, temp_size, dest_size,
+            )
             try:
                 os.remove(file_path)
             except OSError:

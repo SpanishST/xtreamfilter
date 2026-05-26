@@ -2200,7 +2200,7 @@
                 sourceSelect.innerHTML = allSources.map((s, idx) => {
                     const srcInfo = sources.find(x => x.id === s.source_id);
                     const srcName = srcInfo ? srcInfo.name : s.source_name || s.source_id;
-                    return '<option value="' + idx + '"' + (s.source_id === sourceId ? ' selected' : '') + '>' + escapeHtml(srcName) + ' — ' + escapeHtml(s.name) + '</option>';
+                    return '<option value="' + idx + '"' + (s.source_id === sourceId ? ' selected' : '') + '>' + escapeHtml(srcName) + ' — ' + escapeHtml(s.name) + (s.group ? ' (' + escapeHtml(s.group) + ')' : '') + '</option>';
                 }).join('');
                 sourceGroup.style.display = 'block';
             } else {
@@ -2261,7 +2261,7 @@
             const selectEl = document.getElementById('episode-source-select');
             if (allSources && allSources.length > 1) {
                 selectEl.innerHTML = allSources.map(s =>
-                    '<option value="' + escapeAttr(s.source_id) + '|' + escapeAttr(s.item_id) + '|' + escapeAttr(s.name) + '|' + escapeAttr(s.icon) + '|' + escapeAttr(s.group) + '"' + (s.source_id === sourceId ? ' selected' : '') + '>' + escapeHtml(s.source_name) + ' — ' + escapeHtml(s.name) + '</option>'
+                    '<option value="' + escapeAttr(s.source_id) + '|' + escapeAttr(s.item_id) + '|' + escapeAttr(s.name) + '|' + escapeAttr(s.icon) + '|' + escapeAttr(s.group) + '"' + (s.source_id === sourceId ? ' selected' : '') + '>' + escapeHtml(s.source_name) + ' — ' + escapeHtml(s.name) + (s.group ? ' (' + escapeHtml(s.group) + ')' : '') + '</option>'
                 ).join('');
                 selectorDiv.style.display = 'flex';
             } else {

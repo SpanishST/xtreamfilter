@@ -499,18 +499,21 @@ class CartService:
         """
         schedule = self.config_service.get_download_schedule()
         if not schedule.get("enabled", False):
+            logger.debug("is_in_download_window: schedule disabled, returning True")
             return True  # No schedule — always allowed
 
         now = datetime.now()
         day_name = DAY_NAMES[now.weekday()]
         day_cfg = schedule.get(day_name, {})
         if not day_cfg.get("enabled", False):
+            logger.debug(f"is_in_download_window: day {day_name} disabled, returning False")
             return False  # This day is not enabled
 
         try:
             start_h, start_m = map(int, day_cfg.get("start", "00:00").split(":"))
             end_h, end_m = map(int, day_cfg.get("end", "00:00").split(":"))
         except (ValueError, AttributeError):
+            logger.debug("is_in_download_window: invalid time format, returning False")
             return False
 
         start_minutes = start_h * 60 + start_m
@@ -519,10 +522,14 @@ class CartService:
 
         if start_minutes <= end_minutes:
             # Same-day window (e.g. 01:00 → 07:00)
-            return start_minutes <= now_minutes < end_minutes
+            result = start_minutes <= now_minutes < end_minutes
+            logger.debug(f"is_in_download_window: same-day window {start_h}:{start_m}-{end_h}:{end_m}, now={now.hour}:{now.minute}, result={result}")
+            return result
         else:
             # Overnight window (e.g. 23:00 → 06:00)
-            return now_minutes >= start_minutes or now_minutes < end_minutes
+            result = now_minutes >= start_minutes or now_minutes < end_minutes
+            logger.debug(f"is_in_download_window: overnight window {start_h}:{start_m}-{end_h}:{end_m}, now={now.hour}:{now.minute}, result={result}")
+            return result
 
     # ------------------------------------------------------------------
     # Persistence
@@ -537,6 +544,7 @@ class CartService:
                 "added_at, status, progress, error, file_path, file_size, temp_path "
                 "FROM cart_items ORDER BY added_at"
             ).fetchall()
+            logger.info(f"load_cart: loaded {len(rows)} items from DB")
             self._download_cart = [
                 {
                     "id": r["id"],
@@ -562,6 +570,7 @@ class CartService:
                 }
                 for r in rows
             ]
+            logger.info(f"load_cart: _download_cart now has {len(self._download_cart)} items, statuses: {[(i['name'], i['status']) for i in self._download_cart]}")
             return self._download_cart
         except Exception as e:
             logger.error(f"Error loading cart from DB: {e}")
@@ -895,12 +904,15 @@ class CartService:
         nothing runs between two non-awaited statements in the same frame).
         """
         if self._download_task is not None and not self._download_task.done():
+            logger.debug("_try_start_worker: task already running, returning False")
             return False
         self._download_task = asyncio.create_task(self.download_worker())
+        logger.info(f"_try_start_worker: created new download_worker task, task={self._download_task}")
         return True
 
     async def download_worker(self) -> None:
         """Background worker that processes the download queue sequentially."""
+        logger.info("download_worker: starting")
         self._download_cancel_event = asyncio.Event()
 
         while True:

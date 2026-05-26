@@ -114,17 +114,22 @@ async def background_refresh_loop(
 
 async def download_schedule_loop(cart: CartService) -> None:
     """Periodically check if we're inside a download window and auto-start the worker."""
+    print("Download schedule loop started", flush=True)
     logger.info("Download schedule loop started")
     await asyncio.sleep(30)  # Initial delay to let other services start
 
     while True:
         try:
             schedule = cart.config_service.get_download_schedule()
+            logger.info(f"Schedule check: enabled={schedule.get('enabled', False)}, in_window={cart.is_in_download_window()}, cart_size={len(cart.cart)}, queued={[i.get('name') for i in cart.cart if i.get('status') == 'queued']}")
             if schedule.get("enabled", False):
                 has_queued = any(i.get("status") == "queued" for i in cart.cart)
+                logger.info(f"has_queued={has_queued}")
                 if has_queued and cart.is_in_download_window():
                     cart._force_started = False
-                    if cart._try_start_worker():
+                    started = cart._try_start_worker()
+                    logger.info(f"Download schedule: has_queued={has_queued}, in_window={cart.is_in_download_window()}, started={started}")
+                    if started:
                         queued_count = len([i for i in cart.cart if i.get("status") == "queued"])
                         logger.info(f"Download schedule: auto-started worker for {queued_count} queued items")
             await asyncio.sleep(60)
@@ -186,12 +191,24 @@ async def lifespan(app: FastAPI):
     # This uses aiosqlite which runs on thread pool, doesn't block event loop
     await cache.load_cache_from_disk_async()
 
+    # --- load monitored series/movies AND cart BEFORE yield so API returns data immediately ---
+    monitor.load_monitored()
+    monitor.load_monitored_movies()
+    cart.load_cart()
+
+    # --- background tasks (start before yield so they run during app lifetime) ---
+    bg_task = asyncio.create_task(
+        background_refresh_loop(cache, epg_svc, monitor, cat)
+    )
+    schedule_task = asyncio.create_task(
+        download_schedule_loop(cart)
+    )
+
     # --- yield here so server can start accepting requests ASAP ---
     yield
 
     cart.monitor_service = monitor  # late bind for canonical name lookup
     cache.cart_service = cart  # late bind so refresh can defer to active downloads
-    cart.load_cart()
     # Recover stuck downloads
     recovered = 0
     for item in cart._download_cart:
@@ -204,18 +221,7 @@ async def lifespan(app: FastAPI):
         cart.save_cart()
         logger.info(f"Recovered {recovered} stuck download(s) back to queued")
 
-    monitor.load_monitored()
-    monitor.load_monitored_movies()
-
     epg_svc.load_epg_cache_from_disk()
-
-    # --- background tasks ---
-    bg_task = asyncio.create_task(
-        background_refresh_loop(cache, epg_svc, monitor, cat)
-    )
-    schedule_task = asyncio.create_task(
-        download_schedule_loop(cart)
-    )
 
     async def _initial_on_cache_refreshed():
         await cat.refresh_pattern_categories_async()

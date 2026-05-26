@@ -76,6 +76,7 @@ async def adb_connect(db_path: str) -> aiosqlite.Connection:
     """
     import aiosqlite
     conn = await aiosqlite.connect(db_path, timeout=30)
+    conn.row_factory = aiosqlite.Row
     await _pragma_setup_async(conn)
     return conn
 

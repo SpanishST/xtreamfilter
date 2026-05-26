@@ -151,7 +151,7 @@ async def lifespan(app: FastAPI):
     init_db(db_path)
     run_migration_if_needed(db_path, data_dir)
 
-    # --- instantiate services ---
+    # --- instantiate services (minimal init before yield) ---
     cfg = ConfigService(data_dir)
     cfg.load()
 
@@ -160,37 +160,13 @@ async def lifespan(app: FastAPI):
     notif = NotificationService(cfg, http)
 
     cache = CacheService(cfg, http, notif)
-    cache.load_cache_from_disk()
 
     epg_svc = EpgService(cfg, http, cache)
-    epg_svc.load_epg_cache_from_disk()
-
     xtream = XtreamService(cfg, cache, http)
-
     jellyfin = JellyfinService(cfg, http)
-
     cat = CategoryService(cfg, cache, notif)
-
     cart = CartService(cfg, http, notif, xtream, jellyfin)
-    cart.load_cart()
-    # Recover stuck downloads
-    recovered = 0
-    for item in cart._download_cart:
-        if item.get("status") == "downloading":
-            item["status"] = "queued"
-            item["progress"] = 0
-            item["error"] = None
-            recovered += 1
-    if recovered:
-        cart.save_cart()
-        logger.info(f"Recovered {recovered} stuck download(s) back to queued")
-
     monitor = MonitorService(cfg, cache, xtream, notif, cart)
-    monitor.load_monitored()
-    monitor.load_monitored_movies()
-    cart.monitor_service = monitor  # late bind for canonical name lookup
-    cache.cart_service = cart  # late bind so refresh can defer to active downloads
-
     m3u = M3uService(cfg, cache)
 
     # --- attach to app.state for DI ---
@@ -205,6 +181,33 @@ async def lifespan(app: FastAPI):
     app.state.cart_service = cart
     app.state.monitor_service = monitor
     app.state.m3u_service = m3u
+
+    # --- yield here so server can start accepting requests ASAP ---
+    yield
+
+    # --- load cache and remaining services AFTER yield ---
+    logger.info("Loading cache from DB...")
+    await cache.load_cache_from_disk_async()
+
+    cart.monitor_service = monitor  # late bind for canonical name lookup
+    cache.cart_service = cart  # late bind so refresh can defer to active downloads
+    cart.load_cart()
+    # Recover stuck downloads
+    recovered = 0
+    for item in cart._download_cart:
+        if item.get("status") == "downloading":
+            item["status"] = "queued"
+            item["progress"] = 0
+            item["error"] = None
+            recovered += 1
+    if recovered:
+        cart.save_cart()
+        logger.info(f"Recovered {recovered} stuck download(s) back to queued")
+
+    monitor.load_monitored()
+    monitor.load_monitored_movies()
+
+    epg_svc.load_epg_cache_from_disk()
 
     # --- background tasks ---
     bg_task = asyncio.create_task(
@@ -224,8 +227,6 @@ async def lifespan(app: FastAPI):
     if not epg_svc.is_epg_cache_valid():
         logger.info("EPG cache is empty or invalid, triggering initial EPG refresh…")
         asyncio.create_task(epg_svc.refresh_epg_cache())
-
-    yield
 
     # --- shutdown ---
     bg_task.cancel()

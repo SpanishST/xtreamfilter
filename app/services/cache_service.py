@@ -529,15 +529,100 @@ class CacheService:
         finally:
             conn.close()
 
-    def save_cache_to_disk(self) -> None:
+    async def load_cache_from_disk_async(self) -> None:
+        async with adb_transaction(self.db_path) as conn:
+            async with conn.execute(
+                "SELECT last_refresh FROM cache_meta WHERE id = 1"
+            ) as cursor:
+                meta_row = await cursor.fetchone()
+            if meta_row:
+                self._api_cache["last_refresh"] = meta_row["last_refresh"]
+
+            async with conn.execute(
+                "SELECT source_id, content_type, category_id, category_name, data "
+                "FROM source_categories ORDER BY source_id, content_type"
+            ) as cursor:
+                cat_rows = await cursor.fetchall()
+
+            async with conn.execute(
+                "SELECT source_id, content_type, stream_id, data "
+                "FROM streams ORDER BY source_id, content_type"
+            ) as cursor:
+                stream_rows = await cursor.fetchall()
+
+            async with conn.execute(
+                "SELECT source_id, last_refresh FROM source_last_refresh"
+            ) as cursor:
+                src_refresh_rows = await cursor.fetchall()
+
+        sources: dict[str, dict] = {}
+
+        CAT_KEY = {
+            "live": "live_categories",
+            "vod": "vod_categories",
+            "series": "series_categories",
+        }
+        STREAM_KEY = {
+            "live": "live_streams",
+            "vod": "vod_streams",
+            "series": "series",
+        }
+
+        for row in cat_rows:
+            src = row["source_id"]
+            ct = row["content_type"]
+            if src not in sources:
+                sources[src] = {
+                    "live_categories": [], "vod_categories": [],
+                    "series_categories": [], "live_streams": [],
+                    "vod_streams": [], "series": [], "last_refresh": None,
+                }
+            key = CAT_KEY.get(ct)
+            if key:
+                try:
+                    sources[src][key].append(json.loads(row["data"]))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        for row in stream_rows:
+            src = row["source_id"]
+            ct = row["content_type"]
+            if src not in sources:
+                sources[src] = {
+                    "live_categories": [], "vod_categories": [],
+                    "series_categories": [], "live_streams": [],
+                    "vod_streams": [], "series": [], "last_refresh": None,
+                }
+            key = STREAM_KEY.get(ct)
+            if key:
+                try:
+                    sources[src][key].append(json.loads(row["data"]))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        for rr in src_refresh_rows:
+            if rr["source_id"] in sources:
+                sources[rr["source_id"]]["last_refresh"] = rr["last_refresh"]
+
+        if sources:
+            self._api_cache["sources"] = sources
+            self._api_cache["refresh_in_progress"] = False
+            self._inject_source_info()
+            await asyncio.to_thread(self._rebuild_stream_source_map_sync)
+            await asyncio.to_thread(self._rebuild_stream_index)
+            logger.info(
+                f"Loaded cache from DB. Last refresh: {self._api_cache.get('last_refresh', 'Never')}"
+            )
+        else:
+            logger.info("DB cache is empty — will refresh on first request")
+
+    def _save_cache_to_disk_sync(self) -> None:
         conn = db_connect(self.db_path)
         try:
             sources = self._api_cache.get("sources", {})
 
-            # Collect all current source IDs so we can prune stale entries
             active_source_ids = list(sources.keys())
 
-            # Clear stale source data
             if active_source_ids:
                 placeholders = ",".join("?" * len(active_source_ids))
                 conn.execute(
@@ -569,7 +654,6 @@ class CacheService:
             ]
 
             for source_id, src_cache in sources.items():
-                # Categories
                 cat_rows = []
                 for cat_key, ct in CAT_MAP:
                     for cat in src_cache.get(cat_key, []):
@@ -587,7 +671,6 @@ class CacheService:
                         cat_rows,
                     )
 
-                # Streams
                 stream_rows = []
                 for list_key, ct, id_field in TYPE_MAP:
                     for stream in src_cache.get(list_key, []):
@@ -614,7 +697,6 @@ class CacheService:
                         stream_rows,
                     )
 
-                # Per-source last_refresh
                 src_last = src_cache.get("last_refresh")
                 if src_last:
                     conn.execute(
@@ -622,7 +704,6 @@ class CacheService:
                         (source_id, src_last),
                     )
 
-            # Global last_refresh
             global_refresh = self._api_cache.get("last_refresh")
             if global_refresh:
                 conn.execute(
@@ -636,6 +717,117 @@ class CacheService:
             logger.error(f"Failed to save cache to DB: {e}")
         finally:
             conn.close()
+
+    async def save_cache_to_disk_async(self) -> None:
+        async with adb_transaction(self.db_path) as conn:
+            sources = self._api_cache.get("sources", {})
+
+            active_source_ids = list(sources.keys())
+
+            if active_source_ids:
+                placeholders = ",".join("?" * len(active_source_ids))
+                await conn.execute(
+                    f"DELETE FROM streams WHERE source_id NOT IN ({placeholders})",
+                    active_source_ids,
+                )
+                await conn.execute(
+                    f"DELETE FROM source_categories WHERE source_id NOT IN ({placeholders})",
+                    active_source_ids,
+                )
+                await conn.execute(
+                    f"DELETE FROM source_last_refresh WHERE source_id NOT IN ({placeholders})",
+                    active_source_ids,
+                )
+            else:
+                await conn.execute("DELETE FROM streams")
+                await conn.execute("DELETE FROM source_categories")
+                await conn.execute("DELETE FROM source_last_refresh")
+
+            TYPE_MAP: list[tuple[str, str, str]] = [
+                ("live_streams", "live", "stream_id"),
+                ("vod_streams", "vod", "stream_id"),
+                ("series", "series", "series_id"),
+            ]
+            CAT_MAP: list[tuple[str, str]] = [
+                ("live_categories", "live"),
+                ("vod_categories", "vod"),
+                ("series_categories", "series"),
+            ]
+
+            for source_id, src_cache in sources.items():
+                cat_rows = []
+                for cat_key, ct in CAT_MAP:
+                    for cat in src_cache.get(cat_key, []):
+                        cat_rows.append((
+                            source_id, ct,
+                            str(cat.get("category_id", "")),
+                            cat.get("category_name", ""),
+                            json.dumps(cat),
+                        ))
+                if cat_rows:
+                    await conn.executemany(
+                        "INSERT OR REPLACE INTO source_categories "
+                        "(source_id, content_type, category_id, category_name, data) "
+                        "VALUES (?,?,?,?,?)",
+                        cat_rows,
+                    )
+
+                stream_rows = []
+                for list_key, ct, id_field in TYPE_MAP:
+                    for stream in src_cache.get(list_key, []):
+                        sid = str(stream.get(id_field, ""))
+                        if not sid:
+                            continue
+                        added_raw = stream.get("added") or stream.get("last_modified", 0)
+                        try:
+                            added = int(added_raw) if added_raw else 0
+                        except (ValueError, TypeError):
+                            added = 0
+                        stream_rows.append((
+                            source_id, ct, sid,
+                            stream.get("name", ""),
+                            str(stream.get("category_id", "")),
+                            added,
+                            json.dumps(stream),
+                        ))
+                if stream_rows:
+                    await conn.executemany(
+                        "INSERT OR REPLACE INTO streams "
+                        "(source_id, content_type, stream_id, name, category_id, added, data) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        stream_rows,
+                    )
+
+                src_last = src_cache.get("last_refresh")
+                if src_last:
+                    await conn.execute(
+                        "INSERT OR REPLACE INTO source_last_refresh (source_id, last_refresh) VALUES (?,?)",
+                        (source_id, src_last),
+                    )
+
+            global_refresh = self._api_cache.get("last_refresh")
+            if global_refresh:
+                await conn.execute(
+                    "INSERT OR REPLACE INTO cache_meta (id, last_refresh) VALUES (1, ?)",
+                    (global_refresh,),
+                )
+
+        logger.info(f"Cache saved to DB at {datetime.now().isoformat()}")
+
+    def save_cache_to_disk(self) -> None:
+        use_async = self.config_service.config.get("database", {}).get("use_async", True)
+        if use_async:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._save_cache_to_disk_sync()
+                return
+            task = loop.create_task(self.save_cache_to_disk_async())
+            task.add_done_callback(
+                lambda t: logger.error(f"Async cache save failed: {t.exception()}") if t.exception() else None
+            )
+        else:
+            self._save_cache_to_disk_sync()
 
     # ------------------------------------------------------------------
     # Source-info injection & stream index
@@ -1294,7 +1486,7 @@ class CacheService:
                 self._inject_source_info()
                 await self.rebuild_stream_source_map()
                 self._rebuild_stream_index()
-                self.save_cache_to_disk()
+                await self.save_cache_to_disk_async()
 
                 if on_cache_refreshed and any_source_updated:
                     progress["in_progress"] = True

@@ -182,12 +182,12 @@ async def lifespan(app: FastAPI):
     app.state.monitor_service = monitor
     app.state.m3u_service = m3u
 
+    # --- load cache BEFORE yield so is_cache_valid() sees correct state ---
+    # This uses aiosqlite which runs on thread pool, doesn't block event loop
+    await cache.load_cache_from_disk_async()
+
     # --- yield here so server can start accepting requests ASAP ---
     yield
-
-    # --- load cache and remaining services AFTER yield ---
-    logger.info("Loading cache from DB...")
-    await cache.load_cache_from_disk_async()
 
     cart.monitor_service = monitor  # late bind for canonical name lookup
     cache.cart_service = cart  # late bind so refresh can defer to active downloads

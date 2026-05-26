@@ -604,6 +604,9 @@ class CacheService:
             if rr["source_id"] in sources:
                 sources[rr["source_id"]]["last_refresh"] = rr["last_refresh"]
 
+        refresh_progress = await self.load_refresh_progress_async()
+        self._api_cache["refresh_progress"] = refresh_progress
+
         if sources:
             self._api_cache["sources"] = sources
             self._api_cache["refresh_in_progress"] = False

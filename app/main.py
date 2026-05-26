@@ -196,6 +196,9 @@ async def lifespan(app: FastAPI):
     monitor.load_monitored_movies()
     cart.load_cart()
 
+    # --- load EPG cache BEFORE yield so is_epg_cache_valid() sees correct state ---
+    epg_svc.load_epg_cache_from_disk()
+
     # --- background tasks (start before yield so they run during app lifetime) ---
     bg_task = asyncio.create_task(
         background_refresh_loop(cache, epg_svc, monitor, cat)
@@ -203,6 +206,18 @@ async def lifespan(app: FastAPI):
     schedule_task = asyncio.create_task(
         download_schedule_loop(cart)
     )
+
+    # --- startup initial refreshes (fire-and-forget async tasks) ---
+    async def _initial_on_cache_refreshed():
+        await cat.refresh_pattern_categories_async()
+
+    if not cache.is_cache_valid():
+        logger.info("Cache is empty or invalid, triggering initial refresh…")
+        asyncio.create_task(cache.refresh_cache(on_cache_refreshed=_initial_on_cache_refreshed))
+
+    if not epg_svc.is_epg_cache_valid():
+        logger.info("EPG cache is empty or invalid, triggering initial EPG refresh…")
+        asyncio.create_task(epg_svc.refresh_epg_cache())
 
     # --- yield here so server can start accepting requests ASAP ---
     yield
@@ -220,19 +235,6 @@ async def lifespan(app: FastAPI):
     if recovered:
         cart.save_cart()
         logger.info(f"Recovered {recovered} stuck download(s) back to queued")
-
-    epg_svc.load_epg_cache_from_disk()
-
-    async def _initial_on_cache_refreshed():
-        await cat.refresh_pattern_categories_async()
-
-    if not cache.is_cache_valid():
-        logger.info("Cache is empty or invalid, triggering initial refresh…")
-        asyncio.create_task(cache.refresh_cache(on_cache_refreshed=_initial_on_cache_refreshed))
-
-    if not epg_svc.is_epg_cache_valid():
-        logger.info("EPG cache is empty or invalid, triggering initial EPG refresh…")
-        asyncio.create_task(epg_svc.refresh_epg_cache())
 
     # --- shutdown ---
     bg_task.cancel()

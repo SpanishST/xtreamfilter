@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 
-from app.database import DB_NAME, db_connect
+from app.database import DB_NAME, db_connect, adb_connect, adb_transaction, _row_to_dict
 
 if TYPE_CHECKING:
     from app.services.config_service import ConfigService
@@ -75,6 +75,12 @@ class CacheService:
         self._stream_index: dict[tuple[str, str, str], dict] = {}
         # Pre-built source names
         self._source_names: dict[str, str] = {}
+
+        # Async progress save throttling
+        self._progress_save_lock = asyncio.Lock()
+        self._last_progress_save = 0.0
+        self._progress_save_interval = 2.0  # seconds
+        self._pending_progress_saves: list[asyncio.Task] = []
 
     @staticmethod
     def _empty_source_cache() -> dict[str, Any]:
@@ -262,6 +268,27 @@ class CacheService:
     # ------------------------------------------------------------------
 
     def save_refresh_progress(self, progress_data: dict) -> None:
+        use_async = self.config_service.config.get("database", {}).get("use_async", True)
+        progress_data = self._normalise_refresh_progress(progress_data)
+        self._api_cache["refresh_progress"] = progress_data
+        if use_async:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._save_refresh_progress_sync(progress_data)
+                return
+            task = loop.create_task(self.save_refresh_progress_async(progress_data))
+            self._pending_progress_saves.append(task)
+            task.add_done_callback(lambda t: self._pending_progress_saves.remove(t) if t in self._pending_progress_saves else None)
+        else:
+            self._save_refresh_progress_sync(progress_data)
+
+    async def _flush_pending_progress_saves(self) -> None:
+        if self._pending_progress_saves:
+            await asyncio.gather(*self._pending_progress_saves, return_exceptions=True)
+        self._pending_progress_saves.clear()
+
+    def _save_refresh_progress_sync(self, progress_data: dict) -> None:
         progress_data = self._normalise_refresh_progress(progress_data)
         conn = db_connect(self.db_path)
         try:
@@ -294,6 +321,9 @@ class CacheService:
             conn.close()
 
     def load_refresh_progress(self) -> dict:
+        cached = self._api_cache.get("refresh_progress")
+        if cached:
+            return cached
         conn = db_connect(self.db_path)
         try:
             row = conn.execute(
@@ -303,7 +333,7 @@ class CacheService:
                 "FROM refresh_progress WHERE id = 1"
             ).fetchone()
             if row:
-                return self._normalise_refresh_progress({
+                progress = self._normalise_refresh_progress({
                     "in_progress": bool(row["in_progress"]),
                     "current_source": row["current_source"],
                     "total_sources": row["total_sources"],
@@ -317,6 +347,8 @@ class CacheService:
                     "finished_at": row["finished_at"],
                     "last_error": row["last_error"],
                 })
+                self._api_cache["refresh_progress"] = progress
+                return progress
         except Exception:
             pass
         finally:
@@ -337,6 +369,70 @@ class CacheService:
             progress.get("total_sources", 0),
         )
         self.save_refresh_progress(progress)
+
+    async def save_refresh_progress_async(self, progress_data: dict) -> None:
+        progress_data = self._normalise_refresh_progress(progress_data)
+        async with self._progress_save_lock:
+            now = time.time()
+            if now - self._last_progress_save < self._progress_save_interval:
+                return
+            self._last_progress_save = now
+        try:
+            async with adb_transaction(self.db_path) as conn:
+                await conn.execute(
+                    """INSERT OR REPLACE INTO refresh_progress
+                       (id, in_progress, current_source, total_sources,
+                        current_source_name, current_step, percent, started_at,
+                        status, source_results, summary, finished_at, last_error)
+                       VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        int(progress_data.get("in_progress", False)),
+                        progress_data.get("current_source", 0),
+                        progress_data.get("total_sources", 0),
+                        progress_data.get("current_source_name", ""),
+                        progress_data.get("current_step", ""),
+                        progress_data.get("percent", 0),
+                        progress_data.get("started_at"),
+                        progress_data.get("status", "idle"),
+                        json.dumps(progress_data.get("source_results", []), ensure_ascii=False),
+                        json.dumps(progress_data.get("summary", {}), ensure_ascii=False),
+                        progress_data.get("finished_at"),
+                        progress_data.get("last_error", ""),
+                    ),
+                )
+            self._api_cache["refresh_progress"] = progress_data
+        except Exception as e:
+            logger.warning(f"Failed to save progress async: {e}")
+
+    async def load_refresh_progress_async(self) -> dict:
+        try:
+            async with adb_transaction(self.db_path) as conn:
+                async with conn.execute(
+                    "SELECT in_progress, current_source, total_sources, "
+                    "current_source_name, current_step, percent, started_at, "
+                    "status, source_results, summary, finished_at, last_error "
+                    "FROM refresh_progress WHERE id = 1"
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        d = _row_to_dict(row)
+                        return self._normalise_refresh_progress({
+                            "in_progress": bool(d["in_progress"]),
+                            "current_source": d["current_source"],
+                            "total_sources": d["total_sources"],
+                            "current_source_name": d["current_source_name"],
+                            "current_step": d["current_step"],
+                            "percent": d["percent"],
+                            "started_at": d["started_at"],
+                            "status": d["status"],
+                            "source_results": d["source_results"],
+                            "summary": d["summary"],
+                            "finished_at": d["finished_at"],
+                            "last_error": d["last_error"],
+                        })
+        except Exception:
+            pass
+        return self._default_refresh_progress()
 
     # ------------------------------------------------------------------
     # Disk persistence  (SQLite replaces api_cache.json)
@@ -1231,6 +1327,7 @@ class CacheService:
             async with self._cache_lock:
                 self._api_cache["refresh_in_progress"] = False
         finally:
+            await self._flush_pending_progress_saves()
             finished_at = datetime.now().isoformat()
             progress["in_progress"] = False
             progress["status"] = final_status

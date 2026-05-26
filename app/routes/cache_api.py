@@ -76,6 +76,10 @@ async def trigger_cache_refresh(
     cache: CacheService = Depends(get_cache_service),
     cat: CategoryService = Depends(get_category_service),
 ):
+    progress = cache.load_refresh_progress()
+    if progress.get("in_progress"):
+        return {"status": "already_running", "message": "A refresh is already in progress"}
+
     async def _refresh_and_update_categories():
         await cache.refresh_cache()
         await cat.refresh_pattern_categories_async()

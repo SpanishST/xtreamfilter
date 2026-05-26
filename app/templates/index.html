@@ -2405,7 +2405,13 @@
             
             fetch('/api/cache/refresh', { method: 'POST' })
                 .then(parseJsonResponse)
-                .then(() => {
+                .then((data) => {
+                    if (data.status === 'already_running') {
+                        document.getElementById('refresh-cache-btn').disabled = false;
+                        document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                        showRefreshRequestError('A refresh is already in progress');
+                        return;
+                    }
                     document.getElementById('refresh-cache-btn').textContent = '⏳ Refreshing...';
                     setRefreshPolling(1000);
                     return loadCacheStatus();

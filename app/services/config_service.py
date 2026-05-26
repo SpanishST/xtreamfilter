@@ -73,6 +73,9 @@ class ConfigService:
                 "telegram": cls._default_telegram_config(),
                 "jellyfin": cls._default_jellyfin_config(),
             },
+            "database": {
+                "use_async": True,
+            },
         }
 
     # ------------------------------------------------------------------

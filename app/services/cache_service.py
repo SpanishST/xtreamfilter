@@ -876,6 +876,97 @@ class CacheService:
     # Full cache refresh
     # ------------------------------------------------------------------
 
+    async def _refresh_source_async(
+        self,
+        source: dict,
+        source_idx: int,
+        source_result: dict,
+        existing_sources_snapshot: dict[str, dict],
+        total_sources: int,
+        progress: dict,
+    ) -> tuple[str, dict, bool]:
+        source_id = source.get("id", "default")
+        source_name = source.get("name", source_id)
+        host = source.get("host", "").rstrip("/")
+        username = source.get("username", "")
+        password = source.get("password", "")
+
+        source_result["status"] = "running"
+
+        progress["current_source"] = source_idx + 1
+        progress["current_source_name"] = source_name
+        progress["current_step"] = f"{source_name}: Initializing"
+        progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
+        self.save_refresh_progress(progress)
+
+        logger.info(f"Refreshing source: {source_name}")
+
+        existing_source_cache = copy.deepcopy(
+            existing_sources_snapshot.get(source_id, self._empty_source_cache())
+        )
+        source_cache = copy.deepcopy(existing_source_cache)
+        source_updated = False
+
+        for step_idx, (cache_key, label, action) in enumerate(REFRESH_STEP_DEFINITIONS):
+            step_result = source_result["steps"][step_idx]
+            step_result["status"] = "running"
+            step_result["error"] = None
+            step_result["duration_ms"] = None
+            step_result["preserved_existing"] = False
+            progress["current_step"] = f"{source_name}: {label}"
+            progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
+            progress["percent"] = int(
+                (progress["summary"].get("processed_steps", 0) / max(progress["summary"].get("total_steps", 1), 1))
+                * 100
+            )
+            self.save_refresh_progress(progress)
+            logger.info(
+                f"[{source_name}] Step {step_idx + 1}/{len(REFRESH_STEP_DEFINITIONS)}: {label} "
+                f"(progress: {progress['percent']}%)"
+            )
+
+            fetch_result = await self.fetch_from_upstream(host, username, password, action)
+            step_result["duration_ms"] = fetch_result.get("duration_ms")
+            if fetch_result.get("ok"):
+                data = fetch_result.get("data") or []
+                source_cache[cache_key] = data
+                step_result["status"] = "success"
+                step_result["count"] = len(data)
+                source_updated = True
+            else:
+                error = dict(fetch_result.get("error") or {})
+                step_result["status"] = "failed"
+                step_result["error"] = error
+                step_result["preserved_existing"] = source_id in existing_sources_snapshot
+                step_result["count"] = len(source_cache.get(cache_key, []))
+                source_result["errors"].append(
+                    {
+                        "key": cache_key,
+                        "label": label,
+                        "preserved_existing": step_result["preserved_existing"],
+                        **error,
+                    }
+                )
+                progress["last_error"] = self._format_step_error(source_name, label, error)
+
+            source_result["counts"] = self._build_source_counts(source_cache)
+            source_result["status"] = self._derive_source_status(source_result)
+            progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
+            progress["percent"] = int(
+                (progress["summary"].get("processed_steps", 0) / max(progress["summary"].get("total_steps", 1), 1))
+                * 100
+            )
+            self.save_refresh_progress(progress)
+
+        if source_updated:
+            source_cache["last_refresh"] = datetime.now().isoformat()
+
+        source_result["counts"] = self._build_source_counts(source_cache)
+        source_result["last_refresh"] = source_cache.get("last_refresh")
+        source_result["status"] = self._derive_source_status(source_result)
+
+        return source_id, source_cache, source_updated
+
     async def refresh_cache(self, on_cache_refreshed=None) -> bool:
         """Refresh all cached data from all configured sources.
 
@@ -1076,88 +1167,22 @@ class CacheService:
         final_status = "failed"
 
         try:
-            for source_idx, source in enumerate(enabled_sources):
-                source_id = source.get("id", "default")
-                source_name = source.get("name", source_id)
-                host = source.get("host", "").rstrip("/")
-                username = source.get("username", "")
-                password = source.get("password", "")
-                source_result = progress["source_results"][source_idx]
-                source_result["status"] = "running"
-
-                progress["current_source"] = source_idx + 1
-                progress["current_source_name"] = source_name
-                progress["current_step"] = f"{source_name}: Initializing"
-                progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
-                self.save_refresh_progress(progress)
-
-                logger.info(f"Refreshing source: {source_name}")
-
-                existing_source_cache = copy.deepcopy(
-                    existing_sources_snapshot.get(source_id, self._empty_source_cache())
+            tasks = [
+                self._refresh_source_async(
+                    source,
+                    source_idx,
+                    progress["source_results"][source_idx],
+                    existing_sources_snapshot,
+                    total_sources,
+                    progress,
                 )
-                source_cache = copy.deepcopy(existing_source_cache)
-                source_updated = False
+                for source_idx, source in enumerate(enabled_sources)
+            ]
+            results = await asyncio.gather(*tasks)
 
-                for step_idx, (cache_key, label, action) in enumerate(REFRESH_STEP_DEFINITIONS):
-                    step_result = source_result["steps"][step_idx]
-                    step_result["status"] = "running"
-                    step_result["error"] = None
-                    step_result["duration_ms"] = None
-                    step_result["preserved_existing"] = False
-                    progress["current_step"] = f"{source_name}: {label}"
-                    progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
-                    progress["percent"] = int(
-                        (progress["summary"].get("processed_steps", 0) / max(progress["summary"].get("total_steps", 1), 1))
-                        * 100
-                    )
-                    self.save_refresh_progress(progress)
-                    logger.info(
-                        f"[{source_name}] Step {step_idx + 1}/{len(REFRESH_STEP_DEFINITIONS)}: {label} "
-                        f"(progress: {progress['percent']}%)"
-                    )
-
-                    fetch_result = await self.fetch_from_upstream(host, username, password, action)
-                    step_result["duration_ms"] = fetch_result.get("duration_ms")
-                    if fetch_result.get("ok"):
-                        data = fetch_result.get("data") or []
-                        source_cache[cache_key] = data
-                        step_result["status"] = "success"
-                        step_result["count"] = len(data)
-                        source_updated = True
-                    else:
-                        error = dict(fetch_result.get("error") or {})
-                        step_result["status"] = "failed"
-                        step_result["error"] = error
-                        step_result["preserved_existing"] = source_id in existing_sources_snapshot
-                        step_result["count"] = len(source_cache.get(cache_key, []))
-                        source_result["errors"].append(
-                            {
-                                "key": cache_key,
-                                "label": label,
-                                "preserved_existing": step_result["preserved_existing"],
-                                **error,
-                            }
-                        )
-                        progress["last_error"] = self._format_step_error(source_name, label, error)
-
-                    source_result["counts"] = self._build_source_counts(source_cache)
-                    source_result["status"] = self._derive_source_status(source_result)
-                    progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
-                    progress["percent"] = int(
-                        (progress["summary"].get("processed_steps", 0) / max(progress["summary"].get("total_steps", 1), 1))
-                        * 100
-                    )
-                    self.save_refresh_progress(progress)
-
+            for source_id, source_cache, source_updated in results:
                 if source_updated:
                     any_source_updated = True
-                    source_cache["last_refresh"] = datetime.now().isoformat()
-
-                source_result["counts"] = self._build_source_counts(source_cache)
-                source_result["last_refresh"] = source_cache.get("last_refresh")
-                source_result["status"] = self._derive_source_status(source_result)
-
                 if source_updated or source_id in existing_sources_snapshot:
                     new_sources_cache[source_id] = source_cache
 

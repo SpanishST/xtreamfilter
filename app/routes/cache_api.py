@@ -76,10 +76,11 @@ async def trigger_cache_refresh(
     cache: CacheService = Depends(get_cache_service),
     cat: CategoryService = Depends(get_category_service),
 ):
-    async def _on_cache_refreshed():
+    async def _refresh_and_update_categories():
+        await cache.refresh_cache()
         await cat.refresh_pattern_categories_async()
 
-    asyncio.create_task(cache.refresh_cache(on_cache_refreshed=_on_cache_refreshed))
+    asyncio.create_task(_refresh_and_update_categories())
     return {"status": "refresh_started", "message": "Cache refresh has been triggered in the background"}
 
 

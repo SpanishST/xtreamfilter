@@ -12,39 +12,37 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 
-from app.services.config_service import ConfigService
-from app.services.http_client import HttpClientService
-from app.services.jellyfin_service import JellyfinService
-from app.services.cache_service import CacheService
-from app.services.epg_service import EpgService
-from app.services.xtream_service import XtreamService
-from app.services.notification_service import NotificationService
-from app.services.category_service import CategoryService
-from app.services.cart_service import CartService
-from app.services.monitor_service import MonitorService
-from app.services.m3u_service import M3uService
-
 from app.database import DB_NAME, init_db
 from app.migrate import run_migration_if_needed
-
 from app.routes import (
-    ui,
-    filter_api,
-    source_api,
-    playlist,
     browse_api,
-    category_api,
-    xtream_merged,
-    stream_proxy,
-    xtream_source,
-    epg,
-    config_api,
     cache_api,
     cart_api,
-    monitor_api,
+    category_api,
+    config_api,
+    epg,
+    filter_api,
     health,
+    monitor_api,
     player_api,
+    playlist,
+    source_api,
+    stream_proxy,
+    ui,
+    xtream_merged,
+    xtream_source,
 )
+from app.services.cache_service import CacheService
+from app.services.cart_service import CartService
+from app.services.category_service import CategoryService
+from app.services.config_service import ConfigService
+from app.services.epg_service import EpgService
+from app.services.http_client import HttpClientService
+from app.services.jellyfin_service import JellyfinService
+from app.services.m3u_service import M3uService
+from app.services.monitor_service import MonitorService
+from app.services.notification_service import NotificationService
+from app.services.xtream_service import XtreamService
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,29 +66,30 @@ async def background_refresh_loop(
     logger.info("Background refresh task started")
     await asyncio.sleep(10)
 
-    async def _on_cache_refreshed():
-        if cat:
-            await cat.refresh_pattern_categories_async()
-
     while True:
         try:
             cache_was_refreshed = False
             if not cache.is_cache_valid():
                 logger.info("Cache expired, triggering refresh…")
-                await cache.refresh_cache(on_cache_refreshed=_on_cache_refreshed)
+                await cache.refresh_cache()
                 cache_was_refreshed = True
             else:
                 logger.info(f"Cache still valid. Last refresh: {cache._api_cache.get('last_refresh', 'Never')}")
 
             if cache_was_refreshed:
-                try:
-                    await monitor.check_monitored_series()
-                except Exception as exc:
-                    logger.error(f"Series monitoring error in background loop: {exc}")
-                try:
-                    await monitor.check_monitored_movies()
-                except Exception as exc:
-                    logger.error(f"Movie monitoring error in background loop: {exc}")
+                async def _run_post_refresh_tasks():
+                    results = await asyncio.gather(
+                        cat.refresh_pattern_categories_async() if cat else None,
+                        monitor.check_monitored_series(),
+                        monitor.check_monitored_movies(),
+                        return_exceptions=True,
+                    )
+                    for i, res in enumerate(results):
+                        if isinstance(res, Exception):
+                            names = ["category refresh", "series monitoring", "movie monitoring"]
+                            logger.error(f"{names[i]} error in background loop: {res}")
+
+                await _run_post_refresh_tasks()
 
             if not epg_svc.is_epg_cache_valid():
                 logger.info("EPG cache expired, triggering refresh…")

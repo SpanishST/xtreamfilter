@@ -372,37 +372,38 @@ class CacheService:
 
     async def save_refresh_progress_async(self, progress_data: dict) -> None:
         progress_data = self._normalise_refresh_progress(progress_data)
+        # Always update in-memory state so the UI sees the latest progress
+        self._api_cache["refresh_progress"] = progress_data
         async with self._progress_save_lock:
             now = time.time()
             if now - self._last_progress_save < self._progress_save_interval:
                 return
             self._last_progress_save = now
-        try:
-            async with adb_transaction(self.db_path) as conn:
-                await conn.execute(
-                    """INSERT OR REPLACE INTO refresh_progress
-                       (id, in_progress, current_source, total_sources,
-                        current_source_name, current_step, percent, started_at,
-                        status, source_results, summary, finished_at, last_error)
-                       VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (
-                        int(progress_data.get("in_progress", False)),
-                        progress_data.get("current_source", 0),
-                        progress_data.get("total_sources", 0),
-                        progress_data.get("current_source_name", ""),
-                        progress_data.get("current_step", ""),
-                        progress_data.get("percent", 0),
-                        progress_data.get("started_at"),
-                        progress_data.get("status", "idle"),
-                        json.dumps(progress_data.get("source_results", []), ensure_ascii=False),
-                        json.dumps(progress_data.get("summary", {}), ensure_ascii=False),
-                        progress_data.get("finished_at"),
-                        progress_data.get("last_error", ""),
-                    ),
-                )
-            self._api_cache["refresh_progress"] = progress_data
-        except Exception as e:
-            logger.warning(f"Failed to save progress async: {e}")
+            try:
+                async with adb_transaction(self.db_path) as conn:
+                    await conn.execute(
+                        """INSERT OR REPLACE INTO refresh_progress
+                           (id, in_progress, current_source, total_sources,
+                            current_source_name, current_step, percent, started_at,
+                            status, source_results, summary, finished_at, last_error)
+                           VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            int(progress_data.get("in_progress", False)),
+                            progress_data.get("current_source", 0),
+                            progress_data.get("total_sources", 0),
+                            progress_data.get("current_source_name", ""),
+                            progress_data.get("current_step", ""),
+                            progress_data.get("percent", 0),
+                            progress_data.get("started_at"),
+                            progress_data.get("status", "idle"),
+                            json.dumps(progress_data.get("source_results", []), ensure_ascii=False),
+                            json.dumps(progress_data.get("summary", {}), ensure_ascii=False),
+                            progress_data.get("finished_at"),
+                            progress_data.get("last_error", ""),
+                        ),
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to save progress async: {e}")
 
     async def load_refresh_progress_async(self) -> dict:
         try:
@@ -925,20 +926,25 @@ class CacheService:
     async def rebuild_stream_source_map(self) -> None:
         async with self._cache_lock:
             sources = self._api_cache.get("sources", {})
-        new_map: dict[str, dict[str, str]] = {"live": {}, "vod": {}, "series": {}}
-        for source_id, source_cache in sources.items():
-            for stream in source_cache.get("live_streams", []):
-                sid = str(stream.get("stream_id", ""))
-                if sid:
-                    new_map["live"][sid] = source_id
-            for stream in source_cache.get("vod_streams", []):
-                sid = str(stream.get("stream_id", ""))
-                if sid:
-                    new_map["vod"][sid] = source_id
-            for series in source_cache.get("series", []):
-                sid = str(series.get("series_id", ""))
-                if sid:
-                    new_map["series"][sid] = source_id
+
+        def _build() -> dict[str, dict[str, str]]:
+            new_map: dict[str, dict[str, str]] = {"live": {}, "vod": {}, "series": {}}
+            for source_id, source_cache in sources.items():
+                for stream in source_cache.get("live_streams", []):
+                    sid = str(stream.get("stream_id", ""))
+                    if sid:
+                        new_map["live"][sid] = source_id
+                for stream in source_cache.get("vod_streams", []):
+                    sid = str(stream.get("stream_id", ""))
+                    if sid:
+                        new_map["vod"][sid] = source_id
+                for series in source_cache.get("series", []):
+                    sid = str(series.get("series_id", ""))
+                    if sid:
+                        new_map["series"][sid] = source_id
+            return new_map
+
+        new_map = await asyncio.to_thread(_build)
         async with self._stream_map_lock:
             self._stream_source_map = new_map
         logger.info(
@@ -1264,7 +1270,7 @@ class CacheService:
         *on_cache_refreshed* is an optional async callback invoked after a
         successful data fetch (used to refresh pattern categories, etc.).
         """
-        existing_progress = self.load_refresh_progress()
+        existing_progress = await asyncio.to_thread(self.load_refresh_progress)
         if existing_progress.get("in_progress"):
             started_at = existing_progress.get("started_at")
             if started_at:
@@ -1420,9 +1426,10 @@ class CacheService:
         total_sources = len(enabled_sources)
 
         async with self._cache_lock:
-            existing_sources_snapshot = copy.deepcopy(self._api_cache.get("sources", {}))
+            raw_sources = self._api_cache.get("sources", {})
             previous_last_refresh = self._api_cache.get("last_refresh")
             self._api_cache["refresh_in_progress"] = True
+        existing_sources_snapshot = await asyncio.to_thread(copy.deepcopy, raw_sources)
 
         source_results = [
             self._build_source_result(
@@ -1486,9 +1493,9 @@ class CacheService:
                     self._api_cache["sources"] = new_sources_cache
                     self._api_cache["last_refresh"] = datetime.now().isoformat() if any_source_updated else previous_last_refresh
                     self._api_cache["refresh_in_progress"] = False
-                self._inject_source_info()
+                await asyncio.to_thread(self._inject_source_info)
                 await self.rebuild_stream_source_map()
-                self._rebuild_stream_index()
+                await asyncio.to_thread(self._rebuild_stream_index)
                 await self.save_cache_to_disk_async()
 
                 if on_cache_refreshed and any_source_updated:

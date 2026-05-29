@@ -14,6 +14,7 @@ and lower(name).  Typical speedup for categories with 1 000+ matches is
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -758,7 +759,7 @@ class CategoryService:
         return notifications_to_send
 
     async def refresh_pattern_categories_async(self) -> None:
-        notifications = self._refresh_pattern_categories_internal()
+        notifications = await asyncio.to_thread(self._refresh_pattern_categories_internal)
         for category_name, new_items in notifications:
             await self.notification_service.send_category_notification(category_name, new_items)
 

@@ -5,23 +5,33 @@ WORKDIR /src
 # Ensure app package is importable regardless of working directory
 ENV PYTHONPATH=/src
 
-# Install ffmpeg for stream remuxing (MKV→MP4, etc.) and mkvtoolnix for MKV metadata embedding
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg mkvtoolnix && rm -rf /var/lib/apt/lists/*
+# Install gosu for user switching, ffmpeg for stream remuxing, mkvtoolnix for MKV metadata
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gosu ffmpeg mkvtoolnix \
+    && rm -rf /var/lib/apt/lists/* \
+    && gosu nobody true
+
+# Create default user/group (will be remapped at runtime by entrypoint)
+RUN groupadd -g 1000 appuser && useradd -u 1000 -g 1000 -m appuser
 
 # Install dependencies
-# FastAPI with uvicorn for async support, httpx for async HTTP client, lxml for XML parsing
 RUN pip install --no-cache-dir fastapi uvicorn[standard] httpx jinja2 python-multipart lxml rapidfuzz packaging aiosqlite
 
 # Copy application as a proper Python package
 COPY app/ /src/app/
 
-# Create data directory
-RUN mkdir -p /data
+# Copy entrypoint script
+COPY scripts/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 # Expose port
 EXPOSE 5000
 
+# PUID/PGID defaults (overridable via docker-compose / docker run)
+ENV PUID=1000
+ENV PGID=1000
+
+ENTRYPOINT ["/entrypoint.sh"]
+
 # Run with uvicorn for async production
-# - Single worker (async handles concurrency)
-# - Increased timeouts for long-running streams
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000", "--timeout-keep-alive", "65"]

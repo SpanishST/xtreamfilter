@@ -233,12 +233,12 @@ class ConfigService:
         return merged
 
     def get_download_path(self) -> str:
-        return self._config.get("options", {}).get("download_path", "/data/downloads")
+        return self._config.get("options", {}).get("download_path", "/downloads")
 
     download_path = property(get_download_path)
 
     def get_download_temp_path(self) -> str:
-        return self._config.get("options", {}).get("download_temp_path", "/data/downloads/.tmp")
+        return self._config.get("options", {}).get("download_temp_path", "/downloads/.tmp")
 
     download_temp_path = property(get_download_temp_path)
 

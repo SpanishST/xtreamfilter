@@ -113,8 +113,8 @@ class Options(BaseModel):
     proxy_streams: bool = True
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     jellyfin: JellyfinConfig = Field(default_factory=JellyfinConfig)
-    download_path: str = "/data/downloads"
-    download_temp_path: str = "/data/downloads/.tmp"
+    download_path: str = "/downloads"
+    download_temp_path: str = "/downloads/.tmp"
     download_bandwidth_limit: int = 0
     download_pause_interval: int = 0
     download_pause_duration: int = 0

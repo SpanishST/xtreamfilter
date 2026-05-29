@@ -246,7 +246,7 @@ async def get_download_path_api(cfg: ConfigService = Depends(get_config_service)
 @router.post("/api/options/download_path")
 async def set_download_path_api(request: Request, cfg: ConfigService = Depends(get_config_service)):
     data = await request.json()
-    path = data.get("download_path", "/data/downloads").strip()
+    path = data.get("download_path", "/downloads").strip()
     if not path:
         return JSONResponse(status_code=400, content={"error": "Path cannot be empty"})
     try:
@@ -268,7 +268,7 @@ async def get_download_temp_path_api(cfg: ConfigService = Depends(get_config_ser
 @router.post("/api/options/download_temp_path")
 async def set_download_temp_path_api(request: Request, cfg: ConfigService = Depends(get_config_service)):
     data = await request.json()
-    path = data.get("download_temp_path", "/data/downloads/.tmp").strip()
+    path = data.get("download_temp_path", "/downloads/.tmp").strip()
     if not path:
         return JSONResponse(status_code=400, content={"error": "Path cannot be empty"})
     try:

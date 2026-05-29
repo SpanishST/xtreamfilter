@@ -160,7 +160,7 @@
                 <div class="setting-group" style="flex:1;">
                     <label>Download Path</label>
                     <div style="display: flex; gap: 8px;">
-                        <input type="text" id="download-path" placeholder="/data/downloads">
+                        <input type="text" id="download-path" placeholder="/downloads">
                         <button class="btn btn-primary btn-small" onclick="saveDownloadPath()" style="white-space:nowrap;">Save</button>
                         <button class="btn btn-secondary btn-small" onclick="testPath('download-path')" style="white-space:nowrap;">🧪 Test</button>
                     </div>
@@ -168,7 +168,7 @@
                 <div class="setting-group" style="flex:1;">
                     <label>Temp Path <span style="font-size:0.8em;color:#888;">(download here first, then move)</span></label>
                     <div style="display: flex; gap: 8px;">
-                        <input type="text" id="download-temp-path" placeholder="/data/downloads/.tmp">
+                        <input type="text" id="download-temp-path" placeholder="/downloads/.tmp">
                         <button class="btn btn-primary btn-small" onclick="saveTempPath()" style="white-space:nowrap;">Save</button>
                         <button class="btn btn-secondary btn-small" onclick="testPath('download-temp-path')" style="white-space:nowrap;">🧪 Test</button>
                     </div>
@@ -361,12 +361,12 @@
             try {
                 const resp = await fetch('/api/options/download_path');
                 const data = await resp.json();
-                document.getElementById('download-path').value = data.download_path || '/data/downloads';
+                document.getElementById('download-path').value = data.download_path || '/downloads';
             } catch (e) { console.error('Error loading download path:', e); }
             try {
                 const resp = await fetch('/api/options/download_temp_path');
                 const data = await resp.json();
-                document.getElementById('download-temp-path').value = data.download_temp_path || '/data/downloads/.tmp';
+                document.getElementById('download-temp-path').value = data.download_temp_path || '/downloads/.tmp';
             } catch (e) { console.error('Error loading temp path:', e); }
         }
 

@@ -1,0 +1,14 @@
+services:
+  xtreamfilter-test:
+    image: spanishst/xtreamfilter:beta
+    container_name: xtreamfilter-test
+    ports:
+      - "8081:5000"
+    volumes:
+      - ./data:/data
+      - ./downloads:/downloads
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Paris
+      - PUID=1000
+      - PGID=1000

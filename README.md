@@ -99,11 +99,16 @@ On startup the entrypoint script:
 
 1. Remaps the internal `appuser` to the specified UID/GID
 2. Creates `/data` and `/downloads` if they do not exist
-3. Runs `chown -R` on `/data` only to fix ownership (important when upgrading from a version that ran as root)
-4. Checks that both `/data` and `/downloads` are writable by the target user
-5. Drops privileges via `gosu` before starting the application
+3. Runs `chown -R` on `/data` to fix ownership (important when upgrading from a version that ran as root)
+4. Runs `chown` (non-recursive) on `/downloads` so the directory itself is writable
+5. Checks that `/downloads` is writable by the target user
+6. Drops privileges via `gosu` before starting the application
 
-The `/downloads` directory is intentionally excluded from the automatic `chown` because it is often an SMB or NFS mount where ownership changes may fail or are not appropriate. Ensure the download directory is writable by the configured PUID/PGID before starting the container.
+The `/downloads` directory is only chowned non-recursively to stay SMB/NFS safe. Existing files inside are not touched. If some files are root-owned from a previous install, fix them manually:
+
+```bash
+sudo chown -R 1000:1000 ./downloads
+```
 
 ### Setting PUID/PGID
 
@@ -127,7 +132,7 @@ environment:
 
 If you previously ran the container without PUID/PGID (or as root), existing files under `/data` will be owned by root. The entrypoint automatically runs `chown -R` on `/data` on every start to reassign ownership to the configured PUID/PGID. For large databases this may cause a brief delay on first startup after the change.
 
-The `/downloads` directory is not touched by `chown`. If you are upgrading and your download files are root-owned, fix them manually:
+The `/downloads` directory itself is chowned non-recursively so it stays writable. Existing root-owned files inside are not touched. If needed, fix them manually:
 
 ```bash
 sudo chown -R 1000:1000 ./downloads

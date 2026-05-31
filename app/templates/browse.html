@@ -2016,11 +2016,6 @@
                 const result = await response.json();
                 const savedCategoryId = result.category ? result.category.id : editId;
 
-                if (mode === 'automatic') {
-                    saveBtn.innerHTML = '<span class="loading-spinner" style="width:16px;height:16px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px;"></span>Refreshing items…';
-                    await fetch('/api/categories/refresh', { method: 'POST' });
-                }
-
                 closeCategoryModal();
                 await loadCategories();
 

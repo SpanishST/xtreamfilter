@@ -1,9 +1,9 @@
 services:
-  xtreamfilter:
-    build: .
-    container_name: xtreamfilter
+  xtreamfilter-test:
+    image: spanishst/xtreamfilter:beta
+    container_name: xtreamfilter-test
     ports:
-      - "8080:5000"
+      - "8081:5000"
     volumes:
       - ./data:/data
       - ./downloads:/downloads

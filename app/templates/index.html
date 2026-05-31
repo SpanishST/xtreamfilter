@@ -1451,6 +1451,9 @@
         const subscriptionInfoCache = {};
         // Last refresh progress payload (kept so we can re-render after async fetches)
         let lastRefreshProgress = null;
+        // Guard: set when user clicks Refresh, cleared once API confirms refresh is in progress.
+        // Prevents loadCacheStatus from hiding the progress bar before the background task starts.
+        let refreshTriggered = false;
         
         // Load sources, filters and cache status on page load
         loadSources();
@@ -2327,7 +2330,9 @@
                     // Status indicator
                     let status = '⏳';
                     let statusTitle = '';
-                    if (data.refresh_in_progress) {
+                    const isActive = data.refresh_in_progress || progress.in_progress;
+                    if (isActive) {
+                        refreshTriggered = false;
                         status = '🔄';
                         statusTitle = 'Refresh in progress…';
                         document.getElementById('refresh-cache-btn').disabled = true;
@@ -2336,14 +2341,22 @@
                         
                         // Show and update progress bar
                         progressContainer.style.display = 'block';
-                        const percent = Math.min(progress.percent || 0, 100);
-                        document.getElementById('refresh-progress-bar').style.width = percent + '%';
-                        document.getElementById('refresh-progress-percent').textContent = percent + '%';
-                        document.getElementById('refresh-progress-step').textContent = progress.current_step || 'Processing...';
-                        document.getElementById('refresh-progress-source').textContent = progress.current_source || 0;
-                        document.getElementById('refresh-progress-total').textContent = progress.total_sources || 0;
+                        if (progress.in_progress) {
+                            const percent = Math.min(progress.percent || 0, 100);
+                            document.getElementById('refresh-progress-bar').style.width = percent + '%';
+                            document.getElementById('refresh-progress-percent').textContent = percent + '%';
+                            document.getElementById('refresh-progress-step').textContent = progress.current_step || 'Processing...';
+                            document.getElementById('refresh-progress-source').textContent = progress.current_source || 0;
+                            document.getElementById('refresh-progress-total').textContent = progress.total_sources || 0;
+                        } else {
+                            document.getElementById('refresh-progress-step').textContent = 'Starting...';
+                        }
                         
-                        setRefreshPolling(1000);
+                        setRefreshPolling(4000);
+                    } else if (refreshTriggered) {
+                        // User just clicked Refresh but background task hasn't started yet — keep UI as-is
+                        status = '⏳';
+                        statusTitle = 'Waiting for refresh to start…';
                     } else if (outcome === 'partial') {
                         status = '⚠️';
                         statusTitle = 'Last refresh completed with warnings';
@@ -2398,23 +2411,35 @@
             showRefreshRequestError('');
             document.getElementById('refresh-cache-btn').disabled = true;
             document.getElementById('refresh-cache-btn').textContent = '⏳ Starting...';
+            document.getElementById('cancel-refresh-btn').style.display = 'inline-block';
             document.getElementById('refresh-progress-container').style.display = 'block';
             document.getElementById('refresh-progress-bar').style.width = '0%';
             document.getElementById('refresh-progress-percent').textContent = '0%';
             document.getElementById('refresh-progress-step').textContent = 'Starting...';
+            document.getElementById('refresh-progress-source').textContent = '0';
+            document.getElementById('refresh-progress-total').textContent = '0';
+            refreshTriggered = true;
+            setRefreshPolling(4000);
             
             fetch('/api/cache/refresh', { method: 'POST' })
                 .then(parseJsonResponse)
-                .then(() => {
+                .then((data) => {
+                    if (data.status === 'already_running') {
+                        refreshTriggered = false;
+                        document.getElementById('refresh-cache-btn').disabled = false;
+                        document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
+                        showRefreshRequestError('A refresh is already in progress');
+                        return;
+                    }
                     document.getElementById('refresh-cache-btn').textContent = '⏳ Refreshing...';
-                    setRefreshPolling(1000);
-                    return loadCacheStatus();
                 })
                 .catch((error) => {
+                    refreshTriggered = false;
                     document.getElementById('refresh-cache-btn').disabled = false;
                     document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
                     document.getElementById('cancel-refresh-btn').style.display = 'none';
                     document.getElementById('refresh-progress-container').style.display = 'none';
+                    clearRefreshPolling();
                     showRefreshRequestError(error.message || 'Failed to start cache refresh');
                 });
         }
@@ -2425,6 +2450,7 @@
             fetch('/api/cache/cancel-refresh', { method: 'POST' })
                 .then(parseJsonResponse)
                 .then(() => {
+                    refreshTriggered = false;
                     document.getElementById('refresh-cache-btn').disabled = false;
                     document.getElementById('refresh-cache-btn').textContent = '🔄 Refresh Now';
                     document.getElementById('cancel-refresh-btn').style.display = 'none';
@@ -2433,7 +2459,7 @@
                     loadCacheStatus();
                 })
                 .catch((error) => {
-                    showRefreshRequestError(error.message || 'Failed to cancel cache refresh');
+                    showRefreshRequestError(error.message || 'Failed to cancel refresh');
                 });
         }
         

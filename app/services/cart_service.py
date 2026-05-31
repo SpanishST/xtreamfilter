@@ -476,6 +476,16 @@ class CartService:
     def progress(self) -> dict:
         return self._download_progress
 
+    def is_download_active(self) -> bool:
+        """Return True if a download worker is running or an item is mid-download.
+
+        Used by other services (e.g. cache refresh) to avoid competing with
+        an in-progress download for bandwidth / upstream rate limits.
+        """
+        if self._download_task is not None and not self._download_task.done():
+            return True
+        return any(item.get("status") == "downloading" for item in self._download_cart)
+
     # ------------------------------------------------------------------
     # Download schedule
     # ------------------------------------------------------------------
@@ -489,18 +499,21 @@ class CartService:
         """
         schedule = self.config_service.get_download_schedule()
         if not schedule.get("enabled", False):
+            logger.debug("is_in_download_window: schedule disabled, returning True")
             return True  # No schedule — always allowed
 
         now = datetime.now()
         day_name = DAY_NAMES[now.weekday()]
         day_cfg = schedule.get(day_name, {})
         if not day_cfg.get("enabled", False):
+            logger.debug(f"is_in_download_window: day {day_name} disabled, returning False")
             return False  # This day is not enabled
 
         try:
             start_h, start_m = map(int, day_cfg.get("start", "00:00").split(":"))
             end_h, end_m = map(int, day_cfg.get("end", "00:00").split(":"))
         except (ValueError, AttributeError):
+            logger.debug("is_in_download_window: invalid time format, returning False")
             return False
 
         start_minutes = start_h * 60 + start_m
@@ -509,10 +522,14 @@ class CartService:
 
         if start_minutes <= end_minutes:
             # Same-day window (e.g. 01:00 → 07:00)
-            return start_minutes <= now_minutes < end_minutes
+            result = start_minutes <= now_minutes < end_minutes
+            logger.debug(f"is_in_download_window: same-day window {start_h}:{start_m}-{end_h}:{end_m}, now={now.hour}:{now.minute}, result={result}")
+            return result
         else:
             # Overnight window (e.g. 23:00 → 06:00)
-            return now_minutes >= start_minutes or now_minutes < end_minutes
+            result = now_minutes >= start_minutes or now_minutes < end_minutes
+            logger.debug(f"is_in_download_window: overnight window {start_h}:{start_m}-{end_h}:{end_m}, now={now.hour}:{now.minute}, result={result}")
+            return result
 
     # ------------------------------------------------------------------
     # Persistence
@@ -527,6 +544,7 @@ class CartService:
                 "added_at, status, progress, error, file_path, file_size, temp_path "
                 "FROM cart_items ORDER BY added_at"
             ).fetchall()
+            logger.info(f"load_cart: loaded {len(rows)} items from DB")
             self._download_cart = [
                 {
                     "id": r["id"],
@@ -552,6 +570,7 @@ class CartService:
                 }
                 for r in rows
             ]
+            logger.info(f"load_cart: _download_cart now has {len(self._download_cart)} items, statuses: {[(i['name'], i['status']) for i in self._download_cart]}")
             return self._download_cart
         except Exception as e:
             logger.error(f"Error loading cart from DB: {e}")
@@ -885,12 +904,15 @@ class CartService:
         nothing runs between two non-awaited statements in the same frame).
         """
         if self._download_task is not None and not self._download_task.done():
+            logger.debug("_try_start_worker: task already running, returning False")
             return False
         self._download_task = asyncio.create_task(self.download_worker())
+        logger.info(f"_try_start_worker: created new download_worker task, task={self._download_task}")
         return True
 
     async def download_worker(self) -> None:
         """Background worker that processes the download queue sequentially."""
+        logger.info("download_worker: starting")
         self._download_cancel_event = asyncio.Event()
 
         while True:
@@ -951,7 +973,7 @@ class CartService:
                 timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
                 max_retries = 5
                 retry_base_delay = 30
-                RETRYABLE_CODES = {429, 458, 503, 551}
+                RETRYABLE_CODES = {429, 458, 500, 502, 503, 504, 551}
 
                 downloaded = 0
                 total = 0
@@ -1155,6 +1177,17 @@ class CartService:
             await self._handle_download_queue_complete()
 
     async def _move_temp_to_destination(self, item: dict, temp_path: str, file_path: str) -> bool:
+        """Move the completed temp file to its final destination.
+
+        The filesystem work (which may stream gigabytes across a CIFS mount
+        and block for minutes) runs in a worker thread so the asyncio event
+        loop — and the rest of the HTTP API — stays responsive.
+        """
+        return await asyncio.to_thread(
+            self._move_temp_to_destination_sync, item, temp_path, file_path
+        )
+
+    def _move_temp_to_destination_sync(self, item: dict, temp_path: str, file_path: str) -> bool:
         item_name = item.get("name", "unknown")
         if not os.path.exists(temp_path):
             item["status"] = "move_failed"
@@ -1173,35 +1206,100 @@ class CartService:
         try:
             safe_makedirs(dest_dir)
         except Exception as e:
+            logger.exception(
+                "[MOVE] safe_makedirs failed for '%s' (dest_dir=%s)", item_name, dest_dir
+            )
             item["status"] = "move_failed"
             item["error"] = f"Cannot create destination directory: {e}"
             item["temp_path"] = temp_path
             self.save_cart()
             return False
+
+        logger.info(
+            "[MOVE] Starting move for '%s' (%s -> %s, %.1f MB)",
+            item_name, temp_path, file_path, temp_size / 1024 / 1024,
+        )
+
         moved = False
+        move_error: Exception | None = None
+        copy_error: Exception | None = None
         try:
             shutil.move(temp_path, file_path)
             moved = True
-        except Exception:
+        except Exception as exc:
+            move_error = exc
+            logger.warning(
+                "[MOVE] shutil.move failed for '%s' (%s -> %s): %r",
+                item_name, temp_path, file_path, exc,
+            )
+            # shutil.move may have already copied the bytes to dest before
+            # failing on the source unlink (common on CIFS). If the
+            # destination is already there with the right size, accept it
+            # rather than copying everything a second time.
             try:
-                shutil.copy2(temp_path, file_path)
-                moved = True
-            except Exception:
-                pass
+                if os.path.exists(file_path) and os.path.getsize(file_path) == temp_size:
+                    logger.info(
+                        "[MOVE] Destination already complete for '%s' despite move error; "
+                        "accepting and removing temp", item_name,
+                    )
+                    moved = True
+            except OSError as size_exc:
+                logger.warning(
+                    "[MOVE] Could not stat destination after move error for '%s': %r",
+                    item_name, size_exc,
+                )
+
+            if not moved:
+                try:
+                    shutil.copy2(temp_path, file_path)
+                    moved = True
+                except Exception as cexc:
+                    copy_error = cexc
+                    logger.exception(
+                        "[MOVE] shutil.copy2 fallback failed for '%s' (%s -> %s)",
+                        item_name, temp_path, file_path,
+                    )
         if not moved:
+            detail = f"move={move_error!r}"
+            if copy_error is not None:
+                detail += f"; copy={copy_error!r}"
             item["status"] = "move_failed"
-            item["error"] = "Download OK but failed to move file to destination. Temp file preserved."
+            item["error"] = (
+                "Download OK but failed to move file to destination. "
+                f"Temp file preserved. ({detail})"
+            )
             item["temp_path"] = temp_path
             self.save_cart()
             return False
         if not os.path.exists(file_path):
+            logger.error(
+                "[MOVE] Destination file missing after move for '%s' (expected %s)",
+                item_name, file_path,
+            )
             item["status"] = "move_failed"
             item["error"] = "Destination file missing after move operation"
             item["temp_path"] = temp_path
             self.save_cart()
             return False
+        # CIFS/SMB clients sometimes serve stale metadata immediately after a
+        # write; retry the size check a few times before declaring mismatch
+        # (which is destructive — it deletes the destination).
         dest_size = os.path.getsize(file_path)
         if dest_size != temp_size:
+            for retry in range(5):
+                time.sleep(1.0)
+                dest_size = os.path.getsize(file_path)
+                if dest_size == temp_size:
+                    logger.info(
+                        "[MOVE] Size match for '%s' after %d retry(ies)",
+                        item_name, retry + 1,
+                    )
+                    break
+        if dest_size != temp_size:
+            logger.error(
+                "[MOVE] Size mismatch for '%s' (temp=%d, dest=%d) — removing dest, preserving temp",
+                item_name, temp_size, dest_size,
+            )
             try:
                 os.remove(file_path)
             except OSError:

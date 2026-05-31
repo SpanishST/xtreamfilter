@@ -39,9 +39,11 @@ docker run -d \
   --name xtreamfilter \
   -p 8080:5000 \
   -v ./data:/data \
-  -v ./downloads:/data/downloads \
+  -v ./downloads:/downloads \
   --restart unless-stopped \
   -e TZ=Europe/Paris \
+  -e PUID=1000 \
+  -e PGID=1000 \
   spanishst/xtreamfilter:latest
 ```
 
@@ -56,10 +58,12 @@ services:
       - "8080:5000"
     volumes:
       - ./data:/data
-      - ./downloads:/data/downloads
+      - ./downloads:/downloads
     restart: unless-stopped
     environment:
       - TZ=Europe/Paris
+      - PUID=1000
+      - PGID=1000
 ```
 
 Start it with:
@@ -84,6 +88,68 @@ docker compose up --build -d
 4. Adjust filters for live, VOD, and series as needed
 5. Refresh the cache
 6. Use the displayed Xtream or M3U URLs in your IPTV client
+
+## User And Group Permissions
+
+The container supports `PUID` and `PGID` environment variables to control file ownership on mounted volumes.
+
+### How It Works
+
+On startup the entrypoint script:
+
+1. Remaps the internal `appuser` to the specified UID/GID
+2. Creates `/data` and `/downloads` if they do not exist
+3. Runs `chown -R` on `/data` to fix ownership (important when upgrading from a version that ran as root)
+4. Runs `chown` (non-recursive) on `/downloads` so the directory itself is writable
+5. Checks that `/downloads` is writable by the target user
+6. Drops privileges via `gosu` before starting the application
+
+The `/downloads` directory is only chowned non-recursively to stay SMB/NFS safe. Existing files inside are not touched. If some files are root-owned from a previous install, fix them manually:
+
+```bash
+sudo chown -R 1000:1000 ./downloads
+```
+
+### Setting PUID/PGID
+
+Match them to the owner of the host directories:
+
+```bash
+# Find the UID/GID of your host user
+id -u   # UID
+id -g   # PGID
+```
+
+Then pass them to the container:
+
+```yaml
+environment:
+  - PUID=1000
+  - PGID=1000
+```
+
+### Upgrading From Root-Owned Installations
+
+If you previously ran the container without PUID/PGID (or as root), existing files under `/data` will be owned by root. The entrypoint automatically runs `chown -R` on `/data` on every start to reassign ownership to the configured PUID/PGID. For large databases this may cause a brief delay on first startup after the change.
+
+The `/downloads` directory itself is chowned non-recursively so it stays writable. Existing root-owned files inside are not touched. If needed, fix them manually:
+
+```bash
+sudo chown -R 1000:1000 ./downloads
+```
+
+### Fallback Behavior
+
+If `chown` fails (for example on NFS with `root_squash` or a read-only bind mount) the entrypoint tests whether the target user can write to `/data`. If not, the container falls back to running as root so it can still start. Check `docker logs` for a warning if you suspect this is happening.
+
+### Host Directory Ownership
+
+Make sure the host directories you mount are writable by the target UID/GID:
+
+```bash
+# Example: grant ownership to UID 1000
+sudo chown -R 1000:1000 ./data ./downloads
+```
 
 ## Core Concepts
 
@@ -648,8 +714,8 @@ Example shape:
       "trigger_file": true,
       "trigger_queue": true
     },
-    "download_path": "/data/downloads",
-    "download_temp_path": "/data/downloads/.tmp"
+    "download_path": "/downloads",
+    "download_temp_path": "/downloads/.tmp"
   }
 }
 ```

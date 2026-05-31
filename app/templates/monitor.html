@@ -627,9 +627,9 @@
                     '<span class="toggle-slider"></span>' +
                     '</label>' +
                     '<a href="' + browseUrl + '" class="btn btn-secondary btn-small" title="Find in Browse">🔍</a>' +
-                    '<button class="btn btn-secondary btn-small" onclick="previewEpisodes(\'' + entry.id + '\', \'' + escapeAttr(entry.series_name) + '\')">👁 Preview</button>' +
+                    '<button class="btn btn-secondary btn-small" onclick="previewEpisodes(\'' + entry.id + '\', \'' + escapeJs(entry.series_name) + '\')">👁 Preview</button>' +
                     '<button class="btn btn-secondary btn-small" onclick="openEditModal(\'' + entry.id + '\')">✏️ Edit</button>' +
-                    '<button class="btn btn-danger btn-small" onclick="deleteMonitored(\'' + entry.id + '\', \'' + escapeAttr(entry.series_name) + '\')">🗑</button>' +
+                    '<button class="btn btn-danger btn-small" onclick="deleteMonitored(\'' + entry.id + '\', \'' + escapeJs(entry.series_name) + '\')">🗑</button>' +
                     '</div>' +
                     '</div>' +
                     '</div>';
@@ -955,6 +955,10 @@
             return String(str || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         }
 
+        function escapeJs(str) {
+            return String(str || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        }
+
         function showToast(message, type) {
             const toast = document.createElement('div');
             toast.className = 'toast toast-' + type;
@@ -1123,7 +1127,7 @@
                     '<a href="' + movieBrowseUrl + '" class="btn btn-secondary btn-small" title="Find in Browse">🔍</a>' +
                     reWatchBtn +
                     '<button class="btn btn-secondary btn-small" onclick="openEditMovieModal(\'' + m.id + '\')">✏️ Edit</button>' +
-                    '<button class="btn btn-danger btn-small" onclick="deleteMovieMonitor(\'' + m.id + '\', \'' + escapeAttr(m.canonical_name || m.movie_name) + '\')">🗑</button>' +
+                    '<button class="btn btn-danger btn-small" onclick="deleteMovieMonitor(\'' + m.id + '\', \'' + escapeJs(m.canonical_name || m.movie_name) + '\')">🗑</button>' +
                     '</div>' +
                     '</div>' +
                     '</div>';

@@ -12,39 +12,37 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 
-from app.services.config_service import ConfigService
-from app.services.http_client import HttpClientService
-from app.services.jellyfin_service import JellyfinService
-from app.services.cache_service import CacheService
-from app.services.epg_service import EpgService
-from app.services.xtream_service import XtreamService
-from app.services.notification_service import NotificationService
-from app.services.category_service import CategoryService
-from app.services.cart_service import CartService
-from app.services.monitor_service import MonitorService
-from app.services.m3u_service import M3uService
-
 from app.database import DB_NAME, init_db
 from app.migrate import run_migration_if_needed
-
 from app.routes import (
-    ui,
-    filter_api,
-    source_api,
-    playlist,
     browse_api,
-    category_api,
-    xtream_merged,
-    stream_proxy,
-    xtream_source,
-    epg,
-    config_api,
     cache_api,
     cart_api,
-    monitor_api,
+    category_api,
+    config_api,
+    epg,
+    filter_api,
     health,
+    monitor_api,
     player_api,
+    playlist,
+    source_api,
+    stream_proxy,
+    ui,
+    xtream_merged,
+    xtream_source,
 )
+from app.services.cache_service import CacheService
+from app.services.cart_service import CartService
+from app.services.category_service import CategoryService
+from app.services.config_service import ConfigService
+from app.services.epg_service import EpgService
+from app.services.http_client import HttpClientService
+from app.services.jellyfin_service import JellyfinService
+from app.services.m3u_service import M3uService
+from app.services.monitor_service import MonitorService
+from app.services.notification_service import NotificationService
+from app.services.xtream_service import XtreamService
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,29 +66,30 @@ async def background_refresh_loop(
     logger.info("Background refresh task started")
     await asyncio.sleep(10)
 
-    async def _on_cache_refreshed():
-        if cat:
-            await cat.refresh_pattern_categories_async()
-
     while True:
         try:
             cache_was_refreshed = False
             if not cache.is_cache_valid():
                 logger.info("Cache expired, triggering refresh…")
-                await cache.refresh_cache(on_cache_refreshed=_on_cache_refreshed)
+                await cache.refresh_cache()
                 cache_was_refreshed = True
             else:
                 logger.info(f"Cache still valid. Last refresh: {cache._api_cache.get('last_refresh', 'Never')}")
 
             if cache_was_refreshed:
-                try:
-                    await monitor.check_monitored_series()
-                except Exception as exc:
-                    logger.error(f"Series monitoring error in background loop: {exc}")
-                try:
-                    await monitor.check_monitored_movies()
-                except Exception as exc:
-                    logger.error(f"Movie monitoring error in background loop: {exc}")
+                async def _run_post_refresh_tasks():
+                    results = await asyncio.gather(
+                        cat.refresh_pattern_categories_async() if cat else None,
+                        monitor.check_monitored_series(),
+                        monitor.check_monitored_movies(),
+                        return_exceptions=True,
+                    )
+                    for i, res in enumerate(results):
+                        if isinstance(res, Exception):
+                            names = ["category refresh", "series monitoring", "movie monitoring"]
+                            logger.error(f"{names[i]} error in background loop: {res}")
+
+                await _run_post_refresh_tasks()
 
             if not epg_svc.is_epg_cache_valid():
                 logger.info("EPG cache expired, triggering refresh…")
@@ -115,17 +114,22 @@ async def background_refresh_loop(
 
 async def download_schedule_loop(cart: CartService) -> None:
     """Periodically check if we're inside a download window and auto-start the worker."""
+    print("Download schedule loop started", flush=True)
     logger.info("Download schedule loop started")
     await asyncio.sleep(30)  # Initial delay to let other services start
 
     while True:
         try:
             schedule = cart.config_service.get_download_schedule()
+            logger.info(f"Schedule check: enabled={schedule.get('enabled', False)}, in_window={cart.is_in_download_window()}, cart_size={len(cart.cart)}, queued={[i.get('name') for i in cart.cart if i.get('status') == 'queued']}")
             if schedule.get("enabled", False):
                 has_queued = any(i.get("status") == "queued" for i in cart.cart)
+                logger.info(f"has_queued={has_queued}")
                 if has_queued and cart.is_in_download_window():
                     cart._force_started = False
-                    if cart._try_start_worker():
+                    started = cart._try_start_worker()
+                    logger.info(f"Download schedule: has_queued={has_queued}, in_window={cart.is_in_download_window()}, started={started}")
+                    if started:
                         queued_count = len([i for i in cart.cart if i.get("status") == "queued"])
                         logger.info(f"Download schedule: auto-started worker for {queued_count} queued items")
             await asyncio.sleep(60)
@@ -152,7 +156,7 @@ async def lifespan(app: FastAPI):
     init_db(db_path)
     run_migration_if_needed(db_path, data_dir)
 
-    # --- instantiate services ---
+    # --- instantiate services (minimal init before yield) ---
     cfg = ConfigService(data_dir)
     cfg.load()
 
@@ -161,36 +165,13 @@ async def lifespan(app: FastAPI):
     notif = NotificationService(cfg, http)
 
     cache = CacheService(cfg, http, notif)
-    cache.load_cache_from_disk()
 
     epg_svc = EpgService(cfg, http, cache)
-    epg_svc.load_epg_cache_from_disk()
-
     xtream = XtreamService(cfg, cache, http)
-
     jellyfin = JellyfinService(cfg, http)
-
     cat = CategoryService(cfg, cache, notif)
-
     cart = CartService(cfg, http, notif, xtream, jellyfin)
-    cart.load_cart()
-    # Recover stuck downloads
-    recovered = 0
-    for item in cart._download_cart:
-        if item.get("status") == "downloading":
-            item["status"] = "queued"
-            item["progress"] = 0
-            item["error"] = None
-            recovered += 1
-    if recovered:
-        cart.save_cart()
-        logger.info(f"Recovered {recovered} stuck download(s) back to queued")
-
     monitor = MonitorService(cfg, cache, xtream, notif, cart)
-    monitor.load_monitored()
-    monitor.load_monitored_movies()
-    cart.monitor_service = monitor  # late bind for canonical name lookup
-
     m3u = M3uService(cfg, cache)
 
     # --- attach to app.state for DI ---
@@ -206,7 +187,19 @@ async def lifespan(app: FastAPI):
     app.state.monitor_service = monitor
     app.state.m3u_service = m3u
 
-    # --- background tasks ---
+    # --- load cache BEFORE yield so is_cache_valid() sees correct state ---
+    # This uses aiosqlite which runs on thread pool, doesn't block event loop
+    await cache.load_cache_from_disk_async()
+
+    # --- load monitored series/movies AND cart BEFORE yield so API returns data immediately ---
+    monitor.load_monitored()
+    monitor.load_monitored_movies()
+    cart.load_cart()
+
+    # --- load EPG cache BEFORE yield so is_epg_cache_valid() sees correct state ---
+    epg_svc.load_epg_cache_from_disk()
+
+    # --- background tasks (start before yield so they run during app lifetime) ---
     bg_task = asyncio.create_task(
         background_refresh_loop(cache, epg_svc, monitor, cat)
     )
@@ -214,6 +207,7 @@ async def lifespan(app: FastAPI):
         download_schedule_loop(cart)
     )
 
+    # --- startup initial refreshes (fire-and-forget async tasks) ---
     async def _initial_on_cache_refreshed():
         await cat.refresh_pattern_categories_async()
 
@@ -225,7 +219,22 @@ async def lifespan(app: FastAPI):
         logger.info("EPG cache is empty or invalid, triggering initial EPG refresh…")
         asyncio.create_task(epg_svc.refresh_epg_cache())
 
+    # --- yield here so server can start accepting requests ASAP ---
     yield
+
+    cart.monitor_service = monitor  # late bind for canonical name lookup
+    cache.cart_service = cart  # late bind so refresh can defer to active downloads
+    # Recover stuck downloads
+    recovered = 0
+    for item in cart._download_cart:
+        if item.get("status") == "downloading":
+            item["status"] = "queued"
+            item["progress"] = 0
+            item["error"] = None
+            recovered += 1
+    if recovered:
+        cart.save_cart()
+        logger.info(f"Recovered {recovered} stuck download(s) back to queued")
 
     # --- shutdown ---
     bg_task.cancel()

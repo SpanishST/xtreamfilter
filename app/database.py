@@ -65,6 +65,69 @@ async def _pragma_setup_async(conn) -> None:
     await conn.create_function("regexp", 2, _regexp)
 
 
+async def adb_connect(db_path: str) -> aiosqlite.Connection:
+    """Return an async :class:`aiosqlite.Connection` tuned for performance.
+
+    Usage::
+
+        async with adb_connect(db_path) as conn:
+            await conn.execute(...)
+            await conn.commit()
+    """
+    import aiosqlite
+    conn = await aiosqlite.connect(db_path, timeout=30)
+    conn.row_factory = aiosqlite.Row
+    await _pragma_setup_async(conn)
+    return conn
+
+
+class adb_transaction:
+    """Async context manager for transactional SQLite operations.
+
+    Usage::
+
+        async with adb_transaction(conn) as tx:
+            await tx.execute(...)
+        # auto-commits on success, rolls back on exception
+
+    Or with a db_path directly::
+
+        async with adb_transaction(db_path) as tx:
+            await tx.execute(...)
+    """
+
+    def __init__(self, conn_or_path):
+        if isinstance(conn_or_path, str):
+            self._db_path = conn_or_path
+            self.conn: aiosqlite.Connection | None = None
+        else:
+            self._db_path = None
+            self.conn = conn_or_path
+        self._committed = False
+
+    async def __aenter__(self) -> aiosqlite.Connection:
+        if self.conn is None:
+            self.conn = await adb_connect(self._db_path)
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool | None:
+        if self.conn is None:
+            return False
+        if exc_type is not None:
+            await self.conn.rollback()
+            await self.conn.close()
+            return False
+        await self.conn.commit()
+        await self.conn.close()
+        self._committed = True
+        return True
+
+
+def _row_to_dict(row: aiosqlite.Row) -> dict:
+    """Convert an aiosqlite.Row to a dict using column names."""
+    return {key: row[key] for key in row.keys()}
+
+
 # ---------------------------------------------------------------------------
 # Schema – CREATE TABLE IF NOT EXISTS
 # ---------------------------------------------------------------------------

@@ -68,7 +68,7 @@ async def create_category(request: Request, cat_svc: CategoryService = Depends(g
     cat_svc.save_categories(data)
 
     if mode == "automatic":
-        cat_svc.refresh_pattern_categories()
+        cat_svc.refresh_single_pattern_category(new_category["id"])
         data = cat_svc.load_categories()
         for cat in data["categories"]:
             if cat["id"] == new_category["id"]:

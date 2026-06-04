@@ -612,6 +612,12 @@ class CacheService:
                 sources[rr["source_id"]]["last_refresh"] = rr["last_refresh"]
 
         refresh_progress = await self.load_refresh_progress_async()
+        if refresh_progress.get("in_progress"):
+            if not refresh_progress.get("finished_at"):
+                refresh_progress["finished_at"] = datetime.now(timezone.utc).isoformat()
+            refresh_progress["in_progress"] = False
+            refresh_progress["status"] = "failed"
+            self.save_refresh_progress(refresh_progress)
         self._api_cache["refresh_progress"] = refresh_progress
 
         if sources:
@@ -1533,6 +1539,7 @@ class CacheService:
                 logger.warning("Refresh completed but no data was fetched from any source")
                 async with self._cache_lock:
                     self._api_cache["refresh_in_progress"] = False
+                    self._api_cache["last_refresh"] = datetime.now(timezone.utc).isoformat()
                 final_status = "failed"
         except Exception as exc:
             logger.error(f"Cache refresh failed unexpectedly: {exc}")
@@ -1557,7 +1564,7 @@ class CacheService:
             progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
             if final_status == "failed" and not progress.get("last_error"):
                 progress["last_error"] = "Refresh failed for every source"
-            self.save_refresh_progress(
+            self._save_refresh_progress_sync(
                 progress
             )
             if final_status in {"partial", "failed"} and self.notification_service:

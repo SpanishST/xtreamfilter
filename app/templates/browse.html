@@ -319,8 +319,8 @@
                 <div class="control-group search-input">
                     <label>Search</label>
                     <div style="display: flex; gap: 8px;">
-                        <input type="text" id="search-input" placeholder="Search films, series, channels... or tmdb:12345" onkeypress="if(event.key==='Enter')applyFilters()">
-                        <button class="btn btn-primary" onclick="currentPage=1;applyFilters()" style="white-space: nowrap;">🔍 Search</button>
+                        <input type="text" id="search-input" placeholder="Search films, series, channels... or tmdb:12345" onkeypress="if(event.key==='Enter'){saveBrowseFilters();applyFilters()}">
+                        <button class="btn btn-primary" onclick="currentPage=1;saveBrowseFilters();applyFilters()" style="white-space: nowrap;">🔍 Search</button>
                     </div>
                 </div>
                 <div class="control-group">
@@ -333,24 +333,28 @@
                 </div>
                 <div class="control-group">
                     <label>Source</label>
-                    <select id="source-filter" onchange="loadGroups()"><option value="">All Sources</option></select>
+                    <select id="source-filter" onchange="loadGroups();saveBrowseFilters()"><option value="">All Sources</option></select>
                 </div>
                 <div class="control-group">
                     <label>Group</label>
-                    <select id="group-filter"><option value="">All Groups</option></select>
+                    <select id="group-filter" onchange="saveBrowseFilters()"><option value="">All Groups</option></select>
                 </div>
                 <div class="control-group">
                     <label>&nbsp;</label>
                     <label class="checkbox-option" style="padding: 10px 14px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 8px;">
-                        <input type="checkbox" id="use-source-filters-browse" style="width: 18px; height: 18px;">
+                        <input type="checkbox" id="use-source-filters-browse" onchange="saveBrowseFilters()" style="width: 18px; height: 18px;">
                         <span style="white-space: nowrap;">Apply source filter rules</span>
                     </label>
+                </div>
+                <div class="control-group">
+                    <label>&nbsp;</label>
+                    <button class="btn btn-secondary" onclick="resetBrowseFilters()" title="Clear all filters and search" style="white-space: nowrap;">↺ Reset</button>
                 </div>
             </div>
             <div class="controls-row" id="sort-filter-row" style="margin-top: 12px; display: none;">
                 <div class="control-group">
                     <label>Sort By</label>
-                    <select id="sort-by" onchange="currentPage=1;applyFilters()">
+                    <select id="sort-by" onchange="currentPage=1;saveBrowseFilters();applyFilters()">
                         <option value="">Default</option>
                         <option value="name">Name</option>
                         <option value="added">Added Date</option>
@@ -359,14 +363,14 @@
                 </div>
                 <div class="control-group">
                     <label>Order</label>
-                    <select id="sort-order" onchange="currentPage=1;applyFilters()">
+                    <select id="sort-order" onchange="currentPage=1;saveBrowseFilters();applyFilters()">
                         <option value="desc">Descending</option>
                         <option value="asc">Ascending</option>
                     </select>
                 </div>
                 <div class="control-group">
                     <label>Min Rating</label>
-                    <select id="min-rating" onchange="currentPage=1;applyFilters()">
+                    <select id="min-rating" onchange="currentPage=1;saveBrowseFilters();applyFilters()">
                         <option value="0">Any</option>
                         <option value="1">1+</option>
                         <option value="2">2+</option>
@@ -381,7 +385,7 @@
                 </div>
                 <div class="control-group">
                     <label>Added Within</label>
-                    <select id="max-added-days" onchange="currentPage=1;applyFilters()">
+                    <select id="max-added-days" onchange="currentPage=1;saveBrowseFilters();applyFilters()">
                         <option value="0">Any time</option>
                         <option value="1">Last 24h</option>
                         <option value="7">Last 7 days</option>
@@ -751,6 +755,71 @@
         let _playerEpgInterval = null;
         let _playerEpgChannelId = null;
         let _playerVolume = parseFloat(localStorage.getItem('playerVolume') || '1');
+
+        // ---- Browse filter persistence (localStorage) ----
+        const BROWSE_FILTERS_KEY = 'browseFilters';
+        const BROWSE_FILTERS_DEFAULTS = {
+            search: '',
+            contentType: 'live',
+            sourceId: '',
+            groupName: '',
+            useSourceFilters: false,
+            sortBy: '',
+            sortOrder: 'desc',
+            minRating: '0',
+            maxAddedDays: '0',
+            categoryId: null
+        };
+        function loadBrowseFilters() {
+            try {
+                const raw = localStorage.getItem(BROWSE_FILTERS_KEY);
+                const parsed = raw ? JSON.parse(raw) : {};
+                return Object.assign({}, BROWSE_FILTERS_DEFAULTS, parsed);
+            } catch (_) {
+                return Object.assign({}, BROWSE_FILTERS_DEFAULTS);
+            }
+        }
+        function saveBrowseFilters() {
+            try {
+                const f = {
+                    search: document.getElementById('search-input').value,
+                    contentType: contentType,
+                    sourceId: document.getElementById('source-filter').value,
+                    groupName: document.getElementById('group-filter').value,
+                    useSourceFilters: document.getElementById('use-source-filters-browse').checked,
+                    sortBy: document.getElementById('sort-by').value,
+                    sortOrder: document.getElementById('sort-order').value,
+                    minRating: document.getElementById('min-rating').value,
+                    maxAddedDays: document.getElementById('max-added-days').value,
+                    categoryId: selectedCategoryId
+                };
+                localStorage.setItem(BROWSE_FILTERS_KEY, JSON.stringify(f));
+            } catch (_) { /* storage unavailable — ignore */ }
+        }
+        function clearBrowseFilters() {
+            try { localStorage.removeItem(BROWSE_FILTERS_KEY); } catch (_) {}
+        }
+        function resetBrowseFilters() {
+            clearBrowseFilters();
+            setContentType(BROWSE_FILTERS_DEFAULTS.contentType);
+            document.getElementById('search-input').value = '';
+            document.getElementById('use-source-filters-browse').checked = false;
+            document.getElementById('sort-by').value = '';
+            document.getElementById('sort-order').value = BROWSE_FILTERS_DEFAULTS.sortOrder;
+            document.getElementById('min-rating').value = BROWSE_FILTERS_DEFAULTS.minRating;
+            document.getElementById('max-added-days').value = BROWSE_FILTERS_DEFAULTS.maxAddedDays;
+            if (selectedCategoryId !== null) selectScope(null);
+            loadSources();
+            loadGroups();
+            currentPage = 1;
+            document.getElementById('content-grid').innerHTML = '';
+            document.getElementById('pagination').style.display = 'none';
+            document.getElementById('empty-state').innerHTML = '<p>Use the filters above and click <strong>Search</strong> to find content.</p>';
+            document.getElementById('empty-state').style.display = 'block';
+            document.getElementById('loading-state').style.display = 'none';
+            if (typeof showToast === 'function') showToast('Filters reset', 'info');
+        }
+
         // VOD transcode seeking state
         let _playerDuration = 0;      // Total duration in seconds (from ffprobe)
         let _playerSeekOffset = 0;    // Current seek offset sent to ffmpeg
@@ -1297,6 +1366,10 @@
         let categories = [];
         let selectedCategoryId = null;
         let currentFetchController = null; // AbortController for cancelling in-flight requests
+        // Pending saved values applied to dynamic selects after their options are populated
+        let _pendingSourceId = '';
+        let _pendingGroupName = '';
+        let _pendingCategoryId = null;
 
         const iconMap = {
             'folder': '📁', 'heart': '❤️', 'star': '⭐', 'film': '🎬', 'tv': '📺',
@@ -1304,25 +1377,43 @@
         };
 
         document.addEventListener('DOMContentLoaded', function() {
+            // Restore saved browse filters to the static controls before data loads
+            const _saved = loadBrowseFilters();
+
+            // Pre-fill search from URL params (e.g. ?search=Title&type=series) — URL wins over localStorage
+            const _urlParams = new URLSearchParams(window.location.search);
+            const _preSearch = _urlParams.get('search');
+            const _preType  = _urlParams.get('type');
+
+            const _initialContentType = (_preType && ['live', 'vod', 'series'].includes(_preType))
+                ? _preType
+                : _saved.contentType;
+            setContentType(_initialContentType);
+
+            document.getElementById('search-input').value = _preSearch != null ? _preSearch : _saved.search;
+            document.getElementById('use-source-filters-browse').checked = _saved.useSourceFilters;
+            document.getElementById('sort-by').value = _saved.sortBy;
+            document.getElementById('sort-order').value = _saved.sortOrder;
+            document.getElementById('min-rating').value = _saved.minRating;
+            document.getElementById('max-added-days').value = _saved.maxAddedDays;
+
+            // Stash saved source/group/category so the loaders can re-apply once the dropdowns are populated
+            _pendingSourceId = _saved.sourceId;
+            _pendingGroupName = _saved.groupName;
+            _pendingCategoryId = _saved.categoryId;
+
             loadSources();
             loadCategories();
             loadGroups();
+
             // Show initial state without auto-loading results
             document.getElementById('loading-state').style.display = 'none';
             renderBrowseNav();
             document.getElementById('empty-state').innerHTML = '<p>Use the filters above and click <strong>Search</strong> to find content.</p>';
             document.getElementById('empty-state').style.display = 'block';
-            // Pre-fill search from URL params (e.g. ?search=Title&type=series)
-            const _urlParams = new URLSearchParams(window.location.search);
-            const _preSearch = _urlParams.get('search');
-            const _preType  = _urlParams.get('type');
-            if (_preSearch || _preType) {
-                if (_preType && ['live', 'vod', 'series'].includes(_preType)) setContentType(_preType);
-                if (_preSearch) {
-                    document.getElementById('search-input').value = _preSearch;
-                    // Defer until sources/groups are loaded
-                    setTimeout(() => applyFilters(), 400);
-                }
+            if (_preSearch) {
+                // Defer until sources/groups are loaded
+                setTimeout(() => applyFilters(), 400);
             }
             document.querySelectorAll('.icon-option').forEach(opt => {
                 opt.addEventListener('click', function() {
@@ -1348,6 +1439,12 @@
                     option.textContent = source.name;
                     sourceFilter.appendChild(option);
                 });
+                // Apply saved source selection once the options are present
+                if (_pendingSourceId && sources.some(s => s.id === _pendingSourceId)) {
+                    sourceFilter.value = _pendingSourceId;
+                    _pendingSourceId = '';
+                    saveBrowseFilters();
+                }
             } catch (error) { console.error('Error loading sources:', error); }
         }
 
@@ -1356,7 +1453,14 @@
                 const response = await fetch('/api/categories/summary');
                 const data = await response.json();
                 categories = data.categories || [];
-                renderBrowseNav();
+                // Apply saved category scope once the categories are loaded
+                if (_pendingCategoryId && categories.some(c => c.id === _pendingCategoryId)) {
+                    selectScope(_pendingCategoryId);
+                    _pendingCategoryId = null;
+                } else {
+                    _pendingCategoryId = null;
+                    renderBrowseNav();
+                }
             } catch (error) { console.error('Error loading categories:', error); }
         }
 
@@ -1412,6 +1516,7 @@
             document.getElementById('controls-bar').style.display = 'block';
             renderBrowseNav();
             currentPage = 1;
+            saveBrowseFilters();
             applyFilters();
         }
 
@@ -1425,6 +1530,7 @@
             sortFilterRow.style.display = (type === 'vod' || type === 'series') ? 'flex' : 'none';
             currentPage = 1;
             loadGroups();
+            saveBrowseFilters();
             // Don't auto-search - user will click Search button
         }
 
@@ -1444,7 +1550,14 @@
                     option.textContent = g.name + ' (' + g.count + ')';
                     groupFilter.appendChild(option);
                 });
-                if ((data.groups || []).some(g => g.name === currentValue)) groupFilter.value = currentValue;
+                // Apply pending saved group once, then fall back to preserving the current value
+                if (_pendingGroupName && (data.groups || []).some(g => g.name === _pendingGroupName)) {
+                    groupFilter.value = _pendingGroupName;
+                    _pendingGroupName = '';
+                    saveBrowseFilters();
+                } else if ((data.groups || []).some(g => g.name === currentValue)) {
+                    groupFilter.value = currentValue;
+                }
             } catch (e) {
                 console.error('Failed to load groups', e);
             }
@@ -1457,7 +1570,7 @@
             if (val.startsWith('tmdb:') && contentType === 'live') {
                 setContentType('vod');
             }
-            searchTimeout = setTimeout(() => { currentPage = 1; applyFilters(); }, 300);
+            searchTimeout = setTimeout(() => { currentPage = 1; saveBrowseFilters(); applyFilters(); }, 300);
         }
 
         async function applyFilters() {

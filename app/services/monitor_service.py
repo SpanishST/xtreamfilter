@@ -77,6 +77,7 @@ class MonitorService:
         self._monitored_series: list[dict] = []
         self._monitored_movies: list[dict] = []
         self._check_in_progress: bool = False
+        self.log_service = None  # set after init via attribute binding
 
     # ------------------------------------------------------------------
     # Properties
@@ -539,6 +540,21 @@ class MonitorService:
 
             total_new = sum(len(eps) for _, eps, _, _ in all_notifications)
             logger.info(f"Series monitoring: check complete. {total_new} new episodes found.")
+            if getattr(self, 'log_service', None) and total_new > 0:
+                for series_name, new_eps, _, action in all_notifications:
+                    ep_labels = []
+                    for ep in new_eps[:5]:
+                        s = ep.get("season", "?")
+                        e = ep.get("episode_num", "?")
+                        ep_labels.append(f"S{s}E{e}")
+                    label = ", ".join(ep_labels)
+                    if len(new_eps) > 5:
+                        label += f" +{len(new_eps) - 5} more"
+                    await self.log_service.log("monitor", "info", f"New episode(s) for '{series_name}': {label}", {
+                        "series_name": series_name,
+                        "count": len(new_eps),
+                        "action": action,
+                    })
         finally:
             self._check_in_progress = False
 
@@ -1258,6 +1274,12 @@ class MonitorService:
                     logger.info(f"Movie monitoring: {len(queued)} item(s) queued but outside download window")
 
         logger.info(f"Movie monitoring: check complete. {len(all_notifications)} movie(s) newly found.")
+        if getattr(self, 'log_service', None) and all_notifications:
+            for movie_name, _, _, action in all_notifications:
+                await self.log_service.log("monitor", "info", f"Movie '{movie_name}' is now available", {
+                    "movie_name": movie_name,
+                    "action": action,
+                })
 
     async def _check_single_movie(self, entry: dict) -> dict | None:
         """Check one monitored movie. Returns a cart-item dict if the movie is now found."""

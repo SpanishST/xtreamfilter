@@ -273,3 +273,8 @@ class ConfigService:
         return schedule
 
     download_schedule = property(get_download_schedule)
+
+    def get_log_retention_days(self) -> int:
+        return max(1, int(self._config.get("options", {}).get("log_retention_days", 30)))
+
+    log_retention_days = property(get_log_retention_days)

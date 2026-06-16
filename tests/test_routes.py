@@ -29,7 +29,9 @@ def _build_app(data_dir: str):
         ui, filter_api, source_api, playlist, browse_api,
         category_api, xtream_merged, stream_proxy, xtream_source,
         epg, config_api, cache_api, cart_api, monitor_api, health,
+        log_api,
     )
+    from app.services.log_service import LogService
 
     cfg = ConfigService(data_dir)
     cfg.load()
@@ -44,6 +46,11 @@ def _build_app(data_dir: str):
     cart = CartService(cfg, http, notif, xtream, jellyfin)
     monitor = MonitorService(cfg, cache, xtream, notif, cart)
     m3u = M3uService(cfg, cache)
+    log_svc = LogService(os.path.join(data_dir, DB_NAME), cfg)
+
+    cache.log_service = log_svc
+    cart.log_service = log_svc
+    monitor.log_service = log_svc
 
     app = FastAPI()
 
@@ -59,6 +66,7 @@ def _build_app(data_dir: str):
     app.state.cart_service = cart
     app.state.monitor_service = monitor
     app.state.m3u_service = m3u
+    app.state.log_service = log_svc
 
     # UTF-8 charset middleware
     @app.middleware("http")
@@ -71,7 +79,7 @@ def _build_app(data_dir: str):
 
     for r in (
         ui, health, filter_api, source_api, config_api,
-        cache_api, cart_api, monitor_api, epg, category_api,
+        cache_api, cart_api, monitor_api, log_api, epg, category_api,
         browse_api, playlist, xtream_merged, stream_proxy, xtream_source,
     ):
         app.include_router(r.router)

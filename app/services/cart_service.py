@@ -452,6 +452,7 @@ class CartService:
             "pause_remaining": 0,
         }
         self._force_started: bool = False
+        self.log_service = None  # set after init via attribute binding
 
     # ------------------------------------------------------------------
     # Properties
@@ -830,6 +831,12 @@ class CartService:
             added_items.append(item)
 
         self.save_cart()
+        if getattr(self, 'log_service', None) and added_items:
+            names = [i.get("name", "Unknown") for i in added_items[:5]]
+            label = ", ".join(names)
+            if len(added_items) > 5:
+                label += f" +{len(added_items) - 5} more"
+            await getattr(self, 'log_service', None).log("cart", "info", f"Added {len(added_items)} item(s) to cart: {label}")
         return {"added": len(added_items), "items": added_items}
 
     @staticmethod
@@ -940,12 +947,16 @@ class CartService:
             item["status"] = "downloading"
             item["progress"] = 0
             self.save_cart()
+            if getattr(self, 'log_service', None):
+                await getattr(self, 'log_service', None).log("cart", "info", f"Download started: {item.get('name', 'Unknown')}")
 
             upstream_url = self.build_upstream_url(item)
             if not upstream_url:
                 item["status"] = "failed"
                 item["error"] = "Could not build upstream URL (source not found)"
                 self.save_cart()
+                if getattr(self, 'log_service', None):
+                    await getattr(self, 'log_service', None).log("cart", "error", f"Download failed: {item.get('name', 'Unknown')} — source not found")
                 continue
 
             # Enrich item name from upstream metadata (title, year) before
@@ -1007,6 +1018,8 @@ class CartService:
                                 item["status"] = "cancelled"
                                 item["error"] = "Cancelled by user"
                                 self.save_cart()
+                                if getattr(self, 'log_service', None):
+                                    asyncio.create_task(getattr(self, 'log_service', None).log("cart", "warning", f"Download cancelled: {item.get('name', 'Unknown')}"))
                                 self._download_current_item = None
                                 self._download_cancel_event.clear()
                                 return
@@ -1057,6 +1070,8 @@ class CartService:
                                             item["status"] = "cancelled"
                                             item["error"] = "Cancelled by user"
                                             self.save_cart()
+                                            if getattr(self, 'log_service', None):
+                                                asyncio.create_task(getattr(self, 'log_service', None).log("cart", "warning", f"Download cancelled: {item.get('name', 'Unknown')}"))
                                             try:
                                                 os.remove(temp_path)
                                             except OSError:
@@ -1141,8 +1156,12 @@ class CartService:
                 if item.get("status") == "downloading" and not download_failed:
                     move_ok = await self._move_temp_to_destination(item, temp_path, file_path)
                     if not move_ok:
+                        if getattr(self, 'log_service', None):
+                            await getattr(self, 'log_service', None).log("cart", "error", f"File move failed: {item.get('name', 'Unknown')}", {"error": item.get("error", "")})
                         continue
                     await self._finalize_completed_download(item)
+                    if getattr(self, 'log_service', None):
+                        await getattr(self, 'log_service', None).log("cart", "info", f"Download completed: {item.get('name', 'Unknown')}")
 
                 if pause_interval > 0 and pause_duration > 0:
                     self._download_progress["paused"] = True
@@ -1162,6 +1181,8 @@ class CartService:
                 item["status"] = "failed"
                 item["error"] = str(e)
                 self.save_cart()
+                if getattr(self, 'log_service', None):
+                    await getattr(self, 'log_service', None).log("cart", "error", f"Download failed: {item.get('name', 'Unknown')}", {"error": str(e)})
                 await self.notification_service.send_download_file_notification(item)
                 try:
                     if os.path.exists(temp_path):

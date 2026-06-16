@@ -23,6 +23,7 @@ from app.routes import (
     epg,
     filter_api,
     health,
+    log_api,
     monitor_api,
     player_api,
     playlist,
@@ -39,6 +40,7 @@ from app.services.config_service import ConfigService
 from app.services.epg_service import EpgService
 from app.services.http_client import HttpClientService
 from app.services.jellyfin_service import JellyfinService
+from app.services.log_service import LogService
 from app.services.m3u_service import M3uService
 from app.services.monitor_service import MonitorService
 from app.services.notification_service import NotificationService
@@ -165,6 +167,9 @@ async def lifespan(app: FastAPI):
     cfg = ConfigService(data_dir)
     cfg.load()
 
+    log_svc = LogService(db_path, cfg)
+    await log_svc.prune_old_logs()
+
     http = HttpClientService()
 
     notif = NotificationService(cfg, http)
@@ -179,6 +184,10 @@ async def lifespan(app: FastAPI):
     monitor = MonitorService(cfg, cache, xtream, notif, cart)
     m3u = M3uService(cfg, cache)
 
+    cache.log_service = log_svc
+    cart.log_service = log_svc
+    monitor.log_service = log_svc
+
     # --- attach to app.state for DI ---
     app.state.config_service = cfg
     app.state.http_client = http
@@ -191,6 +200,7 @@ async def lifespan(app: FastAPI):
     app.state.cart_service = cart
     app.state.monitor_service = monitor
     app.state.m3u_service = m3u
+    app.state.log_service = log_svc
 
     # --- load cache BEFORE yield so is_cache_valid() sees correct state ---
     # This uses aiosqlite which runs on thread pool, doesn't block event loop
@@ -212,18 +222,6 @@ async def lifespan(app: FastAPI):
     schedule_task = asyncio.create_task(
         download_schedule_loop(cart)
     )
-
-    # --- startup initial refreshes (fire-and-forget async tasks) ---
-    async def _initial_on_cache_refreshed():
-        await cat.refresh_pattern_categories_async()
-
-    if not cache.is_cache_valid():
-        logger.info("Cache is empty or invalid, triggering initial refresh…")
-        asyncio.create_task(cache.refresh_cache(on_cache_refreshed=_initial_on_cache_refreshed))
-
-    if not epg_svc.is_epg_cache_valid():
-        logger.info("EPG cache is empty or invalid, triggering initial EPG refresh…")
-        asyncio.create_task(epg_svc.refresh_epg_cache())
 
     # --- yield here so server can start accepting requests ASAP ---
     yield
@@ -285,6 +283,7 @@ app.include_router(config_api.router)
 app.include_router(cache_api.router)
 app.include_router(cart_api.router)
 app.include_router(monitor_api.router)
+app.include_router(log_api.router)
 app.include_router(epg.router)
 app.include_router(category_api.router)
 app.include_router(browse_api.router)

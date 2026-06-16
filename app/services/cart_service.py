@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from app.services.config_service import ConfigService
     from app.services.http_client import HttpClientService
     from app.services.jellyfin_service import JellyfinService
+    from app.services.monitor_service import MonitorService
     from app.services.notification_service import NotificationService
     from app.services.xtream_service import XtreamService
 
@@ -436,7 +437,7 @@ class CartService:
         self.jellyfin_service = jellyfin_service
         self.db_path = os.path.join(config_service.data_dir, DB_NAME)
         # Late-bound by main.py after MonitorService is constructed
-        self.monitor_service = None
+        self.monitor_service: MonitorService | None = None
 
         self._download_cart: list[dict] = []
         self._download_task: Optional[asyncio.Task] = None

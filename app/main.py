@@ -78,15 +78,20 @@ async def background_refresh_loop(
 
             if cache_was_refreshed:
                 async def _run_post_refresh_tasks():
-                    results = await asyncio.gather(
-                        cat.refresh_pattern_categories_async() if cat else None,
+                    coros = [
                         monitor.check_monitored_series(),
                         monitor.check_monitored_movies(),
-                        return_exceptions=True,
+                    ]
+                    if cat:
+                        coros.insert(0, cat.refresh_pattern_categories_async())
+                    results = await asyncio.gather(*coros, return_exceptions=True)
+                    names = (
+                        ["category refresh", "series monitoring", "movie monitoring"]
+                        if cat
+                        else ["series monitoring", "movie monitoring"]
                     )
                     for i, res in enumerate(results):
                         if isinstance(res, Exception):
-                            names = ["category refresh", "series monitoring", "movie monitoring"]
                             logger.error(f"{names[i]} error in background loop: {res}")
 
                 await _run_post_refresh_tasks()
@@ -195,6 +200,7 @@ async def lifespan(app: FastAPI):
     monitor.load_monitored()
     monitor.load_monitored_movies()
     cart.load_cart()
+    cache.cart_service = cart  # bind so refresh can defer to active downloads
 
     # --- load EPG cache BEFORE yield so is_epg_cache_valid() sees correct state ---
     epg_svc.load_epg_cache_from_disk()
@@ -223,7 +229,6 @@ async def lifespan(app: FastAPI):
     yield
 
     cart.monitor_service = monitor  # late bind for canonical name lookup
-    cache.cart_service = cart  # late bind so refresh can defer to active downloads
     # Recover stuck downloads
     recovered = 0
     for item in cart._download_cart:

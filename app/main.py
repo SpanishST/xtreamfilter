@@ -105,7 +105,7 @@ async def background_refresh_loop(
             # Sleep until the cache is about to expire, not a full TTL from now.
             # This prevents worst-case 2×TTL drift when the loop checks just
             # before the cache expires and then sleeps a full TTL.
-            ttl = cache.config_service.get_cache_ttl()
+            ttl = cache.config_service.refresh_interval
             remaining = ttl - cache.get_cache_age()
             sleep_secs = max(30, remaining)
             logger.debug(f"Background loop sleeping {sleep_secs:.0f}s (remaining TTL: {remaining:.0f}s)")

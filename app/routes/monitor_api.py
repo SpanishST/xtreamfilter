@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import uuid
 from datetime import datetime
@@ -14,10 +15,16 @@ from app.database import DB_NAME, db_connect
 from app.dependencies import get_config_service, get_monitor_service, get_xtream_service
 from app.services.config_service import ConfigService
 from app.services.filter_service import normalize_name
-from app.services.monitor_service import MonitorService, _normalize_imdb_id, _normalize_tmdb_id, _safe_episode_num  # noqa: F401 - _normalize_imdb_id used in series dup checks
+from app.services.monitor_service import (  # noqa: F401 - _normalize_imdb_id used in series dup checks
+    MonitorService,
+    _normalize_imdb_id,
+    _normalize_tmdb_id,
+    _safe_episode_num,
+)
 from app.services.xtream_service import XtreamService
 
 router = APIRouter(tags=["monitor"])
+logger = logging.getLogger(__name__)
 
 
 def _normalize_tmdb_id(value) -> str | None:
@@ -40,7 +47,6 @@ async def get_monitored(monitor: MonitorService = Depends(get_monitor_service)):
 async def add_monitored(
     request: Request,
     monitor: MonitorService = Depends(get_monitor_service),
-    xtream: XtreamService = Depends(get_xtream_service),
 ):
     data = await request.json()
     series_name = data.get("series_name", "").strip()
@@ -126,55 +132,6 @@ async def add_monitored(
             if not m.get("source_id") and (same_id or same_name):
                 return JSONResponse(status_code=409, content={"error": "This series is already being monitored (any source)"})
 
-    # Build known episodes snapshot across all selected sources
-    known_episodes: list[dict] = []
-    if scope in ("new_only", "season"):
-        if validated_sources:
-            seen_ep_keys: set[tuple] = set()
-            for ms in validated_sources:
-                eps = await xtream.fetch_series_episodes(ms["source_id"], ms["series_ref"])
-                for ep in eps:
-                    if scope == "season" and str(ep.get("season")) != str(season_filter):
-                        continue
-                    ep_key = (str(ep.get("season", "")), _safe_episode_num(ep.get("episode_num")))
-                    if ep_key in seen_ep_keys:
-                        continue
-                    seen_ep_keys.add(ep_key)
-                    known_episodes.append({
-                        "stream_id": str(ep.get("stream_id", "")),
-                        "source_id": ms["source_id"],
-                        "season": str(ep.get("season", "")),
-                        "episode_num": _safe_episode_num(ep.get("episode_num")),
-                    })
-        elif source_id:
-            episodes = await xtream.fetch_series_episodes(source_id, series_id)
-            for ep in episodes:
-                if scope == "season" and str(ep.get("season")) != str(season_filter):
-                    continue
-                known_episodes.append({
-                    "stream_id": str(ep.get("stream_id", "")),
-                    "source_id": source_id or "",
-                    "season": str(ep.get("season", "")),
-                    "episode_num": _safe_episode_num(ep.get("episode_num")),
-                })
-        else:
-            matches = monitor.find_series_across_sources(series_name, tmdb_id=tmdb_id, imdb_id=imdb_id)
-            episodes = []
-            for m in matches:
-                eps = await xtream.fetch_series_episodes(m["source_id"], m["series_id"])
-                if eps:
-                    episodes = eps
-                    break
-            for ep in episodes:
-                if scope == "season" and str(ep.get("season")) != str(season_filter):
-                    continue
-                known_episodes.append({
-                    "stream_id": str(ep.get("stream_id", "")),
-                    "source_id": source_id or "",
-                    "season": str(ep.get("season", "")),
-                    "episode_num": _safe_episode_num(ep.get("episode_num")),
-                })
-
     entry = {
         "id": str(uuid.uuid4()),
         "series_name": series_name,
@@ -192,12 +149,25 @@ async def add_monitored(
         "season_filter": str(season_filter) if season_filter else None,
         "action": action,
         "enabled": True,
-        "known_episodes": known_episodes,
+        "known_episodes": [],
         "downloaded_episodes": [],
         "created_at": datetime.now().isoformat(),
         "last_checked": None,
         "last_new_count": 0,
     }
+
+    # Build the 'already known' snapshot using the shared helper so add/edit
+    # behave identically. Empty when scope='all' (everything is new) or when
+    # upstream is unreachable at creation time — the next successful check
+    # will then treat those episodes as new (acceptable trade-off).
+    if scope in ("new_only", "season"):
+        try:
+            entry["known_episodes"] = await monitor.build_known_episodes_snapshot(
+                entry, scope, entry.get("season_filter"),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to build known-episodes snapshot at creation: {e}")
+            entry["known_episodes"] = []
 
     monitor._monitored_series.append(entry)
     monitor.save_monitored()
@@ -222,6 +192,14 @@ async def update_monitored(monitor_id: str, request: Request, monitor: MonitorSe
     data = await request.json()
     for entry in monitor._monitored_series:
         if entry.get("id") == monitor_id:
+            # Snapshot the pre-edit values that affect the known-episodes set
+            # so we can detect whether a refresh is needed after applying changes.
+            prev_scope = entry.get("scope")
+            prev_season_filter = entry.get("season_filter")
+            prev_monitor_sources = json.dumps(entry.get("monitor_sources") or [], sort_keys=True)
+            prev_source_id = entry.get("source_id")
+            prev_custom_category_ids = json.dumps(entry.get("custom_category_ids") or [], sort_keys=True)
+
             if "enabled" in data:
                 entry["enabled"] = bool(data["enabled"])
             if "scope" in data and data["scope"] in ("all", "season", "new_only"):
@@ -261,6 +239,55 @@ async def update_monitored(monitor_id: str, request: Request, monitor: MonitorSe
             if "custom_category_ids" in data:
                 raw = data["custom_category_ids"]
                 entry["custom_category_ids"] = [str(c) for c in raw if c] if isinstance(raw, list) else []
+
+            # If anything that defines the 'already known' episode set changed,
+            # rebuild the snapshot via the shared helper so add/edit behave
+            # identically. Without this, adding a new source to monitor_sources
+            # (or switching scope/season_filter) leaves the old snapshot in place
+            # and the next check notifies about every episode on the new source.
+            new_scope = entry.get("scope")
+            new_season_filter = entry.get("season_filter")
+            new_monitor_sources = json.dumps(entry.get("monitor_sources") or [], sort_keys=True)
+            new_source_id = entry.get("source_id")
+            new_custom_category_ids = json.dumps(entry.get("custom_category_ids") or [], sort_keys=True)
+
+            snapshot_changed = (
+                prev_scope != new_scope
+                or prev_season_filter != new_season_filter
+                or prev_monitor_sources != new_monitor_sources
+                or prev_source_id != new_source_id
+                or prev_custom_category_ids != new_custom_category_ids
+            )
+
+            if snapshot_changed:
+                try:
+                    entry["known_episodes"] = await monitor.build_known_episodes_snapshot(
+                        entry, new_scope, new_season_filter,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to rebuild known-episodes snapshot on edit for "
+                        f"'{entry.get('series_name', '?')}': {e}"
+                    )
+
+                # Prune downloaded_episodes entries whose (season, episode_num)
+                # no longer appears in the refreshed known-episodes set. This
+                # prevents stale keys from blocking re-detection of episodes
+                # that were renumbered upstream or moved between sources.
+                known_keys = {
+                    (str(k.get("season", "")), _safe_episode_num(k.get("episode_num")))
+                    for k in entry.get("known_episodes", [])
+                }
+                if known_keys:
+                    entry["downloaded_episodes"] = [
+                        d for d in entry.get("downloaded_episodes", [])
+                        if (str(d.get("season", "")), _safe_episode_num(d.get("episode_num"))) in known_keys
+                    ]
+                else:
+                    # scope='all' → known set is intentionally empty; never prune
+                    # download history in that case as we have no new reference.
+                    pass
+
             monitor.save_monitored()
 
             # Trigger backfill if requested (only makes sense when action involves download)
@@ -285,6 +312,54 @@ async def delete_monitored(monitor_id: str, monitor: MonitorService = Depends(ge
         return JSONResponse(status_code=404, content={"error": "Monitored entry not found"})
     monitor.save_monitored()
     return {"status": "ok"}
+
+
+@router.post("/api/monitor/{monitor_id}/rebuild-known")
+async def rebuild_known_episodes(monitor_id: str, monitor: MonitorService = Depends(get_monitor_service)):
+    """Manually rebuild the 'already known' episode snapshot for a monitor.
+
+    Useful when upstream numbering has changed (e.g. an FR source returned
+    episode_num=52 for S01E02) and the existing known_episodes rows are
+    stale, causing spurious 'new episode' notifications for old episodes.
+    After rebuilding, the next monitor check will only notify about
+    genuinely new episodes.
+    """
+    for entry in monitor._monitored_series:
+        if entry.get("id") != monitor_id:
+            continue
+        try:
+            entry["known_episodes"] = await monitor.build_known_episodes_snapshot(
+                entry, entry.get("scope", "new_only"), entry.get("season_filter"),
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to rebuild known-episodes snapshot for "
+                f"'{entry.get('series_name', '?')}': {e}"
+            )
+            return JSONResponse(
+                status_code=502,
+                content={"error": f"Failed to rebuild snapshot: {e}"},
+            )
+
+        # Prune downloaded_episodes entries that no longer match any known
+        # episode so stale keys don't block re-detection.
+        known_keys = {
+            (str(k.get("season", "")), _safe_episode_num(k.get("episode_num")))
+            for k in entry.get("known_episodes", [])
+        }
+        if known_keys:
+            entry["downloaded_episodes"] = [
+                d for d in entry.get("downloaded_episodes", [])
+                if (str(d.get("season", "")), _safe_episode_num(d.get("episode_num"))) in known_keys
+            ]
+
+        monitor.save_monitored()
+        return {
+            "status": "ok",
+            "known_episodes_count": len(entry.get("known_episodes", [])),
+            "downloaded_episodes_count": len(entry.get("downloaded_episodes", [])),
+        }
+    return JSONResponse(status_code=404, content={"error": "Monitored entry not found"})
 
 
 @router.post("/api/monitor/check")

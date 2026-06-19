@@ -487,6 +487,103 @@ class MonitorService:
     # Check logic
     # ------------------------------------------------------------------
 
+    async def build_known_episodes_snapshot(
+        self,
+        entry: dict,
+        scope: str,
+        season_filter: str | None,
+    ) -> list[dict]:
+        """Build the 'already known' episode snapshot for a monitor entry.
+
+        Resolves the (source_id, series_id) pairs to query — honouring
+        ``monitor_sources``, the legacy single ``source_id`` and the
+        fuzzy cross-source fallback — applies the custom-category filter,
+        then fetches episodes from each pair and de-duplicates them by
+        ``(season, episode_num)``. When ``scope == 'season'``, only episodes
+        matching ``season_filter`` are kept; when ``scope == 'all'`` the
+        snapshot is empty (every episode is considered new).
+
+        Used at monitor creation, on monitor edit and via the explicit
+        ``/api/monitor/{id}/rebuild-known`` endpoint so the snapshot is
+        always built with the same logic the check loop uses.
+        """
+        if scope == "all":
+            return []
+
+        series_name = entry.get("canonical_name") or entry.get("series_name", "")
+        source_id = entry.get("source_id")
+        series_id = entry.get("series_id", "")
+        monitor_sources: list[dict] = entry.get("monitor_sources") or []
+
+        sources_to_try: list[dict] = []
+        if monitor_sources:
+            for ms in monitor_sources:
+                if ms.get("source_id") and ms.get("series_ref"):
+                    sources_to_try.append({
+                        "source_id": ms["source_id"],
+                        "series_id": ms["series_ref"],
+                    })
+        elif source_id:
+            sources_to_try = [{"source_id": source_id, "series_id": series_id}]
+        else:
+            matches = self.find_series_across_sources(
+                series_name,
+                tmdb_id=entry.get("tmdb_id") or entry.get("tmdb"),
+                imdb_id=entry.get("imdb_id") or entry.get("imdb"),
+            )
+            if matches:
+                sources_to_try = [
+                    {"source_id": m["source_id"], "series_id": m["series_id"]}
+                    for m in matches
+                ]
+            else:
+                logger.warning(
+                    f"Series monitoring: '{series_name}' not found in any source "
+                    "while building known-episodes snapshot"
+                )
+                return []
+
+        custom_category_ids: list[str] = entry.get("custom_category_ids") or []
+        if custom_category_ids and sources_to_try:
+            cat_series_items = self._get_custom_category_items(custom_category_ids, "series")
+            cat_series_set = {(item["source_id"], item["stream_id"]) for item in cat_series_items}
+            filtered = [
+                s for s in sources_to_try
+                if (s["source_id"], s["series_id"]) in cat_series_set
+            ]
+            if filtered:
+                sources_to_try = filtered
+            else:
+                logger.info(
+                    f"Series monitoring: '{series_name}' — no sources in selected "
+                    "custom categories yet while building known-episodes snapshot"
+                )
+                return []
+
+        snapshot: list[dict] = []
+        seen_keys: set[tuple] = set()
+
+        for src in sources_to_try:
+            src_source_id = src["source_id"]
+            src_series_id = str(src["series_id"])
+            episodes = await self.xtream_service.fetch_series_episodes(src_source_id, src_series_id)
+            for ep in episodes:
+                if scope == "season" and season_filter and str(ep.get("season")) != str(season_filter):
+                    continue
+                ep_key = (str(ep.get("season", "")), _safe_episode_num(ep.get("episode_num")))
+                if ep_key in seen_keys:
+                    continue
+                seen_keys.add(ep_key)
+                snapshot.append({
+                    "stream_id": str(ep.get("stream_id", "")),
+                    "source_id": src_source_id,
+                    "season": str(ep.get("season", "")),
+                    "episode_num": _safe_episode_num(ep.get("episode_num")),
+                })
+            await asyncio.sleep(0.5)
+
+        return snapshot
+
     async def check_monitored_series(self) -> None:
         """Check all enabled monitored series for new episodes (called after cache refresh)."""
         if self._check_in_progress:

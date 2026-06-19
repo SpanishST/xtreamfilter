@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Optional
 
 import httpx
@@ -14,6 +15,58 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 VIRTUAL_ID_OFFSET = 10_000_000
+
+# Episode-number normalization — some upstream sources return bogus episode_num
+# values (e.g. 52 for S01E02). When the upstream value exceeds this threshold
+# we attempt to parse a real SxxExx pattern out of the episode title.
+EPISODE_NUM_SANITY_THRESHOLD = 15
+
+_EPISODE_TITLE_RE = re.compile(r"S(\d{1,2})\s*E(\d{1,3})", re.IGNORECASE)
+
+
+def _normalize_episode_num(
+    raw_num,
+    title: str,
+    season_size: int,
+    threshold: int = EPISODE_NUM_SANITY_THRESHOLD,
+) -> tuple[int, str | None]:
+    """Return ``(episode_num, parsed_season_or_None)`` for a fetched episode.
+
+    The episode number is overridden only when **all** of the following hold:
+
+    * ``raw_num`` exceeds ``threshold`` (some sources return implausibly large
+      numbers like 52 for S01E02 — very few series have >15 episodes per
+      season, so anything above the threshold is suspicious).
+    * ``title`` contains a ``SxxExx`` pattern.
+    * The parsed episode number is plausible: ``1 <= parsed_ep <= season_size``.
+
+    The parsed season is returned alongside (as ``str | None``) so callers can
+    also override the upstream ``season`` field when it disagrees.
+    """
+    try:
+        num = int(raw_num)
+    except (ValueError, TypeError):
+        return 0, None
+
+    if num <= threshold or not title:
+        return num, None
+
+    m = _EPISODE_TITLE_RE.search(title)
+    if not m:
+        return num, None
+
+    try:
+        parsed_season = str(int(m.group(1)))
+        parsed_ep = int(m.group(2))
+    except (ValueError, TypeError):
+        return num, None
+
+    if parsed_ep < 1:
+        return num, None
+    if season_size and parsed_ep > season_size:
+        return num, None
+
+    return parsed_ep, parsed_season
 
 
 def encode_virtual_id(source_index: int, original_id) -> int:
@@ -154,13 +207,19 @@ class XtreamService:
             series_info = data.get("info", {})
             series_name = series_info.get("name", "") or series_info.get("title", "")
             for season_num, season_episodes in data.get("episodes", {}).items():
+                season_size = len(season_episodes) if isinstance(season_episodes, list) else 0
                 for ep in season_episodes:
+                    raw_ep_num = ep.get("episode_num", 0)
+                    raw_title = ep.get("title", "") or ""
+                    norm_ep_num, parsed_season = _normalize_episode_num(
+                        raw_ep_num, raw_title, season_size,
+                    )
                     episodes.append(
                         {
                             "stream_id": str(ep.get("id", "")),
-                            "season": str(season_num),
-                            "episode_num": ep.get("episode_num", 0),
-                            "title": ep.get("title", ""),
+                            "season": parsed_season or str(season_num),
+                            "episode_num": norm_ep_num,
+                            "title": raw_title,
                             "container_extension": ep.get("container_extension", "mp4"),
                             "info": ep.get("info", {}),
                             "series_name": series_name,

@@ -2224,6 +2224,37 @@
         // DOWNLOAD CART FUNCTIONS
         // ============================================
         let _episodeModalData = {};  // { sourceId, seriesId, seriesName, icon, group, episodes }
+        let _cachedMonitoredSeries = null;  // lazy-loaded list of monitored series entries
+
+        async function _getMonitoredSeries() {
+            if (_cachedMonitoredSeries) return _cachedMonitoredSeries;
+            try {
+                const resp = await fetch('/api/monitor');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    _cachedMonitoredSeries = data.series || [];
+                }
+            } catch (_) { _cachedMonitoredSeries = []; }
+            return _cachedMonitoredSeries;
+        }
+
+        function _findMonitoredCanonical(sourceId, seriesId, seriesName) {
+            if (!_cachedMonitoredSeries) return null;
+            const normName = (seriesName || '').toLowerCase().trim();
+            for (const e of _cachedMonitoredSeries) {
+                if (!e.canonical_name) continue;
+                if ((e.monitor_sources || []).some(ms => ms.source_id === sourceId && ms.series_ref === seriesId)) {
+                    return e.canonical_name;
+                }
+                if (e.source_id === sourceId && e.series_id === seriesId) {
+                    return e.canonical_name;
+                }
+                if (normName && (e.series_name || '').toLowerCase().trim() === normName) {
+                    return e.canonical_name;
+                }
+            }
+            return null;
+        }
 
         async function updateCartBadge() {
             try {
@@ -2363,7 +2394,11 @@
             modal.classList.add('show');
 
             _episodeModalData = { sourceId, seriesId, seriesName, icon, group, allSources: allSources || null };
-            document.getElementById('episode-series-name').value = seriesName;
+
+            // Pre-fill with monitored canonical name if available
+            await _getMonitoredSeries();
+            const canonName = _findMonitoredCanonical(sourceId, seriesId, seriesName);
+            document.getElementById('episode-series-name').value = canonName || seriesName;
 
             // Show/build source selector if multiple sources available
             const selectorDiv = document.getElementById('episode-source-selector');
@@ -2913,6 +2948,7 @@
                     data = await resp.json();
                     if (resp.ok) {
                         showToast('Monitoring updated: ' + d.seriesName, 'success');
+                        _cachedMonitoredSeries = null;
                         closeMonitorModal();
                     } else {
                         showToast(data.error || 'Failed to update monitoring', 'error');
@@ -2947,6 +2983,7 @@
                             msg += ' — ' + data.backfill_queued + ' episode(s) queued';
                         }
                         showToast(msg, 'success');
+                        _cachedMonitoredSeries = null;
                         closeMonitorModal();
                     } else {
                         showToast(data.error || 'Failed to add monitoring', 'error');

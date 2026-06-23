@@ -366,6 +366,24 @@ class MonitorService:
                 return canon
         return None
 
+    def resolve_canonical_name_by_source(self, source_id: str, series_ref: str) -> str | None:
+        """Return the user-set canonical_name for a monitored series matching
+        the given source_id and series_ref (upstream series id), or None."""
+        if not source_id or not series_ref:
+            return None
+        for entry in self._monitored_series:
+            canon = entry.get("canonical_name")
+            if not canon:
+                continue
+            # Check legacy single-source fields
+            if entry.get("source_id") == source_id and entry.get("series_id") == series_ref:
+                return canon
+            # Check multi-source slots
+            for ms in entry.get("monitor_sources") or []:
+                if ms.get("source_id") == source_id and ms.get("series_ref") == series_ref:
+                    return canon
+        return None
+
     # ------------------------------------------------------------------
     # Cross-source lookup
     # ------------------------------------------------------------------

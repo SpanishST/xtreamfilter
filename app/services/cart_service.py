@@ -690,6 +690,22 @@ class CartService:
                             pass
                         return
 
+                    # Check if this series is monitored by source_id + series_ref
+                    # before fetching API metadata.  This avoids an extra API call
+                    # and ensures the user-set name is reused for manual downloads.
+                    if self.monitor_service is not None:
+                        source_canon = self.monitor_service.resolve_canonical_name_by_source(source_id, series_id)
+                        if source_canon:
+                            item["series_name"] = source_canon
+                            logger.info(f"[META] Using source-matched canonical name: '{source_canon}'")
+                            try:
+                                info = await self.xtream_service.fetch_series_info(source_id, series_id)
+                                if info:
+                                    item["_series_info"] = info
+                            except Exception:
+                                pass
+                            return
+
                     info = await self.xtream_service.fetch_series_info(source_id, series_id)
                     if info:
                         # Always store series info for NFO generation.

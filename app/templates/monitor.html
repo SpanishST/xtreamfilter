@@ -133,7 +133,36 @@
             .series-grid { grid-template-columns: 1fr; }
             .series-card { flex-direction: column; }
             .series-cover { width: 100%; min-height: 120px; max-height: 180px; }
+            .series-list-item { flex-wrap: wrap; }
+            .series-list-item .list-actions { flex-direction: row; flex-wrap: wrap; width: 100%; justify-content: flex-start; margin-top: 8px; }
         }
+
+        /* ── View toggle ───────────────────────────────────────────────── */
+        .view-toggle { display: flex; gap: 2px; background: rgba(255,255,255,0.05); border-radius: 8px; padding: 2px; }
+        .view-toggle-btn { padding: 6px 10px; background: none; border: 1px solid transparent; border-radius: 6px; color: #888; font-size: 1em; cursor: pointer; transition: all 0.2s; line-height: 1; }
+        .view-toggle-btn:hover { color: #ccc; background: rgba(255,255,255,0.08); }
+        .view-toggle-btn.active { color: #00d4ff; background: rgba(0,212,255,0.12); border-color: rgba(0,212,255,0.25); }
+
+        .sort-btn { padding: 6px 10px; background: none; border: 1px solid transparent; border-radius: 6px; color: #888; font-size: 0.9em; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 4px; }
+        .sort-btn:hover { color: #ccc; background: rgba(255,255,255,0.08); }
+        .sort-btn.active { color: #00d4ff; background: rgba(0,212,255,0.12); border-color: rgba(0,212,255,0.25); }
+
+        /* ── List view ─────────────────────────────────────────────────── */
+        .series-list-view { display: flex; flex-direction: column; gap: 8px; margin-top: 20px; }
+        .series-list-item { display: flex; align-items: stretch; gap: 12px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 10px 14px; transition: all 0.3s; }
+        .series-list-item:hover { border-color: rgba(0,212,255,0.3); box-shadow: 0 4px 16px rgba(0,0,0,0.25); }
+        .series-list-item.disabled { opacity: 0.5; }
+        .list-cover { width: 50px; height: 68px; flex-shrink: 0; border-radius: 6px; overflow: hidden; background: rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center; }
+        .list-cover img { width: 100%; height: 100%; object-fit: cover; }
+        .list-cover .placeholder { font-size: 1.5em; opacity: 0.3; }
+        .list-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; justify-content: center; }
+        .list-top-row { display: flex; align-items: center; gap: 8px; }
+        .list-title { font-size: 0.95em; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 1; min-width: 0; }
+        .list-badges { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+        .list-badges .series-badge { font-size: 0.7em; padding: 2px 8px; }
+        .list-stats { font-size: 0.78em; color: #888; display: flex; gap: 12px; flex-wrap: wrap; }
+        .list-stats span { white-space: nowrap; }
+        .list-actions { display: flex; gap: 5px; align-items: center; flex-shrink: 0; margin-left: auto; }
 
         /* ── Monitor tabs ───────────────────────────────────────────────── */
         .monitor-tabs { display: flex; gap: 6px; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 0; }
@@ -220,6 +249,7 @@
                 <a href="/browse" class="top-nav-link">🔍 Browse</a>
                 <a href="/cart" class="top-nav-link">🛒 Cart<span class="nav-cart-badge" id="cart-badge" style="display:none">0</span></a>
                 <a href="/monitor" class="top-nav-link active">📡 Monitor</a>
+                <a href="/logs" class="top-nav-link">📝 Logs</a>
             </div>
         </nav>
 
@@ -237,6 +267,11 @@
                     <div class="loading-spinner"></div>
                     <span class="checking">Checking for new episodes...</span>
                 </div>
+                <div class="view-toggle">
+                    <button class="view-toggle-btn" data-view="card" onclick="setViewMode('card')" title="Card view">▦</button>
+                    <button class="view-toggle-btn" data-view="list" onclick="setViewMode('list')" title="List view">☰</button>
+                </div>
+                <button class="sort-btn" id="sort-btn-series" onclick="toggleSort()" title="Sort by name">A↕Z</button>
             </div>
 
             <div id="series-list">
@@ -262,6 +297,11 @@
                     <div class="loading-spinner"></div>
                     <span class="checking">Checking movies...</span>
                 </div>
+                <div class="view-toggle">
+                    <button class="view-toggle-btn" data-view="card" onclick="setViewMode('card')" title="Card view">▦</button>
+                    <button class="view-toggle-btn" data-view="list" onclick="setViewMode('list')" title="List view">☰</button>
+                </div>
+                <button class="sort-btn" id="sort-btn-movies" onclick="toggleSort()" title="Sort by name">A↕Z</button>
             </div>
 
             <div id="movies-list">
@@ -531,6 +571,50 @@
     <script>
         let monitoredSeries = [];
         let _checkInterval = null;
+        let viewMode = localStorage.getItem('monitor-view-mode') || 'card';
+        let sortOrder = localStorage.getItem('monitor-sort-order') || 'none';
+
+        function setViewMode(mode) {
+            viewMode = mode;
+            localStorage.setItem('monitor-view-mode', mode);
+            document.querySelectorAll('.view-toggle-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.view === mode);
+            });
+            renderSeries();
+            renderMovies();
+        }
+
+        function applyViewToggleState() {
+            document.querySelectorAll('.view-toggle-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.view === viewMode);
+            });
+        }
+
+        function toggleSort() {
+            sortOrder = sortOrder === 'none' ? 'asc' : sortOrder === 'asc' ? 'desc' : 'none';
+            localStorage.setItem('monitor-sort-order', sortOrder);
+            applySortState();
+            renderSeries();
+            renderMovies();
+        }
+
+        function applySortState() {
+            const label = sortOrder === 'asc' ? 'A→Z' : sortOrder === 'desc' ? 'Z→A' : 'A↕Z';
+            document.querySelectorAll('.sort-btn').forEach(btn => {
+                btn.textContent = label;
+                btn.classList.toggle('active', sortOrder !== 'none');
+            });
+        }
+
+        function sortByName(arr, nameKey, fallbackKey) {
+            if (sortOrder === 'none') return arr;
+            const sorted = [...arr].sort((a, b) => {
+                const na = (a[nameKey] || a[fallbackKey] || '').toLowerCase();
+                const nb = (b[nameKey] || b[fallbackKey] || '').toLowerCase();
+                return na.localeCompare(nb);
+            });
+            return sortOrder === 'desc' ? sorted.reverse() : sorted;
+        }
 
         async function loadMonitored() {
             try {
@@ -545,19 +629,24 @@
 
         function renderSeries() {
             const container = document.getElementById('series-list');
-            const emptyState = document.getElementById('empty-state');
+            let emptyState = document.getElementById('empty-state');
 
             if (monitoredSeries.length === 0) {
-                container.innerHTML = '';
-                container.appendChild(emptyState);
-                emptyState.style.display = 'block';
+                if (!emptyState) {
+                    container.innerHTML = '<div class="empty-state" id="empty-state"><div class="empty-state-icon">📡</div><h3>No monitored series</h3><p>Go to the <a href="/browse" style="color: #00d4ff;">Browse page</a>, find a series, and click the 📡 button to start monitoring.</p></div>';
+                } else {
+                    container.innerHTML = '';
+                    container.appendChild(emptyState);
+                    emptyState.style.display = 'block';
+                }
                 return;
             }
 
-            emptyState.style.display = 'none';
+            if (emptyState) emptyState.style.display = 'none';
 
-            let html = '<div class="series-grid">';
-            for (const entry of monitoredSeries) {
+            const seriesList = sortByName(monitoredSeries, 'canonical_name', 'series_name');
+            let html = viewMode === 'list' ? '<div class="series-list-view">' : '<div class="series-grid">';
+            for (const entry of seriesList) {
                 const coverHtml = entry.cover
                     ? '<img src="' + escapeAttr(entry.cover) + '" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'" loading="lazy"><span class="placeholder" style="display:none">📺</span>'
                     : '<span class="placeholder">📺</span>';
@@ -603,36 +692,73 @@
                     : '';
 
                 const browseUrl = '/browse?type=series&search=' + encodeURIComponent(entry.canonical_name || entry.series_name);
-                html += '<div class="series-card' + disabledClass + '">' +
-                    '<a href="' + browseUrl + '" title="Search in Browse" style="display:block;text-decoration:none;">' +
-                    '<div class="series-cover" style="position:relative;cursor:pointer;">' + coverHtml +
-                    '<div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.55);text-align:center;font-size:0.72em;color:#fff;padding:4px 0;opacity:0;transition:opacity 0.2s;" class="cover-search-hint">🔍 Browse</div>' +
-                    '</div></a>' +
-                    '<div class="series-details">' +
-                    '<div class="series-name">' + escapeHtml(entry.canonical_name || entry.series_name) + '</div>' +
-                    '<div class="series-meta">' +
-                    '<span class="series-badge badge-scope">' + scopeLabel + '</span>' +
-                    '<span class="series-badge ' + sourceBadgeClass + '"' + (sourceBadgeTitle ? ' title="' + escapeAttr(sourceBadgeTitle) + '"' : '') + '>' + escapeHtml(sourceLabel) + '</span>' +
-                    '<span class="series-badge badge-action">' + actionLabel + '</span>' +
-                    newBadge +
-                    '</div>' +
-                    '<div class="series-stats">' +
-                    '<span>Known: ' + (entry.known_episodes || []).length + ' episodes</span>' +
-                    '<span>Downloaded: ' + (entry.downloaded_episodes || []).length + ' episodes</span>' +
-                    '<span>Last checked: ' + lastChecked + '</span>' +
-                    '</div>' +
-                    '<div class="series-actions">' +
-                    '<label class="toggle-switch" title="' + (entry.enabled ? 'Disable' : 'Enable') + ' monitoring">' +
-                    '<input type="checkbox" ' + (entry.enabled ? 'checked' : '') + ' onchange="toggleEnabled(\'' + entry.id + '\', this.checked)">' +
-                    '<span class="toggle-slider"></span>' +
-                    '</label>' +
-                    '<a href="' + browseUrl + '" class="btn btn-secondary btn-small" title="Find in Browse">🔍</a>' +
-                    '<button class="btn btn-secondary btn-small" onclick="previewEpisodes(\'' + entry.id + '\', \'' + escapeJs(entry.series_name) + '\')">👁 Preview</button>' +
-                    '<button class="btn btn-secondary btn-small" onclick="openEditModal(\'' + entry.id + '\')">✏️ Edit</button>' +
-                    '<button class="btn btn-danger btn-small" onclick="deleteMonitored(\'' + entry.id + '\', \'' + escapeJs(entry.series_name) + '\')">🗑</button>' +
-                    '</div>' +
-                    '</div>' +
-                    '</div>';
+
+                if (viewMode === 'list') {
+                    const listCoverHtml = entry.cover
+                        ? '<img src="' + escapeAttr(entry.cover) + '" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'" loading="lazy"><span class="placeholder" style="display:none">📺</span>'
+                        : '<span class="placeholder">📺</span>';
+                    html += '<div class="series-list-item' + disabledClass + '">' +
+                        '<a href="' + browseUrl + '" title="Search in Browse" style="display:block;text-decoration:none;flex-shrink:0;">' +
+                        '<div class="list-cover">' + listCoverHtml + '</div></a>' +
+                        '<div class="list-body">' +
+                        '<div class="list-top-row">' +
+                        '<span class="list-title">' + escapeHtml(entry.canonical_name || entry.series_name) + '</span>' +
+                        '<div class="list-badges">' +
+                        '<span class="series-badge badge-scope">' + scopeLabel + '</span>' +
+                        '<span class="series-badge ' + sourceBadgeClass + '"' + (sourceBadgeTitle ? ' title="' + escapeAttr(sourceBadgeTitle) + '"' : '') + '>' + escapeHtml(sourceLabel) + '</span>' +
+                        '<span class="series-badge badge-action">' + actionLabel + '</span>' +
+                        newBadge +
+                        '</div>' +
+                        '</div>' +
+                        '<div class="list-stats">' +
+                        '<span>Known: ' + (entry.known_episodes || []).length + ' eps</span>' +
+                        '<span>Downloaded: ' + (entry.downloaded_episodes || []).length + ' eps</span>' +
+                        '<span>Last checked: ' + lastChecked + '</span>' +
+                        '</div>' +
+                        '</div>' +
+                        '<div class="list-actions">' +
+                        '<label class="toggle-switch" title="' + (entry.enabled ? 'Disable' : 'Enable') + ' monitoring">' +
+                        '<input type="checkbox" ' + (entry.enabled ? 'checked' : '') + ' onchange="toggleEnabled(\'' + entry.id + '\', this.checked)">' +
+                        '<span class="toggle-slider"></span>' +
+                        '</label>' +
+                        '<a href="' + browseUrl + '" class="btn btn-secondary btn-small" title="Find in Browse">🔍</a>' +
+                        '<button class="btn btn-secondary btn-small" onclick="previewEpisodes(\'' + entry.id + '\', \'' + escapeJs(entry.series_name) + '\')">👁</button>' +
+                        '<button class="btn btn-secondary btn-small" onclick="openEditModal(\'' + entry.id + '\')">✏️</button>' +
+                        '<button class="btn btn-danger btn-small" onclick="deleteMonitored(\'' + entry.id + '\', \'' + escapeJs(entry.series_name) + '\')">🗑</button>' +
+                        '</div>' +
+                        '</div>';
+                } else {
+                    html += '<div class="series-card' + disabledClass + '">' +
+                        '<a href="' + browseUrl + '" title="Search in Browse" style="display:block;text-decoration:none;">' +
+                        '<div class="series-cover" style="position:relative;cursor:pointer;">' + coverHtml +
+                        '<div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.55);text-align:center;font-size:0.72em;color:#fff;padding:4px 0;opacity:0;transition:opacity 0.2s;" class="cover-search-hint">🔍 Browse</div>' +
+                        '</div></a>' +
+                        '<div class="series-details">' +
+                        '<div class="series-name">' + escapeHtml(entry.canonical_name || entry.series_name) + '</div>' +
+                        '<div class="series-meta">' +
+                        '<span class="series-badge badge-scope">' + scopeLabel + '</span>' +
+                        '<span class="series-badge ' + sourceBadgeClass + '"' + (sourceBadgeTitle ? ' title="' + escapeAttr(sourceBadgeTitle) + '"' : '') + '>' + escapeHtml(sourceLabel) + '</span>' +
+                        '<span class="series-badge badge-action">' + actionLabel + '</span>' +
+                        newBadge +
+                        '</div>' +
+                        '<div class="series-stats">' +
+                        '<span>Known: ' + (entry.known_episodes || []).length + ' episodes</span>' +
+                        '<span>Downloaded: ' + (entry.downloaded_episodes || []).length + ' episodes</span>' +
+                        '<span>Last checked: ' + lastChecked + '</span>' +
+                        '</div>' +
+                        '<div class="series-actions">' +
+                        '<label class="toggle-switch" title="' + (entry.enabled ? 'Disable' : 'Enable') + ' monitoring">' +
+                        '<input type="checkbox" ' + (entry.enabled ? 'checked' : '') + ' onchange="toggleEnabled(\'' + entry.id + '\', this.checked)">' +
+                        '<span class="toggle-slider"></span>' +
+                        '</label>' +
+                        '<a href="' + browseUrl + '" class="btn btn-secondary btn-small" title="Find in Browse">🔍</a>' +
+                        '<button class="btn btn-secondary btn-small" onclick="previewEpisodes(\'' + entry.id + '\', \'' + escapeJs(entry.series_name) + '\')">👁 Preview</button>' +
+                        '<button class="btn btn-secondary btn-small" onclick="openEditModal(\'' + entry.id + '\')">✏️ Edit</button>' +
+                        '<button class="btn btn-danger btn-small" onclick="deleteMonitored(\'' + entry.id + '\', \'' + escapeJs(entry.series_name) + '\')">🗑</button>' +
+                        '</div>' +
+                        '</div>' +
+                        '</div>';
+                }
             }
             html += '</div>';
             container.innerHTML = html;
@@ -932,17 +1058,17 @@
             document.getElementById('preview-modal').classList.remove('show');
         }
 
-        function formatRelativeTime(isoStr) {
-            const date = new Date(isoStr);
-            const now = new Date();
-            const diffMs = now - date;
-            const diffMin = Math.floor(diffMs / 60000);
-            if (diffMin < 1) return 'Just now';
-            if (diffMin < 60) return diffMin + 'm ago';
-            const diffHrs = Math.floor(diffMin / 60);
-            if (diffHrs < 24) return diffHrs + 'h ago';
-            const diffDays = Math.floor(diffHrs / 24);
-            return diffDays + 'd ago';
+        function formatRelativeTime(value) {
+            if (!value) return 'Never';
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) return 'Unknown';
+            const diffMinutes = Math.floor((Date.now() - date.getTime()) / 60000);
+            if (diffMinutes < 1) return 'Just now';
+            if (diffMinutes < 60) return `${diffMinutes} min ago`;
+            const diffHours = Math.floor(diffMinutes / 60);
+            if (diffHours < 24) return `${diffHours}h ${diffMinutes % 60}m ago`;
+            const diffDays = Math.floor(diffHours / 24);
+            return `${diffDays}d ${diffHours % 24}h ago`;
         }
 
         function escapeHtml(text) {
@@ -1018,6 +1144,8 @@
         };
 
         document.addEventListener('DOMContentLoaded', function() {
+            applyViewToggleState();
+            applySortState();
             loadMonitored();
             loadMovies();
             _checkInterval = setInterval(() => {
@@ -1047,7 +1175,7 @@
 
         function renderMovies() {
             const container  = document.getElementById('movies-list');
-            const emptyState = document.getElementById('movies-empty-state');
+            let emptyState = document.getElementById('movies-empty-state');
             const filterVal  = (document.getElementById('movies-status-filter') || {}).value || '';
 
             const visible = filterVal
@@ -1055,18 +1183,23 @@
                 : monitoredMovies;
 
             if (visible.length === 0) {
-                container.innerHTML = '';
-                container.appendChild(emptyState);
-                emptyState.style.display = 'block';
+                if (!emptyState) {
+                    container.innerHTML = '<div class="empty-state" id="movies-empty-state"><div class="empty-state-icon">🎬</div><h3>No monitored movies</h3><p>Click <strong>➕ Add Movie</strong> to watch for a film that isn\'t in your catalogue yet.<br>You can search by title or enter a TMDB ID. The movie will be downloaded automatically when it becomes available.</p></div>';
+                } else {
+                    container.innerHTML = '';
+                    container.appendChild(emptyState);
+                    emptyState.style.display = 'block';
+                }
                 return;
             }
-            emptyState.style.display = 'none';
+            if (emptyState) emptyState.style.display = 'none';
 
             const statusLabel = { watching: '👁 Watching', found: '✅ Found', downloaded: '⬇ Downloaded' };
             const statusClass = { watching: 'badge-watching', found: 'badge-found', downloaded: 'badge-downloaded' };
 
-            let html = '<div class="series-grid">';
-            for (const m of visible) {
+            const moviesList = sortByName(visible, 'canonical_name', 'movie_name');
+            let html = viewMode === 'list' ? '<div class="series-list-view">' : '<div class="series-grid">';
+            for (const m of moviesList) {
                 const coverHtml = m.cover
                     ? '<img src="' + escapeAttr(m.cover) + '" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'" loading="lazy"><span class="placeholder" style="display:none">🎬</span>'
                     : '<span class="placeholder">🎬</span>';
@@ -1103,34 +1236,69 @@
                     : '';
 
                 const movieBrowseUrl = '/browse?type=vod&search=' + encodeURIComponent(m.canonical_name || m.movie_name);
-                html += '<div class="series-card' + disabledClass + '">' +
-                    '<a href="' + movieBrowseUrl + '" title="Search in Browse" style="display:block;text-decoration:none;">' +
-                    '<div class="series-cover" style="position:relative;cursor:pointer;">' + coverHtml +
-                    '<div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.55);text-align:center;font-size:0.72em;color:#fff;padding:4px 0;opacity:0;transition:opacity 0.2s;" class="cover-search-hint">🔍 Browse</div>' +
-                    '</div></a>' +
-                    '<div class="series-details">' +
-                    '<div class="series-name">' + escapeHtml(m.canonical_name || m.movie_name) + '</div>' +
-                    '<div class="series-meta">' +
-                    '<span class="series-badge ' + (statusClass[m.status] || 'badge-watching') + '">' + (statusLabel[m.status] || m.status) + '</span>' +
-                    tmdbBadge +
-                    sourceBadge +
-                    '<span class="series-badge badge-action">' + actionBadge + '</span>' +
-                    '</div>' +
-                    '<div class="series-stats">' +
-                    '<span>Last checked: ' + lastChecked + '</span>' +
-                    '</div>' +
-                    '<div class="series-actions">' +
-                    '<label class="toggle-switch" title="' + (m.enabled ? 'Pause' : 'Enable') + ' monitoring">' +
-                    '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleMovieEnabled(\'' + m.id + '\', this.checked)">' +
-                    '<span class="toggle-slider"></span>' +
-                    '</label>' +
-                    '<a href="' + movieBrowseUrl + '" class="btn btn-secondary btn-small" title="Find in Browse">🔍</a>' +
-                    reWatchBtn +
-                    '<button class="btn btn-secondary btn-small" onclick="openEditMovieModal(\'' + m.id + '\')">✏️ Edit</button>' +
-                    '<button class="btn btn-danger btn-small" onclick="deleteMovieMonitor(\'' + m.id + '\', \'' + escapeJs(m.canonical_name || m.movie_name) + '\')">🗑</button>' +
-                    '</div>' +
-                    '</div>' +
-                    '</div>';
+
+                if (viewMode === 'list') {
+                    const listCoverHtml = m.cover
+                        ? '<img src="' + escapeAttr(m.cover) + '" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'" loading="lazy"><span class="placeholder" style="display:none">🎬</span>'
+                        : '<span class="placeholder">🎬</span>';
+                    html += '<div class="series-list-item' + disabledClass + '">' +
+                        '<a href="' + movieBrowseUrl + '" title="Search in Browse" style="display:block;text-decoration:none;flex-shrink:0;">' +
+                        '<div class="list-cover">' + listCoverHtml + '</div></a>' +
+                        '<div class="list-body">' +
+                        '<div class="list-top-row">' +
+                        '<span class="list-title">' + escapeHtml(m.canonical_name || m.movie_name) + '</span>' +
+                        '<div class="list-badges">' +
+                        '<span class="series-badge ' + (statusClass[m.status] || 'badge-watching') + '">' + (statusLabel[m.status] || m.status) + '</span>' +
+                        tmdbBadge +
+                        sourceBadge +
+                        '<span class="series-badge badge-action">' + actionBadge + '</span>' +
+                        '</div>' +
+                        '</div>' +
+                        '<div class="list-stats">' +
+                        '<span>Last checked: ' + lastChecked + '</span>' +
+                        '</div>' +
+                        '</div>' +
+                        '<div class="list-actions">' +
+                        '<label class="toggle-switch" title="' + (m.enabled ? 'Pause' : 'Enable') + ' monitoring">' +
+                        '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleMovieEnabled(\'' + m.id + '\', this.checked)">' +
+                        '<span class="toggle-slider"></span>' +
+                        '</label>' +
+                        '<a href="' + movieBrowseUrl + '" class="btn btn-secondary btn-small" title="Find in Browse">🔍</a>' +
+                        reWatchBtn +
+                        '<button class="btn btn-secondary btn-small" onclick="openEditMovieModal(\'' + m.id + '\')">✏️</button>' +
+                        '<button class="btn btn-danger btn-small" onclick="deleteMovieMonitor(\'' + m.id + '\', \'' + escapeJs(m.canonical_name || m.movie_name) + '\')">🗑</button>' +
+                        '</div>' +
+                        '</div>';
+                } else {
+                    html += '<div class="series-card' + disabledClass + '">' +
+                        '<a href="' + movieBrowseUrl + '" title="Search in Browse" style="display:block;text-decoration:none;">' +
+                        '<div class="series-cover" style="position:relative;cursor:pointer;">' + coverHtml +
+                        '<div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.55);text-align:center;font-size:0.72em;color:#fff;padding:4px 0;opacity:0;transition:opacity 0.2s;" class="cover-search-hint">🔍 Browse</div>' +
+                        '</div></a>' +
+                        '<div class="series-details">' +
+                        '<div class="series-name">' + escapeHtml(m.canonical_name || m.movie_name) + '</div>' +
+                        '<div class="series-meta">' +
+                        '<span class="series-badge ' + (statusClass[m.status] || 'badge-watching') + '">' + (statusLabel[m.status] || m.status) + '</span>' +
+                        tmdbBadge +
+                        sourceBadge +
+                        '<span class="series-badge badge-action">' + actionBadge + '</span>' +
+                        '</div>' +
+                        '<div class="series-stats">' +
+                        '<span>Last checked: ' + lastChecked + '</span>' +
+                        '</div>' +
+                        '<div class="series-actions">' +
+                        '<label class="toggle-switch" title="' + (m.enabled ? 'Pause' : 'Enable') + ' monitoring">' +
+                        '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleMovieEnabled(\'' + m.id + '\', this.checked)">' +
+                        '<span class="toggle-slider"></span>' +
+                        '</label>' +
+                        '<a href="' + movieBrowseUrl + '" class="btn btn-secondary btn-small" title="Find in Browse">🔍</a>' +
+                        reWatchBtn +
+                        '<button class="btn btn-secondary btn-small" onclick="openEditMovieModal(\'' + m.id + '\')">✏️ Edit</button>' +
+                        '<button class="btn btn-danger btn-small" onclick="deleteMovieMonitor(\'' + m.id + '\', \'' + escapeJs(m.canonical_name || m.movie_name) + '\')">🗑</button>' +
+                        '</div>' +
+                        '</div>' +
+                        '</div>';
+                }
             }
             html += '</div>';
             container.innerHTML = html;

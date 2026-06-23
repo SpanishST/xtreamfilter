@@ -4,8 +4,8 @@ import asyncio
 import os
 import tempfile
 
-from app.services.monitor_service import _safe_episode_num
 from app.database import DB_NAME, db_connect, init_db
+from app.services.monitor_service import _safe_episode_num
 
 
 def _run(coro):
@@ -1540,3 +1540,417 @@ class TestCartServiceCanonicalNameResolution:
         }
         _run(CartService._enrich_item_name_from_metadata(cart, item))
         assert item["series_name"] == "Original Name"
+
+
+# ---------------------------------------------------------------
+# build_known_episodes_snapshot helper
+# ---------------------------------------------------------------
+
+class TestBuildKnownEpisodesSnapshot:
+    """Tests for MonitorService.build_known_episodes_snapshot — the shared
+    helper used by add_monitored, update_monitored and the rebuild-known
+    endpoint so they all build the 'already known' episode set consistently."""
+
+    def _make_ms(self, fetch_results: dict):
+        from app.services.monitor_service import MonitorService
+
+        class _Cfg:
+            config = {"sources": []}
+
+        class _Xtream:
+            async def fetch_series_episodes(self, source_id, series_id):
+                return fetch_results.get((source_id, str(series_id)), [])
+
+        class _Cache:
+            def get_cached_with_source_info(self, *_args, **_kwargs):
+                return [], []
+
+        class _Cart:
+            cart = []
+
+        ms = MonitorService.__new__(MonitorService)
+        ms._cfg = _Cfg()
+        ms.cache_service = _Cache()
+        ms.xtream_service = _Xtream()
+        ms.cart_service = _Cart()
+        return ms
+
+    def _entry(self, **kwargs):
+        e = {
+            "id": "snap-1",
+            "series_name": "Snap Show",
+            "series_id": "11",
+            "source_id": None,
+            "monitor_sources": [{"source_id": "srcA", "series_ref": "11"}],
+            "scope": "new_only",
+            "season_filter": None,
+            "custom_category_ids": [],
+            "known_episodes": [],
+            "downloaded_episodes": [],
+            "cover": "",
+            "tmdb_id": None,
+            "imdb_id": None,
+        }
+        e.update(kwargs)
+        return e
+
+    def test_scope_all_returns_empty(self):
+        """scope='all' is intentionally empty (every episode is considered new)."""
+        ms = self._make_ms({
+            ("srcA", "11"): [
+                {"stream_id": "a1", "season": "1", "episode_num": 1, "title": "E1"},
+                {"stream_id": "a2", "season": "1", "episode_num": 2, "title": "E2"},
+            ],
+        })
+        entry = self._entry(scope="all")
+        snapshot = _run(ms.build_known_episodes_snapshot(entry, "all", None))
+        assert snapshot == []
+
+    def test_scope_new_only_dedupes_across_sources(self):
+        """With multi-source monitoring, same (season, ep_num) is kept once."""
+        ms = self._make_ms({
+            ("srcA", "11"): [
+                {"stream_id": "a1", "season": "1", "episode_num": 1, "title": "E1"},
+                {"stream_id": "a2", "season": "1", "episode_num": 2, "title": "E2"},
+            ],
+            ("srcB", "22"): [
+                {"stream_id": "b1", "season": "1", "episode_num": 1, "title": "E1"},  # dup
+                {"stream_id": "b2", "season": "1", "episode_num": 3, "title": "E3"},
+            ],
+        })
+        entry = self._entry(monitor_sources=[
+            {"source_id": "srcA", "series_ref": "11"},
+            {"source_id": "srcB", "series_ref": "22"},
+        ])
+        snapshot = _run(ms.build_known_episodes_snapshot(entry, "new_only", None))
+        keys = {(str(s["season"]), s["episode_num"]) for s in snapshot}
+        assert keys == {("1", 1), ("1", 2), ("1", 3)}
+        # Each snapshot row carries the source that contributed it
+        srcs = {s["source_id"] for s in snapshot}
+        assert srcs == {"srcA", "srcB"}
+
+    def test_scope_season_filters_to_season(self):
+        """scope='season' keeps only episodes matching season_filter."""
+        ms = self._make_ms({
+            ("srcA", "11"): [
+                {"stream_id": "a1", "season": "1", "episode_num": 1, "title": "S1E1"},
+                {"stream_id": "a2", "season": "2", "episode_num": 1, "title": "S2E1"},
+                {"stream_id": "a3", "season": "2", "episode_num": 2, "title": "S2E2"},
+            ],
+        })
+        entry = self._entry(scope="season", season_filter="2")
+        snapshot = _run(ms.build_known_episodes_snapshot(entry, "season", "2"))
+        assert all(s["season"] == "2" for s in snapshot)
+        assert len(snapshot) == 2
+
+    def test_returns_empty_when_fuzzy_finds_nothing(self):
+        """No monitor_sources, no source_id and fuzzy search returns nothing."""
+        from app.services.monitor_service import MonitorService
+
+        class _Cfg:
+            config = {"sources": [{"id": "srcA", "enabled": True}]}
+
+        class _Xtream:
+            async def fetch_series_episodes(self, source_id, series_id):
+                return []
+
+        class _Cache:
+            def get_cached_with_source_info(self, *_args, **_kwargs):
+                return [], []
+
+        class _Cart:
+            cart = []
+
+        ms = MonitorService.__new__(MonitorService)
+        ms._cfg = _Cfg()
+        ms.cache_service = _Cache()
+        ms.xtream_service = _Xtream()
+        ms.cart_service = _Cart()
+
+        entry = {
+            "id": "snap-fz",
+            "series_name": "Unknown Show",
+            "series_id": "0",
+            "source_id": None,
+            "monitor_sources": [],
+            "scope": "new_only",
+            "season_filter": None,
+            "custom_category_ids": [],
+            "known_episodes": [],
+            "downloaded_episodes": [],
+            "cover": "",
+            "tmdb_id": None,
+            "imdb_id": None,
+        }
+        snapshot = _run(ms.build_known_episodes_snapshot(entry, "new_only", None))
+        assert snapshot == []
+
+
+# ---------------------------------------------------------------
+# _normalize_episode_num (xtream_service)
+# ---------------------------------------------------------------
+
+class TestNormalizeEpisodeNum:
+    """Tests for xtream_service._normalize_episode_num strict heuristic."""
+
+    def test_under_threshold_keeps_value(self):
+        """raw_num <= threshold is returned as-is, no title parsing."""
+        from app.services.xtream_service import _normalize_episode_num
+        assert _normalize_episode_num(5, "Some S01E99 title", season_size=10) == (5, None)
+
+    def test_threshold_boundary_keeps_value(self):
+        from app.services.xtream_service import EPISODE_NUM_SANITY_THRESHOLD, _normalize_episode_num
+        assert _normalize_episode_num(
+            EPISODE_NUM_SANITY_THRESHOLD, "S01E01", season_size=10
+        ) == (EPISODE_NUM_SANITY_THRESHOLD, None)
+
+    def test_above_threshold_with_matching_title_overrides_value(self):
+        from app.services.xtream_service import _normalize_episode_num
+        assert _normalize_episode_num(52, "FR - Motorheads (2025) - S01E02 - Épisode 2", 10) == (2, "1")
+
+    def test_above_threshold_no_title_pattern_keeps_value(self):
+        from app.services.xtream_service import _normalize_episode_num
+        assert _normalize_episode_num(52, "Épisode 2", 10) == (52, None)
+
+    def test_above_threshold_parsed_exceeds_season_size_keeps_value(self):
+        """Plausibility guard: parsed ep > season_size → keep upstream value."""
+        from app.services.xtream_service import _normalize_episode_num
+        assert _normalize_episode_num(52, "S01E99", season_size=10) == (52, None)
+
+    def test_above_threshold_parsed_zero_keeps_value(self):
+        """Parsed ep == 0 is not plausible."""
+        from app.services.xtream_service import _normalize_episode_num
+        assert _normalize_episode_num(52, "S01E00", season_size=10) == (52, None)
+
+    def test_empty_title_keeps_value(self):
+        from app.services.xtream_service import _normalize_episode_num
+        assert _normalize_episode_num(52, "", season_size=10) == (52, None)
+
+    def test_invalid_raw_returns_zero(self):
+        from app.services.xtream_service import _normalize_episode_num
+        assert _normalize_episode_num("abc", "S01E02", season_size=10) == (0, None)
+
+    def test_season_size_zero_skips_plausibility_guard(self):
+        """When season_size is unknown (0) we trust the title match."""
+        from app.services.xtream_service import _normalize_episode_num
+        assert _normalize_episode_num(52, "S01E02", season_size=0) == (2, "1")
+
+
+class TestFetchSeriesEpisodesNormalization:
+    """Integration: fetch_series_episodes applies _normalize_episode_num to
+    every returned episode so the (season, episode_num) key used for de-dup
+    is consistent regardless of upstream numbering quirks."""
+
+    def _make_xtream(self, payload: dict, source_id="src1"):
+        from app.services.xtream_service import XtreamService
+
+        class _Cfg:
+            def get_source_by_id(self, sid):
+                if sid == source_id:
+                    return {"host": "http://x", "username": "u", "password": "p"}
+                return None
+
+        class _Resp:
+            status_code = 200
+            def json(self):
+                return payload
+
+        class _Client:
+            async def get(self, *a, **kw):
+                return _Resp()
+
+        class _Http:
+            async def get_client(self):
+                return _Client()
+
+        class _Cache:
+            pass
+
+        xt = XtreamService.__new__(XtreamService)
+        xt.config_service = _Cfg()
+        xt.cache_service = _Cache()
+        xt.http_client = _Http()
+        return xt
+
+    def test_overrides_episode_num_when_above_threshold_and_title_matches(self):
+        """The Motorheads scenario: episode_num=52 + title S01E02 → (season=1, ep=2)."""
+        xt = self._make_xtream({
+            "info": {"name": "Motorheads"},
+            "episodes": {
+                "1": [
+                    {"id": "x1", "episode_num": 52,
+                     "title": "FR - Motorheads (2025) - S01E02 - Épisode 2"},
+                    {"id": "x2", "episode_num": 53,
+                     "title": "FR - Motorheads (2025) - S01E03 - Épisode 3"},
+                    {"id": "x3", "episode_num": 54,
+                     "title": "FR - Motorheads (2025) - S01E04 - Épisode 4"},
+                    {"id": "x4", "episode_num": 55,
+                     "title": "FR - Motorheads (2025) - S01E05 - Épisode 5"},
+                    {"id": "x5", "episode_num": 56,
+                     "title": "FR - Motorheads (2025) - S01E06 - Épisode 6"},
+                    {"id": "x6", "episode_num": 57,
+                     "title": "FR - Motorheads (2025) - S01E07 - Épisode 7"},
+                    {"id": "x7", "episode_num": 58,
+                     "title": "FR - Motorheads (2025) - S01E08 - Épisode 8"},
+                    {"id": "x8", "episode_num": 59,
+                     "title": "FR - Motorheads (2025) - S01E09 - Épisode 9"},
+                    {"id": "x9", "episode_num": 60,
+                     "title": "FR - Motorheads (2025) - S01E10 - Épisode 10"},
+                    {"id": "x10", "episode_num": 1, "title": "Pilot S01E01"},
+                ],
+            },
+        })
+        eps = _run(xt.fetch_series_episodes("src1", "999"))
+        nums = sorted(e["episode_num"] for e in eps)
+        assert nums == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        assert all(e["season"] == "1" for e in eps)
+
+    def test_keeps_episode_num_when_under_threshold(self):
+        """No override when upstream numbering is sane."""
+        xt = self._make_xtream({
+            "info": {"name": "X"},
+            "episodes": {"1": [
+                {"id": "a", "episode_num": 1, "title": "E1"},
+                {"id": "b", "episode_num": 2, "title": "E2"},
+            ]},
+        })
+        eps = _run(xt.fetch_series_episodes("src1", "999"))
+        assert sorted(e["episode_num"] for e in eps) == [1, 2]
+
+    def test_keeps_episode_num_when_title_has_no_pattern(self):
+        """Even if raw_num > threshold, no SxxExx pattern means no override."""
+        xt = self._make_xtream({
+            "info": {"name": "X"},
+            "episodes": {"1": [
+                {"id": "a", "episode_num": 52, "title": "Épisode 2"},
+                {"id": "b", "episode_num": 53, "title": "Épisode 3"},
+            ]},
+        })
+        eps = _run(xt.fetch_series_episodes("src1", "999"))
+        assert sorted(e["episode_num"] for e in eps) == [52, 53]
+
+    def test_keeps_episode_num_when_parsed_exceeds_season_size(self):
+        """Plausibility guard: parsed ep > total episodes in season → keep upstream."""
+        xt = self._make_xtream({
+            "info": {"name": "X"},
+            "episodes": {"1": [
+                {"id": "a", "episode_num": 52, "title": "S01E99"},
+                {"id": "b", "episode_num": 53, "title": "S01E100"},
+            ]},
+        })
+        eps = _run(xt.fetch_series_episodes("src1", "999"))
+        assert sorted(e["episode_num"] for e in eps) == [52, 53]
+
+
+# ---------------------------------------------------------------
+# Regression: known_episodes with parsed numbering must suppress new-episode
+# notifications for the same episode coming back with bogus upstream numbering
+# ---------------------------------------------------------------
+
+class TestCheckDoesNotNotifyForAlreadyKnownEpisodeWithMismatchedUpstreamNumbering:
+    """Regression test for the exact Motorheads scenario.
+
+    After the fix, ``XtreamService.fetch_series_episodes`` normalises
+    ``episode_num`` from the title when the upstream value exceeds the
+    sanity threshold. So both the snapshot (built via
+    ``build_known_episodes_snapshot``) and the live check loop see the
+    same canonical ``(season, episode_num)`` key for the same episode.
+    This test wires the *real* XtreamService with a mocked HTTP layer so
+    the normalisation actually runs, then verifies the check loop
+    recognises the episode as already-known and produces no new-ep
+    notification.
+    """
+
+    def _make_ms_with_real_xtream(self, payload: dict):
+        from app.services.monitor_service import MonitorService
+        from app.services.xtream_service import XtreamService
+
+        class _Resp:
+            status_code = 200
+            def json(self):
+                return payload
+
+        class _Client:
+            async def get(self, *a, **kw):
+                return _Resp()
+
+        class _Http:
+            async def get_client(self):
+                return _Client()
+
+        class _Cfg:
+            config = {"sources": []}
+            def get_source_by_id(self, sid):
+                if sid == "srcFR":
+                    return {"host": "http://x", "username": "u", "password": "p"}
+                return None
+
+        class _Cart:
+            cart = []
+            def build_download_filepath(self, item):
+                return "/nonexistent/" + item["stream_id"]
+            def save_cart(self):
+                pass
+
+        xt = XtreamService.__new__(XtreamService)
+        xt.config_service = _Cfg()
+        xt.http_client = _Http()
+        xt.cache_service = None
+
+        ms = MonitorService.__new__(MonitorService)
+        ms._cfg = _Cfg()
+        ms.xtream_service = xt
+        ms.cart_service = _Cart()
+        return ms
+
+    def test_already_known_episode_with_mismatched_upstream_number_is_not_new(self):
+        """The Motorheads scenario end-to-end:
+
+        upstream returns episode_num=52 + title 'S01E02' for what is really
+        S01E02. After normalisation the snapshot key is (1, 2). The next
+        check fetches the same episode, normalises 52 → 2, matches the
+        known key and produces no new-episode notification.
+        """
+        # Build a season with 10 episodes so the plausibility guard
+        # (parsed_ep <= season_size) accepts the parsed value of 2.
+        season_eps = [
+            {
+                "id": f"x{i}", "episode_num": 50 + i,
+                "title": f"FR - Motorheads (2025) - S01E{i:02d} - Épisode {i}",
+            }
+            for i in range(1, 11)
+        ]
+        payload = {
+            "info": {"name": "Motorheads"},
+            "episodes": {"1": season_eps},
+        }
+        ms = self._make_ms_with_real_xtream(payload)
+        entry = {
+            "id": "reg-motorheads",
+            "series_name": "Motorheads (2025)",
+            "series_id": "999",
+            "source_id": None,
+            "monitor_sources": [{"source_id": "srcFR", "series_ref": "999"}],
+            "scope": "new_only",
+            "season_filter": None,
+            "action": "notify",
+            # Snapshot was built by build_known_episodes_snapshot, which
+            # goes through the same normalised fetch_series_episodes.
+            # We pre-populate the known key that the normalisation produces.
+            "known_episodes": [{"season": "1", "episode_num": 2}],
+            "downloaded_episodes": [],
+            "last_new_count": 0,
+            "cover": "",
+        }
+        new_eps = _run(ms._check_single_monitored(entry))
+        # Pre-fix: the upstream episode_num=52 would not match (1, 2) and
+        # the check would wrongly return 1 new episode (causing the
+        # spurious "S01E52" Telegram notification).
+        # Post-fix: fetch normalises 52 → 2, the key matches known_episodes
+        # and the check returns no new episodes for that key. The other 9
+        # episodes in the season are not in known_episodes so they ARE
+        # reported as new — we only assert about the S01E02 entry.
+        s01e02_new = [e for e in new_eps if e.get("episode_num") == 2]
+        assert s01e02_new == []  # S01E02 was already known → not new
+        assert entry["last_new_count"] == 9  # the other 9 episodes are new
+

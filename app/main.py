@@ -23,6 +23,7 @@ from app.routes import (
     epg,
     filter_api,
     health,
+    log_api,
     monitor_api,
     player_api,
     playlist,
@@ -39,6 +40,7 @@ from app.services.config_service import ConfigService
 from app.services.epg_service import EpgService
 from app.services.http_client import HttpClientService
 from app.services.jellyfin_service import JellyfinService
+from app.services.log_service import LogService
 from app.services.m3u_service import M3uService
 from app.services.monitor_service import MonitorService
 from app.services.notification_service import NotificationService
@@ -78,15 +80,20 @@ async def background_refresh_loop(
 
             if cache_was_refreshed:
                 async def _run_post_refresh_tasks():
-                    results = await asyncio.gather(
-                        cat.refresh_pattern_categories_async() if cat else None,
+                    coros = [
                         monitor.check_monitored_series(),
                         monitor.check_monitored_movies(),
-                        return_exceptions=True,
+                    ]
+                    if cat:
+                        coros.insert(0, cat.refresh_pattern_categories_async())
+                    results = await asyncio.gather(*coros, return_exceptions=True)
+                    names = (
+                        ["category refresh", "series monitoring", "movie monitoring"]
+                        if cat
+                        else ["series monitoring", "movie monitoring"]
                     )
                     for i, res in enumerate(results):
                         if isinstance(res, Exception):
-                            names = ["category refresh", "series monitoring", "movie monitoring"]
                             logger.error(f"{names[i]} error in background loop: {res}")
 
                 await _run_post_refresh_tasks()
@@ -98,7 +105,7 @@ async def background_refresh_loop(
             # Sleep until the cache is about to expire, not a full TTL from now.
             # This prevents worst-case 2×TTL drift when the loop checks just
             # before the cache expires and then sleeps a full TTL.
-            ttl = cache.config_service.get_cache_ttl()
+            ttl = cache.config_service.refresh_interval
             remaining = ttl - cache.get_cache_age()
             sleep_secs = max(30, remaining)
             logger.debug(f"Background loop sleeping {sleep_secs:.0f}s (remaining TTL: {remaining:.0f}s)")
@@ -160,6 +167,9 @@ async def lifespan(app: FastAPI):
     cfg = ConfigService(data_dir)
     cfg.load()
 
+    log_svc = LogService(db_path, cfg)
+    await log_svc.prune_old_logs()
+
     http = HttpClientService()
 
     notif = NotificationService(cfg, http)
@@ -174,6 +184,10 @@ async def lifespan(app: FastAPI):
     monitor = MonitorService(cfg, cache, xtream, notif, cart)
     m3u = M3uService(cfg, cache)
 
+    cache.log_service = log_svc
+    cart.log_service = log_svc
+    monitor.log_service = log_svc
+
     # --- attach to app.state for DI ---
     app.state.config_service = cfg
     app.state.http_client = http
@@ -186,6 +200,7 @@ async def lifespan(app: FastAPI):
     app.state.cart_service = cart
     app.state.monitor_service = monitor
     app.state.m3u_service = m3u
+    app.state.log_service = log_svc
 
     # --- load cache BEFORE yield so is_cache_valid() sees correct state ---
     # This uses aiosqlite which runs on thread pool, doesn't block event loop
@@ -195,6 +210,7 @@ async def lifespan(app: FastAPI):
     monitor.load_monitored()
     monitor.load_monitored_movies()
     cart.load_cart()
+    cache.cart_service = cart  # bind so refresh can defer to active downloads
 
     # --- load EPG cache BEFORE yield so is_epg_cache_valid() sees correct state ---
     epg_svc.load_epg_cache_from_disk()
@@ -207,23 +223,10 @@ async def lifespan(app: FastAPI):
         download_schedule_loop(cart)
     )
 
-    # --- startup initial refreshes (fire-and-forget async tasks) ---
-    async def _initial_on_cache_refreshed():
-        await cat.refresh_pattern_categories_async()
-
-    if not cache.is_cache_valid():
-        logger.info("Cache is empty or invalid, triggering initial refresh…")
-        asyncio.create_task(cache.refresh_cache(on_cache_refreshed=_initial_on_cache_refreshed))
-
-    if not epg_svc.is_epg_cache_valid():
-        logger.info("EPG cache is empty or invalid, triggering initial EPG refresh…")
-        asyncio.create_task(epg_svc.refresh_epg_cache())
-
     # --- yield here so server can start accepting requests ASAP ---
     yield
 
     cart.monitor_service = monitor  # late bind for canonical name lookup
-    cache.cart_service = cart  # late bind so refresh can defer to active downloads
     # Recover stuck downloads
     recovered = 0
     for item in cart._download_cart:
@@ -280,6 +283,7 @@ app.include_router(config_api.router)
 app.include_router(cache_api.router)
 app.include_router(cart_api.router)
 app.include_router(monitor_api.router)
+app.include_router(log_api.router)
 app.include_router(epg.router)
 app.include_router(category_api.router)
 app.include_router(browse_api.router)

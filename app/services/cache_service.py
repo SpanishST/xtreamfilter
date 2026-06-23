@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
@@ -53,6 +53,7 @@ class CacheService:
         self.http_client = http_client
         self.notification_service = notification_service
         self.cart_service: "CartService | None" = None
+        self.log_service = None  # set after init via attribute binding
         self.data_dir = config_service.data_dir
         self.db_path = os.path.join(self.data_dir, DB_NAME)
 
@@ -126,6 +127,7 @@ class CacheService:
             "current_step": "",
             "percent": 0,
             "started_at": None,
+            "heartbeat_at": None,
             "finished_at": None,
             "last_error": "",
             "source_results": [],
@@ -144,6 +146,7 @@ class CacheService:
         progress["current_step"] = str(progress_data.get("current_step", progress["current_step"]) or "")
         progress["percent"] = int(progress_data.get("percent", progress["percent"]) or 0)
         progress["started_at"] = progress_data.get("started_at")
+        progress["heartbeat_at"] = progress_data.get("heartbeat_at")
         progress["finished_at"] = progress_data.get("finished_at")
         progress["last_error"] = str(progress_data.get("last_error", progress["last_error"]) or "")
 
@@ -296,8 +299,8 @@ class CacheService:
                 """INSERT OR REPLACE INTO refresh_progress
                    (id, in_progress, current_source, total_sources,
                     current_source_name, current_step, percent, started_at,
-                    status, source_results, summary, finished_at, last_error)
-                   VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    heartbeat_at, status, source_results, summary, finished_at, last_error)
+                   VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     int(progress_data.get("in_progress", False)),
                     progress_data.get("current_source", 0),
@@ -306,6 +309,7 @@ class CacheService:
                     progress_data.get("current_step", ""),
                     progress_data.get("percent", 0),
                     progress_data.get("started_at"),
+                    progress_data.get("heartbeat_at"),
                     progress_data.get("status", "idle"),
                     json.dumps(progress_data.get("source_results", []), ensure_ascii=False),
                     json.dumps(progress_data.get("summary", {}), ensure_ascii=False),
@@ -329,7 +333,7 @@ class CacheService:
             row = conn.execute(
                 "SELECT in_progress, current_source, total_sources, "
                 "current_source_name, current_step, percent, started_at, "
-                "status, source_results, summary, finished_at, last_error "
+                "heartbeat_at, status, source_results, summary, finished_at, last_error "
                 "FROM refresh_progress WHERE id = 1"
             ).fetchone()
             if row:
@@ -341,6 +345,7 @@ class CacheService:
                     "current_step": row["current_step"],
                     "percent": row["percent"],
                     "started_at": row["started_at"],
+                    "heartbeat_at": row["heartbeat_at"],
                     "status": row["status"],
                     "source_results": row["source_results"],
                     "summary": row["summary"],
@@ -362,7 +367,7 @@ class CacheService:
         progress["current_step"] = "Cancelled" if status == "cancelled" else ""
         progress["current_source_name"] = ""
         progress["percent"] = 0 if status == "cancelled" else progress.get("percent", 0)
-        progress["finished_at"] = datetime.now().isoformat()
+        progress["finished_at"] = datetime.now(timezone.utc).isoformat()
         progress["last_error"] = last_error or progress.get("last_error", "")
         progress["summary"] = self._build_refresh_summary(
             progress.get("source_results", []),
@@ -385,8 +390,8 @@ class CacheService:
                         """INSERT OR REPLACE INTO refresh_progress
                            (id, in_progress, current_source, total_sources,
                             current_source_name, current_step, percent, started_at,
-                            status, source_results, summary, finished_at, last_error)
-                           VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            heartbeat_at, status, source_results, summary, finished_at, last_error)
+                           VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (
                             int(progress_data.get("in_progress", False)),
                             progress_data.get("current_source", 0),
@@ -395,6 +400,7 @@ class CacheService:
                             progress_data.get("current_step", ""),
                             progress_data.get("percent", 0),
                             progress_data.get("started_at"),
+                            progress_data.get("heartbeat_at"),
                             progress_data.get("status", "idle"),
                             json.dumps(progress_data.get("source_results", []), ensure_ascii=False),
                             json.dumps(progress_data.get("summary", {}), ensure_ascii=False),
@@ -411,7 +417,7 @@ class CacheService:
                 async with conn.execute(
                     "SELECT in_progress, current_source, total_sources, "
                     "current_source_name, current_step, percent, started_at, "
-                    "status, source_results, summary, finished_at, last_error "
+                    "heartbeat_at, status, source_results, summary, finished_at, last_error "
                     "FROM refresh_progress WHERE id = 1"
                 ) as cursor:
                     row = await cursor.fetchone()
@@ -425,6 +431,7 @@ class CacheService:
                             "current_step": d["current_step"],
                             "percent": d["percent"],
                             "started_at": d["started_at"],
+                            "heartbeat_at": d.get("heartbeat_at"),
                             "status": d["status"],
                             "source_results": d["source_results"],
                             "summary": d["summary"],
@@ -606,6 +613,12 @@ class CacheService:
                 sources[rr["source_id"]]["last_refresh"] = rr["last_refresh"]
 
         refresh_progress = await self.load_refresh_progress_async()
+        if refresh_progress.get("in_progress"):
+            if not refresh_progress.get("finished_at"):
+                refresh_progress["finished_at"] = datetime.now(timezone.utc).isoformat()
+            refresh_progress["in_progress"] = False
+            refresh_progress["status"] = "failed"
+            self.save_refresh_progress(refresh_progress)
         self._api_cache["refresh_progress"] = refresh_progress
 
         if sources:
@@ -716,7 +729,7 @@ class CacheService:
                 )
 
             conn.commit()
-            logger.info(f"Cache saved to DB at {datetime.now().isoformat()}")
+            logger.info(f"Cache saved to DB at {datetime.now(timezone.utc).isoformat()}")
         except Exception as e:
             logger.error(f"Failed to save cache to DB: {e}")
         finally:
@@ -816,7 +829,7 @@ class CacheService:
                     (global_refresh,),
                 )
 
-        logger.info(f"Cache saved to DB at {datetime.now().isoformat()}")
+        logger.info(f"Cache saved to DB at {datetime.now(timezone.utc).isoformat()}")
 
     def save_cache_to_disk(self) -> None:
         use_async = self.config_service.config.get("database", {}).get("use_async", True)
@@ -963,7 +976,7 @@ class CacheService:
             return float("inf")
         try:
             last_time = datetime.fromisoformat(last_refresh)
-            return (datetime.now() - last_time).total_seconds()
+            return (datetime.now(timezone.utc) - last_time).total_seconds()
         except (ValueError, TypeError):
             return float("inf")
 
@@ -1256,7 +1269,7 @@ class CacheService:
             self.save_refresh_progress(progress)
 
         if source_updated:
-            source_cache["last_refresh"] = datetime.now().isoformat()
+            source_cache["last_refresh"] = datetime.now(timezone.utc).isoformat()
 
         source_result["counts"] = self._build_source_counts(source_cache)
         source_result["last_refresh"] = source_cache.get("last_refresh")
@@ -1272,11 +1285,13 @@ class CacheService:
         """
         existing_progress = await asyncio.to_thread(self.load_refresh_progress)
         if existing_progress.get("in_progress"):
-            started_at = existing_progress.get("started_at")
-            if started_at:
+            # Use heartbeat_at (updated periodically) for the staleness guard,
+            # not started_at (immutable, used for UI elapsed-time display).
+            last_activity = existing_progress.get("heartbeat_at") or existing_progress.get("started_at")
+            if last_activity:
                 try:
-                    started_time = datetime.fromisoformat(started_at)
-                    if (datetime.now() - started_time).total_seconds() < 600:
+                    last_activity_time = datetime.fromisoformat(last_activity)
+                    if (datetime.now(timezone.utc) - last_activity_time).total_seconds() < 600:
                         logger.info("Refresh already in progress, skipping")
                         return False
                 except (ValueError, TypeError):
@@ -1288,7 +1303,9 @@ class CacheService:
         # refresh triggers coalesce into a single waiter.
         if self.cart_service is not None and self.cart_service.is_download_active():
             logger.info("Cache refresh delayed: download in progress in cart")
-            wait_started_at = datetime.now().isoformat()
+            if getattr(self, 'log_service', None):
+                await getattr(self, 'log_service', None).log("cache", "warning", "Cache refresh delayed — download in progress")
+            wait_started_at = datetime.now(timezone.utc).isoformat()
             async with self._cache_lock:
                 self._api_cache["refresh_in_progress"] = True
             self.save_refresh_progress(
@@ -1301,6 +1318,7 @@ class CacheService:
                     "current_step": "Waiting for active download to finish",
                     "percent": 0,
                     "started_at": wait_started_at,
+                    "heartbeat_at": wait_started_at,
                     "finished_at": None,
                     "last_error": "",
                     "source_results": [],
@@ -1322,6 +1340,8 @@ class CacheService:
                             "Cache refresh waited %ss for downloads to finish; aborting",
                             waited,
                         )
+                        if getattr(self, 'log_service', None):
+                            await getattr(self, 'log_service', None).log("cache", "error", f"Cache refresh aborted — waited {waited}s for downloads to finish")
                         async with self._cache_lock:
                             self._api_cache["refresh_in_progress"] = False
                         self.save_refresh_progress(
@@ -1334,7 +1354,7 @@ class CacheService:
                                 "current_step": "Aborted: download still active after wait",
                                 "percent": 0,
                                 "started_at": wait_started_at,
-                                "finished_at": datetime.now().isoformat(),
+                                "finished_at": datetime.now(timezone.utc).isoformat(),
                                 "last_error": "Cache refresh aborted: download still in progress",
                                 "source_results": [],
                                 "summary": self._default_refresh_summary(),
@@ -1357,7 +1377,8 @@ class CacheService:
                                     f"({waited // 60} min)"
                                 ),
                                 "percent": 0,
-                                "started_at": datetime.now().isoformat(),
+                                "started_at": wait_started_at,
+                                "heartbeat_at": datetime.now(timezone.utc).isoformat(),
                                 "finished_at": None,
                                 "last_error": "",
                                 "source_results": [],
@@ -1403,6 +1424,8 @@ class CacheService:
 
         if not enabled_sources:
             logger.info("Cannot refresh - no valid sources configured")
+            if getattr(self, 'log_service', None):
+                await getattr(self, 'log_service', None).log("cache", "warning", "Cache refresh skipped — no valid sources configured")
             async with self._cache_lock:
                 self._api_cache["refresh_in_progress"] = False
             self.save_refresh_progress(
@@ -1414,8 +1437,8 @@ class CacheService:
                     "current_source_name": "",
                     "current_step": "No valid sources configured",
                     "percent": 0,
-                    "started_at": datetime.now().isoformat(),
-                    "finished_at": datetime.now().isoformat(),
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
                     "last_error": "No valid sources configured",
                     "source_results": [],
                     "summary": self._default_refresh_summary(),
@@ -1448,7 +1471,7 @@ class CacheService:
                 "current_source_name": "",
                 "current_step": "Initializing...",
                 "percent": 0,
-                "started_at": datetime.now().isoformat(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
                 "finished_at": None,
                 "last_error": "",
                 "source_results": source_results,
@@ -1457,11 +1480,12 @@ class CacheService:
         )
         self.save_refresh_progress(progress)
 
-        logger.info(f"Starting full refresh at {datetime.now().isoformat()} for {total_sources} source(s)")
+        logger.info(f"Starting full refresh at {datetime.now(timezone.utc).isoformat()} for {total_sources} source(s)")
+        if getattr(self, 'log_service', None):
+            await getattr(self, 'log_service', None).log("cache", "info", f"Cache refresh started ({total_sources} source(s))")
 
         new_sources_cache: dict[str, dict] = {}
         any_source_updated = False
-        finished_at = datetime.now().isoformat()
         final_status = "failed"
 
         try:
@@ -1491,7 +1515,10 @@ class CacheService:
             if new_sources_cache or existing_sources_snapshot:
                 async with self._cache_lock:
                     self._api_cache["sources"] = new_sources_cache
-                    self._api_cache["last_refresh"] = datetime.now().isoformat() if any_source_updated else previous_last_refresh
+                    # Always update last_refresh so the UI shows the most recent
+                    # attempt time. The last_refresh_outcome field distinguishes
+                    # success from failure.
+                    self._api_cache["last_refresh"] = datetime.now(timezone.utc).isoformat()
                     self._api_cache["refresh_in_progress"] = False
                 await asyncio.to_thread(self._inject_source_info)
                 await self.rebuild_stream_source_map()
@@ -1517,20 +1544,37 @@ class CacheService:
                     f"Refresh complete with status={final_status}. Total: {summary['live_streams']} live, "
                     f"{summary['vod_streams']} vod, {summary['series']} series"
                 )
+                if getattr(self, 'log_service', None):
+                    level = "info" if final_status == "success" else "warning"
+                    msg = f"Cache refresh completed ({final_status}): {summary['live_streams']} live, {summary['vod_streams']} vod, {summary['series']} series"
+                    details = {"status": final_status, **summary}
+                    # Add per-source error details if any
+                    failed_steps = []
+                    for sr in progress.get("source_results", []):
+                        for err in sr.get("errors", []):
+                            failed_steps.append(f"{sr.get('source_name', sr.get('source_id', '?'))}: {err.get('label', '?')}")
+                    if failed_steps:
+                        details["failed_steps"] = failed_steps
+                    await getattr(self, 'log_service', None).log("cache", level, msg, details)
             else:
                 logger.warning("Refresh completed but no data was fetched from any source")
+                if getattr(self, 'log_service', None):
+                    await getattr(self, 'log_service', None).log("cache", "error", "Cache refresh failed — no data fetched from any source")
                 async with self._cache_lock:
                     self._api_cache["refresh_in_progress"] = False
+                    self._api_cache["last_refresh"] = datetime.now(timezone.utc).isoformat()
                 final_status = "failed"
         except Exception as exc:
             logger.error(f"Cache refresh failed unexpectedly: {exc}")
+            if getattr(self, 'log_service', None):
+                await getattr(self, 'log_service', None).log("cache", "error", f"Cache refresh failed unexpectedly: {exc}")
             progress["last_error"] = progress.get("last_error") or str(exc)
             final_status = "partial" if any_source_updated else "failed"
             async with self._cache_lock:
                 self._api_cache["refresh_in_progress"] = False
         finally:
             await self._flush_pending_progress_saves()
-            finished_at = datetime.now().isoformat()
+            finished_at = datetime.now(timezone.utc).isoformat()
             progress["in_progress"] = False
             progress["status"] = final_status
             progress["current_source"] = total_sources
@@ -1545,7 +1589,7 @@ class CacheService:
             progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
             if final_status == "failed" and not progress.get("last_error"):
                 progress["last_error"] = "Refresh failed for every source"
-            self.save_refresh_progress(
+            self._save_refresh_progress_sync(
                 progress
             )
             if final_status in {"partial", "failed"} and self.notification_service:

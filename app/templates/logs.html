@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Activity Logs - XtreamFilter</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); min-height: 100vh; color: #e0e0e0; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .btn { display: inline-block; padding: 10px 20px; border: none; border-radius: 8px; font-size: 0.95em; cursor: pointer; transition: all 0.3s; text-decoration: none; }
+        .btn-secondary { background: rgba(255, 255, 255, 0.1); color: #fff; border: 1px solid rgba(255, 255, 255, 0.2); }
+        .btn-secondary:hover { background: rgba(255, 255, 255, 0.2); }
+        .btn-primary { background: linear-gradient(135deg, #00d4ff, #0099cc); color: #000; font-weight: 600; }
+        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(0, 212, 255, 0.4); }
+        .btn-danger { background: rgba(255, 71, 87, 0.2); color: #ff4757; border: 1px solid rgba(255, 71, 87, 0.3); }
+        .btn-danger:hover { background: rgba(255, 71, 87, 0.3); }
+        .btn-small { padding: 6px 12px; font-size: 0.85em; }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+
+        .top-nav { display: flex; align-items: center; gap: 20px; margin-bottom: 25px; padding: 12px 20px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; flex-wrap: wrap; }
+        .top-nav-brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: #00d4ff; font-weight: 700; font-size: 1.15em; white-space: nowrap; }
+        .top-nav-brand:hover { color: #33ddff; }
+        .top-nav-links { display: flex; gap: 4px; flex-wrap: wrap; margin-left: auto; }
+        .top-nav-link { padding: 8px 16px; border-radius: 8px; background: transparent; border: 1px solid transparent; color: #888; text-decoration: none; font-size: 0.9em; transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px; position: relative; white-space: nowrap; }
+        .top-nav-link:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+        .top-nav-link.active { color: #00d4ff; background: rgba(0, 212, 255, 0.12); border-color: rgba(0, 212, 255, 0.25); }
+        .nav-cart-badge { position: absolute; top: 2px; right: 2px; background: #ff4757; color: #fff; font-size: 0.65em; font-weight: 700; min-width: 16px; height: 16px; border-radius: 8px; display: flex; align-items: center; justify-content: center; padding: 0 4px; }
+        .nav-version { font-size: 0.7em; padding: 3px 10px; border-radius: 12px; background: rgba(255, 255, 255, 0.08); color: #888; cursor: default; white-space: nowrap; }
+
+        /* Tabs */
+        .tab-bar { display: flex; gap: 4px; margin-bottom: 20px; flex-wrap: wrap; }
+        .tab-btn { padding: 10px 20px; border-radius: 8px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #888; cursor: pointer; font-size: 0.9em; transition: all 0.2s; display: inline-flex; align-items: center; gap: 8px; }
+        .tab-btn:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+        .tab-btn.active { color: #00d4ff; background: rgba(0, 212, 255, 0.12); border-color: rgba(0, 212, 255, 0.25); }
+        .tab-badge { background: rgba(255, 255, 255, 0.15); color: #aaa; font-size: 0.75em; font-weight: 600; padding: 2px 7px; border-radius: 10px; min-width: 20px; text-align: center; }
+        .tab-btn.active .tab-badge { background: rgba(0, 212, 255, 0.25); color: #00d4ff; }
+
+        /* Toolbar */
+        .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }
+        .toolbar-left { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .toolbar-right { display: flex; gap: 10px; align-items: center; }
+        .level-filter { padding: 8px 12px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; background: rgba(0, 0, 0, 0.3); color: #fff; font-size: 0.9em; color-scheme: dark; }
+        .level-filter option, .level-filter optgroup { background: #1a1a2e; color: #fff; }
+        .retention-group { display: flex; align-items: center; gap: 6px; font-size: 0.85em; color: #888; }
+        .retention-group input { width: 55px; padding: 6px 8px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; background: rgba(0, 0, 0, 0.3); color: #fff; font-size: 0.9em; text-align: center; }
+
+        /* Log entries */
+        .log-list { display: flex; flex-direction: column; gap: 2px; }
+        .log-entry { display: flex; gap: 14px; padding: 12px 16px; background: rgba(255, 255, 255, 0.02); border-radius: 8px; transition: background 0.15s; align-items: flex-start; }
+        .log-entry:hover { background: rgba(255, 255, 255, 0.05); }
+        .log-timestamp { font-size: 0.8em; color: #666; white-space: nowrap; min-width: 145px; font-family: monospace; padding-top: 2px; flex-shrink: 0; }
+        .log-level { flex-shrink: 0; }
+        .level-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.75em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+        .level-badge.info { background: rgba(0, 212, 255, 0.15); color: #00d4ff; }
+        .level-badge.warning { background: rgba(255, 165, 2, 0.15); color: #ffa502; }
+        .level-badge.error { background: rgba(255, 71, 87, 0.15); color: #ff4757; }
+        .log-content { flex: 1; min-width: 0; }
+        .log-message { font-size: 0.9em; line-height: 1.5; word-break: break-word; }
+        .log-details-toggle { font-size: 0.8em; color: #00d4ff; cursor: pointer; margin-top: 4px; display: inline-block; user-select: none; }
+        .log-details-toggle:hover { text-decoration: underline; }
+        .log-details { display: none; margin-top: 8px; padding: 10px 14px; background: rgba(0, 0, 0, 0.25); border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.06); font-family: monospace; font-size: 0.8em; color: #aaa; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto; line-height: 1.5; }
+        .log-details.open { display: block; }
+
+        .empty-state { text-align: center; padding: 60px 20px; color: #666; }
+        .empty-state-icon { font-size: 4em; margin-bottom: 20px; opacity: 0.3; }
+        .empty-state h3 { color: #888; margin-bottom: 10px; }
+        .empty-state p { color: #666; font-size: 0.9em; }
+
+        .toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(100px); padding: 12px 24px; border-radius: 8px; font-size: 0.95em; z-index: 10000; opacity: 0; transition: all 0.3s ease; }
+        .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+        .toast-success { background: linear-gradient(135deg, #2ed573, #1abc9c); color: #000; font-weight: 500; }
+        .toast-error { background: rgba(255, 71, 87, 0.9); color: #fff; font-weight: 500; }
+
+        .load-more-btn { width: 100%; padding: 14px; text-align: center; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; color: #888; cursor: pointer; font-size: 0.9em; transition: all 0.2s; margin-top: 8px; }
+        .load-more-btn:hover { background: rgba(255, 255, 255, 0.06); color: #fff; }
+
+        @media (max-width: 768px) {
+            .toolbar { flex-direction: column; align-items: stretch; }
+            .log-entry { flex-direction: column; gap: 6px; }
+            .log-timestamp { min-width: auto; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <nav class="top-nav">
+            <a href="/" class="top-nav-brand">📺 XtreamFilter</a>
+            <span id="version-badge" class="nav-version" style="display:none"></span>
+            <div class="top-nav-links">
+                <a href="/" class="top-nav-link">⚙️ Settings</a>
+                <a href="/browse" class="top-nav-link">🔍 Browse</a>
+                <a href="/cart" class="top-nav-link">🛒 Cart<span class="nav-cart-badge" id="cart-badge" style="display:none">0</span></a>
+                <a href="/monitor" class="top-nav-link">📡 Monitor</a>
+                <a href="/logs" class="top-nav-link active">📝 Logs</a>
+            </div>
+        </nav>
+
+        <div class="tab-bar">
+            <button class="tab-btn active" data-tab="cache" onclick="switchTab('cache')">🗄️ Cache Refresh <span class="tab-badge" id="count-cache">0</span></button>
+            <button class="tab-btn" data-tab="cart" onclick="switchTab('cart')">🛒 Cart <span class="tab-badge" id="count-cart">0</span></button>
+            <button class="tab-btn" data-tab="monitor" onclick="switchTab('monitor')">📡 Monitor <span class="tab-badge" id="count-monitor">0</span></button>
+        </div>
+
+        <div class="toolbar">
+            <div class="toolbar-left">
+                <select class="level-filter" id="level-filter" onchange="loadLogs()">
+                    <option value="">All Levels</option>
+                    <option value="info">Info</option>
+                    <option value="warning">Warning</option>
+                    <option value="error">Error</option>
+                </select>
+                <div class="retention-group">
+                    <label>Retention:</label>
+                    <input type="number" id="retention-days" min="1" max="365" value="30">
+                    <span>days</span>
+                    <button class="btn btn-primary btn-small" onclick="saveRetention()">Save</button>
+                </div>
+            </div>
+            <div class="toolbar-right">
+                <button class="btn btn-danger btn-small" onclick="clearCurrentLogs()">🗑️ Clear Tab</button>
+                <button class="btn btn-danger btn-small" onclick="clearAllLogs()">🗑️ Clear All</button>
+            </div>
+        </div>
+
+        <div class="log-list" id="log-list"></div>
+
+        <div class="empty-state" id="empty-state" style="display:none;">
+            <div class="empty-state-icon">📝</div>
+            <h3>No logs yet</h3>
+            <p>Actions and errors will appear here as they happen.</p>
+        </div>
+
+        <div class="load-more-btn" id="load-more" style="display:none;" onclick="loadMore()">Load more</div>
+    </div>
+
+    <footer style="text-align:center; padding: 20px; margin-top: 40px; color: #555; font-size: 0.85em; border-top: 1px solid rgba(255,255,255,0.07);">
+        <a href="https://github.com/SpanishST/xtreamfilter" target="_blank" rel="noopener noreferrer"
+           style="color: #00d4ff; text-decoration: none; opacity: 0.5; transition: opacity 0.2s;"
+           onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">
+            ★ XtreamFilter on GitHub
+        </a>
+    </footer>
+
+    <script>
+        let currentTab = 'cache';
+        let currentOffset = 0;
+        const PAGE_SIZE = 100;
+        let pollInterval = null;
+
+        function switchTab(tab) {
+            currentTab = tab;
+            currentOffset = 0;
+            document.querySelectorAll('.tab-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.tab === tab);
+            });
+            loadLogs();
+        }
+
+        async function loadCounts() {
+            try {
+                const resp = await fetch('/api/logs/counts');
+                if (!resp.ok) return;
+                const counts = await resp.json();
+                document.getElementById('count-cache').textContent = counts.cache || 0;
+                document.getElementById('count-cart').textContent = counts.cart || 0;
+                document.getElementById('count-monitor').textContent = counts.monitor || 0;
+            } catch (e) { /* ignore */ }
+        }
+
+        async function loadLogs(append) {
+            if (!append) {
+                currentOffset = 0;
+            }
+            const level = document.getElementById('level-filter').value;
+            let url = `/api/logs?category=${currentTab}&limit=${PAGE_SIZE}&offset=${currentOffset}`;
+            if (level) url += `&level=${level}`;
+
+            try {
+                const resp = await fetch(url);
+                if (!resp.ok) return;
+                const logs = await resp.json();
+
+                const list = document.getElementById('log-list');
+                if (!append) {
+                    list.innerHTML = '';
+                }
+
+                logs.forEach(entry => {
+                    list.appendChild(createLogEntry(entry));
+                });
+
+                const loadMoreBtn = document.getElementById('load-more');
+                loadMoreBtn.style.display = logs.length === PAGE_SIZE ? 'block' : 'none';
+
+                const emptyState = document.getElementById('empty-state');
+                emptyState.style.display = (!append && logs.length === 0 && currentOffset === 0) ? 'block' : 'none';
+
+                currentOffset += logs.length;
+            } catch (e) { /* ignore */ }
+        }
+
+        function loadMore() {
+            loadLogs(true);
+        }
+
+        function createLogEntry(entry) {
+            const div = document.createElement('div');
+            div.className = 'log-entry';
+
+            const ts = formatTimestamp(entry.timestamp);
+            const level = entry.level || 'info';
+
+            let detailsHtml = '';
+            if (entry.details) {
+                const detailsStr = typeof entry.details === 'object' ? JSON.stringify(entry.details, null, 2) : String(entry.details);
+                const uid = 'd' + Math.random().toString(36).slice(2, 9);
+                detailsHtml = `
+                    <span class="log-details-toggle" onclick="toggleDetails('${uid}', this)">▶ Show details</span>
+                    <div class="log-details" id="${uid}">${escapeHtml(detailsStr)}</div>
+                `;
+            }
+
+            div.innerHTML = `
+                <div class="log-timestamp">${ts}</div>
+                <div class="log-level"><span class="level-badge ${level}">${level}</span></div>
+                <div class="log-content">
+                    <div class="log-message">${escapeHtml(entry.message || '')}</div>
+                    ${detailsHtml}
+                </div>
+            `;
+            return div;
+        }
+
+        function toggleDetails(id, toggle) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            const isOpen = el.classList.toggle('open');
+            toggle.textContent = isOpen ? '▼ Hide details' : '▶ Show details';
+        }
+
+        function formatTimestamp(ts) {
+            if (!ts) return '';
+            try {
+                const d = new Date(ts);
+                return d.toLocaleString(undefined, {
+                    year: 'numeric', month: '2-digit', day: '2-digit',
+                    hour: '2-digit', minute: '2-digit', second: '2-digit'
+                });
+            } catch {
+                return ts;
+            }
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        async function clearCurrentLogs() {
+            if (!confirm(`Clear all ${currentTab} logs?`)) return;
+            try {
+                const resp = await fetch(`/api/logs?category=${currentTab}`, { method: 'DELETE' });
+                if (resp.ok) {
+                    showToast('Logs cleared', 'success');
+                    loadLogs();
+                    loadCounts();
+                }
+            } catch (e) {
+                showToast('Failed to clear logs', 'error');
+            }
+        }
+
+        async function clearAllLogs() {
+            if (!confirm('Clear ALL activity logs?')) return;
+            try {
+                const resp = await fetch('/api/logs', { method: 'DELETE' });
+                if (resp.ok) {
+                    showToast('All logs cleared', 'success');
+                    loadLogs();
+                    loadCounts();
+                }
+            } catch (e) {
+                showToast('Failed to clear logs', 'error');
+            }
+        }
+
+        async function loadRetention() {
+            try {
+                const resp = await fetch('/api/options');
+                if (resp.ok) {
+                    const opts = await resp.json();
+                    document.getElementById('retention-days').value = opts.log_retention_days || 30;
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        async function saveRetention() {
+            const days = parseInt(document.getElementById('retention-days').value, 10);
+            if (isNaN(days) || days < 1) {
+                showToast('Retention must be at least 1 day', 'error');
+                return;
+            }
+            try {
+                const resp = await fetch('/api/options', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ log_retention_days: days })
+                });
+                if (resp.ok) {
+                    showToast(`Retention set to ${days} days`, 'success');
+                }
+            } catch (e) {
+                showToast('Failed to save retention', 'error');
+            }
+        }
+
+        function showToast(msg, type) {
+            const toast = document.createElement('div');
+            toast.className = `toast toast-${type}`;
+            toast.textContent = msg;
+            document.body.appendChild(toast);
+            requestAnimationFrame(() => toast.classList.add('show'));
+            setTimeout(() => {
+                toast.classList.remove('show');
+                setTimeout(() => toast.remove(), 300);
+            }, 2500);
+        }
+
+        async function checkVersion() {
+            try {
+                const resp = await fetch('/api/version');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    const badge = document.getElementById('version-badge');
+                    if (badge && data.version) {
+                        badge.textContent = 'v' + data.version;
+                        badge.style.display = '';
+                    }
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        async function updateCartBadge() {
+            try {
+                const resp = await fetch('/api/cart/status');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    const badge = document.getElementById('cart-badge');
+                    const count = data.queued_count || 0;
+                    if (count > 0) {
+                        badge.textContent = count;
+                        badge.style.display = '';
+                    } else {
+                        badge.style.display = 'none';
+                    }
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        function startPolling() {
+            if (pollInterval) clearInterval(pollInterval);
+            pollInterval = setInterval(() => {
+                loadCounts();
+                if (currentOffset <= PAGE_SIZE) {
+                    loadLogs();
+                }
+                updateCartBadge();
+            }, 10000);
+        }
+
+        loadCounts();
+        loadLogs();
+        loadRetention();
+        updateCartBadge();
+        checkVersion();
+        startPolling();
+    </script>
+</body>
+</html>

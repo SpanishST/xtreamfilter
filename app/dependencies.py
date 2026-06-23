@@ -10,6 +10,7 @@ from app.services.config_service import ConfigService
 from app.services.epg_service import EpgService
 from app.services.http_client import HttpClientService
 from app.services.jellyfin_service import JellyfinService
+from app.services.log_service import LogService
 from app.services.m3u_service import M3uService
 from app.services.monitor_service import MonitorService
 from app.services.notification_service import NotificationService
@@ -58,3 +59,7 @@ def get_monitor_service(request: Request) -> MonitorService:
 
 def get_m3u_service(request: Request) -> M3uService:
     return request.app.state.m3u_service
+
+
+def get_log_service(request: Request) -> LogService:
+    return request.app.state.log_service

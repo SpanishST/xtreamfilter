@@ -390,6 +390,22 @@ CREATE TABLE IF NOT EXISTS epg_meta (
 );
 
 INSERT OR IGNORE INTO epg_meta (id, last_refresh) VALUES (1, NULL);
+
+-- ── Activity logs ────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS activity_logs (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    category  TEXT NOT NULL,
+    level     TEXT NOT NULL,
+    message   TEXT NOT NULL,
+    details   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_logs_cat_ts
+    ON activity_logs (category, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_ts
+    ON activity_logs (timestamp DESC);
 """
 
 
@@ -418,6 +434,7 @@ _COLUMN_UPGRADES: list[tuple[str, str, str]] = [
     ("refresh_progress", "summary", "TEXT NOT NULL DEFAULT '{}'"),
     ("refresh_progress", "finished_at", "TEXT"),
     ("refresh_progress", "last_error", "TEXT NOT NULL DEFAULT ''"),
+    ("refresh_progress", "heartbeat_at", "TEXT"),
 ]
 
 

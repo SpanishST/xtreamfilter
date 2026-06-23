@@ -569,13 +569,171 @@ class CategoryService:
     # Pattern refresh — SQL hot-path
     # ------------------------------------------------------------------
 
-    def _refresh_pattern_categories_internal(self) -> list[tuple[str, list]]:
-        """Refresh automatic categories using indexed SQL queries.
+    def _refresh_single_pattern_category(self, conn, cat_row, sources_config: dict, current_time: int) -> tuple[list[tuple[str, list]], int]:
+        """Refresh a single automatic category. Returns (notifications, matched_count)."""
+        cat_id = cat_row["id"]
+        recently_added_days = cat_row["recently_added_days"] or 0
 
-        Old complexity: O(categories × streams × patterns) in Python.
-        New complexity: one SQL INSERT…SELECT per category, leveraging
-        the ``idx_streams_name_lower`` and ``idx_streams_source_ct`` indexes.
-        """
+        pat_rows = conn.execute(
+            "SELECT match_type, value, case_sensitive FROM category_patterns "
+            "WHERE category_id=? ORDER BY id",
+            (cat_id,),
+        ).fetchall()
+        patterns = [
+            {"match": r["match_type"], "value": r["value"], "case_sensitive": bool(r["case_sensitive"])}
+            for r in pat_rows
+        ]
+
+        if not patterns and recently_added_days <= 0:
+            return [], 0
+
+        try:
+            content_types: list[str] = json.loads(cat_row["content_types"])
+        except (json.JSONDecodeError, TypeError):
+            content_types = ["live", "vod", "series"]
+
+        pattern_logic = cat_row["pattern_logic"] or "and"
+        use_source_filters = bool(cat_row["use_source_filters"])
+
+        # Build WHERE clause from patterns
+        pat_where, pat_params = _build_pattern_where(patterns, pattern_logic)
+
+        ct_placeholders = ",".join("?" * len(content_types))
+        conditions = [f"content_type IN ({ct_placeholders})"]
+        params: list = list(content_types)
+
+        if pat_where:
+            conditions.append(pat_where)
+            params.extend(pat_params)
+
+        if recently_added_days > 0:
+            conditions.append("added > ?")
+            params.append(current_time - recently_added_days * 86400)
+
+        where_sql = " AND ".join(conditions)
+
+        # Snapshot for new-item detection (only if notifications enabled)
+        notify = bool(cat_row["notify_telegram"])
+        old_keys: set = set()
+        if notify:
+            old_rows = conn.execute(
+                "SELECT stream_id, source_id, content_type FROM category_cached_items "
+                "WHERE category_id=?",
+                (cat_id,),
+            ).fetchall()
+            old_keys = {(r["stream_id"], r["source_id"], r["content_type"]) for r in old_rows}
+
+        # Clear current cached items
+        conn.execute(
+            "DELETE FROM category_cached_items WHERE category_id=?", (cat_id,)
+        )
+
+        if use_source_filters:
+            # Hybrid: SQL for pattern match → Python for per-source group+channel filters
+            candidates = conn.execute(
+                f"SELECT stream_id, source_id, content_type, category_id AS cat_id, name "
+                f"FROM streams WHERE {where_sql}",
+                params,
+            ).fetchall()
+
+            cat_name_cache: dict[tuple, dict] = {}
+            new_rows: list[tuple] = []
+            for row in candidates:
+                src_id = row["source_id"]
+                ct = row["content_type"]
+                if src_id not in sources_config:
+                    continue
+                key = (src_id, ct)
+                if key not in cat_name_cache:
+                    sc_rows = conn.execute(
+                        "SELECT category_id, category_name FROM source_categories "
+                        "WHERE source_id=? AND content_type=?",
+                        (src_id, ct),
+                    ).fetchall()
+                    cat_name_cache[key] = {r["category_id"]: r["category_name"] for r in sc_rows}
+                source_cfg = sources_config[src_id]
+                source_filters = source_cfg.get("filters", {}).get(ct, {})
+                group_filters = source_filters.get("groups", [])
+                channel_filters = source_filters.get("channels", [])
+                group_name = cat_name_cache[key].get(str(row["cat_id"]), "")
+                if group_filters and not should_include(group_name, group_filters):
+                    continue
+                if channel_filters and not should_include(row["name"] or "", channel_filters):
+                    continue
+                new_rows.append((cat_id, row["stream_id"], src_id, ct))
+
+            if new_rows:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO category_cached_items "
+                    "(category_id, stream_id, source_id, content_type) VALUES (?,?,?,?)",
+                    new_rows,
+                )
+            matched_count = len(new_rows)
+        else:
+            conn.execute(
+                f"INSERT OR IGNORE INTO category_cached_items "
+                f"(category_id, stream_id, source_id, content_type) "
+                f"SELECT ?, stream_id, source_id, content_type "
+                f"FROM streams WHERE {where_sql}",
+                [cat_id] + params,
+            )
+            matched_count = conn.execute(
+                "SELECT COUNT(*) FROM category_cached_items WHERE category_id=?",
+                (cat_id,),
+            ).fetchone()[0]
+
+        # Telegram notifications
+        notifications: list[tuple[str, list]] = []
+        if notify:
+            new_cached = conn.execute(
+                "SELECT stream_id, source_id, content_type FROM category_cached_items "
+                "WHERE category_id=?",
+                (cat_id,),
+            ).fetchall()
+            truly_new = [
+                r for r in new_cached
+                if (r["stream_id"], r["source_id"], r["content_type"]) not in old_keys
+            ]
+            if truly_new:
+                new_items_for_notif = []
+                for nr in truly_new[:50]:
+                    sr = conn.execute(
+                        "SELECT name, data FROM streams WHERE source_id=? AND stream_id=?",
+                        (nr["source_id"], nr["stream_id"]),
+                    ).fetchone()
+                    if sr:
+                        try:
+                            d = json.loads(sr["data"])
+                        except (json.JSONDecodeError, TypeError):
+                            d = {}
+                        new_items_for_notif.append({
+                            "name": sr["name"] or "",
+                            "cover": d.get("stream_icon", "") or d.get("cover", ""),
+                            "source_id": nr["source_id"],
+                            "tmdb_id": d.get("tmdb_id") or d.get("tmdb"),
+                            "imdb_id": d.get("imdb_id") or d.get("imdb"),
+                        })
+                if new_items_for_notif:
+                    cat_name = conn.execute(
+                        "SELECT name FROM custom_categories WHERE id=?", (cat_id,)
+                    ).fetchone()
+                    notifications.append((
+                        cat_name["name"] if cat_name else "Unknown",
+                        new_items_for_notif,
+                    ))
+
+        conn.execute(
+            "UPDATE custom_categories SET last_refresh=? WHERE id=?",
+            (datetime.now().isoformat(), cat_id),
+        )
+        logger.info(
+            f"Category '{cat_row['name']}' refreshed via SQL: {matched_count} items"
+        )
+
+        return notifications, matched_count
+
+    def _refresh_pattern_categories_internal(self) -> list[tuple[str, list]]:
+        """Refresh all automatic categories using indexed SQL queries."""
         conn = db_connect(self.db_path)
         notifications_to_send: list[tuple[str, list]] = []
         config = self.config_service.config
@@ -590,165 +748,8 @@ class CategoryService:
             ).fetchall()
 
             for cat_row in auto_cats:
-                cat_id = cat_row["id"]
-                recently_added_days = cat_row["recently_added_days"] or 0
-
-                pat_rows = conn.execute(
-                    "SELECT match_type, value, case_sensitive FROM category_patterns "
-                    "WHERE category_id=? ORDER BY id",
-                    (cat_id,),
-                ).fetchall()
-                patterns = [
-                    {"match": r["match_type"], "value": r["value"], "case_sensitive": bool(r["case_sensitive"])}
-                    for r in pat_rows
-                ]
-
-                if not patterns and recently_added_days <= 0:
-                    continue
-
-                try:
-                    content_types: list[str] = json.loads(cat_row["content_types"])
-                except (json.JSONDecodeError, TypeError):
-                    content_types = ["live", "vod", "series"]
-
-                pattern_logic = cat_row["pattern_logic"] or "and"
-                use_source_filters = bool(cat_row["use_source_filters"])
-
-                # Build WHERE clause from patterns
-                pat_where, pat_params = _build_pattern_where(patterns, pattern_logic)
-
-                ct_placeholders = ",".join("?" * len(content_types))
-                conditions = [f"content_type IN ({ct_placeholders})"]
-                params: list = list(content_types)
-
-                if pat_where:
-                    conditions.append(pat_where)
-                    params.extend(pat_params)
-
-                if recently_added_days > 0:
-                    conditions.append("added > ?")
-                    params.append(current_time - recently_added_days * 86400)
-
-                where_sql = " AND ".join(conditions)
-
-                # Snapshot for new-item detection (only if notifications enabled)
-                notify = bool(cat_row["notify_telegram"])
-                old_keys: set = set()
-                if notify:
-                    old_rows = conn.execute(
-                        "SELECT stream_id, source_id, content_type FROM category_cached_items "
-                        "WHERE category_id=?",
-                        (cat_id,),
-                    ).fetchall()
-                    old_keys = {(r["stream_id"], r["source_id"], r["content_type"]) for r in old_rows}
-
-                # Clear current cached items
-                conn.execute(
-                    "DELETE FROM category_cached_items WHERE category_id=?", (cat_id,)
-                )
-
-                if use_source_filters:
-                    # Hybrid: SQL for pattern match → Python for per-source group+channel filters
-                    candidates = conn.execute(
-                        f"SELECT stream_id, source_id, content_type, category_id AS cat_id, name "
-                        f"FROM streams WHERE {where_sql}",
-                        params,
-                    ).fetchall()
-
-                    cat_name_cache: dict[tuple, dict] = {}
-                    new_rows: list[tuple] = []
-                    for row in candidates:
-                        src_id = row["source_id"]
-                        ct = row["content_type"]
-                        if src_id not in sources_config:
-                            # Unknown/removed source — skip entirely
-                            continue
-                        key = (src_id, ct)
-                        if key not in cat_name_cache:
-                            sc_rows = conn.execute(
-                                "SELECT category_id, category_name FROM source_categories "
-                                "WHERE source_id=? AND content_type=?",
-                                (src_id, ct),
-                            ).fetchall()
-                            cat_name_cache[key] = {r["category_id"]: r["category_name"] for r in sc_rows}
-                        source_cfg = sources_config[src_id]
-                        source_filters = source_cfg.get("filters", {}).get(ct, {})
-                        group_filters = source_filters.get("groups", [])
-                        channel_filters = source_filters.get("channels", [])
-                        group_name = cat_name_cache[key].get(str(row["cat_id"]), "")
-                        if group_filters and not should_include(group_name, group_filters):
-                            continue
-                        if channel_filters and not should_include(row["name"] or "", channel_filters):
-                            continue
-                        new_rows.append((cat_id, row["stream_id"], src_id, ct))
-
-                    if new_rows:
-                        conn.executemany(
-                            "INSERT OR IGNORE INTO category_cached_items "
-                            "(category_id, stream_id, source_id, content_type) VALUES (?,?,?,?)",
-                            new_rows,
-                        )
-                    matched_count = len(new_rows)
-                else:
-                    # Pure SQL — one statement replaces the entire Python loop
-                    conn.execute(
-                        f"INSERT OR IGNORE INTO category_cached_items "
-                        f"(category_id, stream_id, source_id, content_type) "
-                        f"SELECT ?, stream_id, source_id, content_type "
-                        f"FROM streams WHERE {where_sql}",
-                        [cat_id] + params,
-                    )
-                    matched_count = conn.execute(
-                        "SELECT COUNT(*) FROM category_cached_items WHERE category_id=?",
-                        (cat_id,),
-                    ).fetchone()[0]
-
-                # Telegram notifications
-                if notify:
-                    new_cached = conn.execute(
-                        "SELECT stream_id, source_id, content_type FROM category_cached_items "
-                        "WHERE category_id=?",
-                        (cat_id,),
-                    ).fetchall()
-                    truly_new = [
-                        r for r in new_cached
-                        if (r["stream_id"], r["source_id"], r["content_type"]) not in old_keys
-                    ]
-                    if truly_new:
-                        new_items_for_notif = []
-                        for nr in truly_new[:50]:
-                            sr = conn.execute(
-                                "SELECT name, data FROM streams WHERE source_id=? AND stream_id=?",
-                                (nr["source_id"], nr["stream_id"]),
-                            ).fetchone()
-                            if sr:
-                                try:
-                                    d = json.loads(sr["data"])
-                                except (json.JSONDecodeError, TypeError):
-                                    d = {}
-                                new_items_for_notif.append({
-                                    "name": sr["name"] or "",
-                                    "cover": d.get("stream_icon", "") or d.get("cover", ""),
-                                    "source_id": nr["source_id"],
-                                    "tmdb_id": d.get("tmdb_id") or d.get("tmdb"),
-                                    "imdb_id": d.get("imdb_id") or d.get("imdb"),
-                                })
-                        if new_items_for_notif:
-                            cat_name = conn.execute(
-                                "SELECT name FROM custom_categories WHERE id=?", (cat_id,)
-                            ).fetchone()
-                            notifications_to_send.append((
-                                cat_name["name"] if cat_name else "Unknown",
-                                new_items_for_notif,
-                            ))
-
-                conn.execute(
-                    "UPDATE custom_categories SET last_refresh=? WHERE id=?",
-                    (datetime.now().isoformat(), cat_id),
-                )
-                logger.info(
-                    f"Category '{cat_row['name']}' refreshed via SQL: {matched_count} items"
-                )
+                notifs, _ = self._refresh_single_pattern_category(conn, cat_row, sources_config, current_time)
+                notifications_to_send.extend(notifs)
 
             conn.commit()
         except Exception as e:
@@ -758,6 +759,32 @@ class CategoryService:
 
         return notifications_to_send
 
+    def _refresh_single_pattern_category_by_id(self, category_id: str) -> list[tuple[str, list]]:
+        """Refresh a single automatic category by ID."""
+        conn = db_connect(self.db_path)
+        notifications: list[tuple[str, list]] = []
+        config = self.config_service.config
+        sources_config = {s.get("id"): s for s in config.get("sources", [])}
+        current_time = int(time.time())
+
+        try:
+            cat_row = conn.execute(
+                "SELECT id, name, content_types, pattern_logic, use_source_filters, "
+                "notify_telegram, recently_added_days "
+                "FROM custom_categories WHERE id=? AND mode='automatic'",
+                (category_id,),
+            ).fetchone()
+
+            if cat_row:
+                notifications, _ = self._refresh_single_pattern_category(conn, cat_row, sources_config, current_time)
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error refreshing category {category_id}: {e}", exc_info=True)
+        finally:
+            conn.close()
+
+        return notifications
+
     async def refresh_pattern_categories_async(self) -> None:
         notifications = await asyncio.to_thread(self._refresh_pattern_categories_internal)
         for category_name, new_items in notifications:
@@ -765,4 +792,12 @@ class CategoryService:
 
     def refresh_pattern_categories(self) -> None:
         self._refresh_pattern_categories_internal()
+
+    async def refresh_single_pattern_category_async(self, category_id: str) -> None:
+        notifications = await asyncio.to_thread(self._refresh_single_pattern_category_by_id, category_id)
+        for category_name, new_items in notifications:
+            await self.notification_service.send_category_notification(category_name, new_items)
+
+    def refresh_single_pattern_category(self, category_id: str) -> None:
+        self._refresh_single_pattern_category_by_id(category_id)
 

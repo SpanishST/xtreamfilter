@@ -211,6 +211,7 @@ async def lifespan(app: FastAPI):
     monitor.load_monitored_movies()
     cart.load_cart()
     cache.cart_service = cart  # bind so refresh can defer to active downloads
+    cart.monitor_service = monitor  # bind for canonical name lookup during downloads
 
     # --- load EPG cache BEFORE yield so is_epg_cache_valid() sees correct state ---
     epg_svc.load_epg_cache_from_disk()
@@ -226,7 +227,6 @@ async def lifespan(app: FastAPI):
     # --- yield here so server can start accepting requests ASAP ---
     yield
 
-    cart.monitor_service = monitor  # late bind for canonical name lookup
     # Recover stuck downloads
     recovered = 0
     for item in cart._download_cart:

@@ -128,6 +128,9 @@
         .edit-form .source-select-all { display: flex; align-items: center; gap: 8px; padding: 4px 12px; margin-bottom: 2px; cursor: pointer; user-select: none; }
         .edit-form .source-select-all input[type=checkbox] { width: 14px; height: 14px; flex-shrink: 0; accent-color: #a29bfe; cursor: pointer; }
         .edit-form .source-select-all span { font-size: 0.78em; color: #a29bfe; font-weight: 500; }
+        .edit-form .source-check-item.source-available { background: rgba(0, 212, 255, 0.04); border-color: rgba(0, 212, 255, 0.15); }
+        .edit-form .source-check-item.source-available .src-name { color: #b0c4de; }
+        .edit-form .source-check-item .src-new-badge { font-size: 0.68em; color: #00d4ff; background: rgba(0, 212, 255, 0.12); border-radius: 4px; padding: 1px 5px; margin-left: 6px; white-space: nowrap; }
 
         @media (max-width: 768px) {
             .series-grid { grid-template-columns: 1fr; }
@@ -838,8 +841,9 @@
                 o.classList.toggle('selected', o.dataset.action === (entry.action || 'both'));
             });
 
-            // Build source checkboxes
+            // Build source checkboxes (current sources immediately, then enrich with available)
             _buildEditSourceList(entry);
+            _fetchAvailableSources(entry);
 
             // Build custom category channels (series type)
             _buildCustomCatSection('edit-series-custom-cats', 'series', entry.custom_category_ids || []);
@@ -876,7 +880,7 @@
             if (editBackfillGroup) editBackfillGroup.style.display = (action === 'notify') ? 'none' : 'block';
         }
 
-        function _buildEditSourceList(entry) {
+        function _buildEditSourceList(entry, availableMatches) {
             const container = document.getElementById('edit-source-options');
 
             // Build flat list: prefer monitor_sources, fall back to legacy source_id
@@ -891,7 +895,13 @@
                     series_name: '',
                   }] : []);
 
-            if (effectiveSources.length === 0) {
+            // Collect source_ids already monitored
+            const monitoredIds = new Set(effectiveSources.map(s => s.source_id));
+
+            // Filter available matches to only those NOT already monitored
+            const extraSources = (availableMatches || []).filter(m => !monitoredIds.has(m.source_id));
+
+            if (effectiveSources.length === 0 && extraSources.length === 0) {
                 container.innerHTML = '<span style="color:#888;font-size:0.85em;padding:6px 12px;">No explicit sources — searches all sources automatically (filtered by custom categories if selected).</span>';
                 return;
             }
@@ -902,6 +912,7 @@
                 '<span>Select / deselect all</span>' +
                 '</label>';
 
+            // Currently monitored sources (checked)
             for (const ms of effectiveSources) {
                 const cat = ms.category || '';
                 const sn = ms.series_name || '';
@@ -919,7 +930,48 @@
                     '</label>';
             }
 
+            // Available sources found in other providers (unchecked)
+            for (const m of extraSources) {
+                const cat = '';
+                const sn = m.name || '';
+                html += '<label class="source-check-item source-available">' +
+                    '<input type="checkbox" class="edit-src-specific"' +
+                    ' data-source-id="' + escapeAttr(m.source_id) + '"' +
+                    ' data-series-ref="' + escapeAttr(m.series_ref || '') + '"' +
+                    ' data-source-name="' + escapeAttr(m.source_name || '') + '"' +
+                    ' data-category="' + escapeAttr(cat) + '"' +
+                    ' data-series-name="' + escapeAttr(sn) + '"' +
+                    ' onchange="_onEditSrcChange()">' +
+                    '<span class="src-name">' + escapeHtml(m.source_name || m.source_id) + '</span>' +
+                    '<span class="src-new-badge">available</span>' +
+                    (sn ? '<span class="src-series">' + escapeHtml(sn) + '</span>' : '') +
+                    '</label>';
+            }
+
             container.innerHTML = html;
+        }
+
+        async function _fetchAvailableSources(entry) {
+            const name = entry.series_name || entry.canonical_name || '';
+            const tmdbId = entry.tmdb_id || '';
+            const imdbId = entry.imdb_id || '';
+            if (!name && !tmdbId && !imdbId) return;
+
+            try {
+                const params = new URLSearchParams();
+                if (name) params.set('name', name);
+                if (tmdbId) params.set('tmdb_id', String(tmdbId));
+                if (imdbId) params.set('imdb_id', String(imdbId));
+
+                const resp = await fetch('/api/monitor/series-lookup?' + params.toString());
+                if (!resp.ok) return;
+                const data = await resp.json();
+
+                // Only re-render if we're still editing the same entry
+                if (_editModalId === entry.id && data.results && data.results.length > 0) {
+                    _buildEditSourceList(entry, data.results);
+                }
+            } catch (_) { /* ignore fetch errors */ }
         }
 
         function _onEditSelectAllToggle(checkbox) {

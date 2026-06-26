@@ -394,6 +394,45 @@ async def get_series_meta(
     }
 
 
+@router.get("/api/monitor/series-lookup")
+async def series_lookup(
+    name: str = Query("", description="Series name"),
+    tmdb_id: str | None = Query(None),
+    imdb_id: str | None = Query(None),
+    monitor: MonitorService = Depends(get_monitor_service),
+    config_svc: ConfigService = Depends(get_config_service),
+):
+    """Search all enabled sources for a series by name or TMDB/IMDB ID.
+    Used by the edit modal to discover additional sources for a monitored series.
+    """
+    name = name.strip()
+    if not name and not tmdb_id and not imdb_id:
+        return {"results": []}
+
+    matches = monitor.find_series_across_sources(
+        name,
+        tmdb_id=tmdb_id,
+        imdb_id=imdb_id,
+    )
+
+    results = []
+    for m in matches:
+        src = config_svc.get_source_by_id(m["source_id"])
+        results.append({
+            "source_id": m["source_id"],
+            "series_ref": m.get("series_id", ""),
+            "source_name": (src or {}).get("name", m["source_id"]),
+            "name": m.get("name", ""),
+            "cover": m.get("cover", ""),
+            "tmdb_id": m.get("tmdb_id"),
+            "imdb_id": m.get("imdb_id"),
+            "score": m.get("score", 0),
+            "matched_by": m.get("matched_by", ""),
+        })
+
+    return {"results": results}
+
+
 @router.get("/api/monitor/{monitor_id}/episodes")
 async def preview_monitor_episodes(
     monitor_id: str,

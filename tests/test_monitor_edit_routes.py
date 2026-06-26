@@ -511,3 +511,134 @@ class TestRebuildKnownEndpoint:
         assert data["known_episodes_count"] == 0
         # scope=all → no reference set → downloaded_episodes preserved
         assert data["downloaded_episodes_count"] == 1
+
+
+# -------------------------------------------------------------------
+# GET /api/monitor/series-lookup — discover additional sources
+# -------------------------------------------------------------------
+
+class _FakeCacheService:
+    """Minimal cache_service stub returning canned series list."""
+
+    def __init__(self, series_list: list):
+        self._series_list = series_list
+
+    def get_cached_with_source_info(self, key, category_key):
+        return self._series_list, []
+
+
+def _build_monitor_app_with_cache(tmp_dir: str, series_list: list, fetch_results: dict | None = None):
+    """Build a FastAPI app with a fake cache_service for series-lookup tests."""
+    from fastapi import FastAPI
+
+    from app.routes import monitor_api
+
+    config = {
+        "sources": [
+            {"id": "srcA", "name": "Source A", "host": "http://a", "username": "u", "password": "p", "enabled": True},
+            {"id": "srcB", "name": "Source B", "host": "http://b", "username": "u", "password": "p", "enabled": True},
+            {"id": "srcC", "name": "Source C", "host": "http://c", "username": "u", "password": "p", "enabled": True},
+        ],
+        "filters": {
+            "live": {"groups": [], "channels": []},
+            "vod": {"groups": [], "channels": []},
+            "series": {"groups": [], "channels": []},
+        },
+        "content_types": {"live": True, "vod": True, "series": True},
+        "options": {},
+    }
+    with open(os.path.join(tmp_dir, "config.json"), "w") as f:
+        json.dump(config, f)
+
+    db_path = os.path.join(tmp_dir, DB_NAME)
+    init_db(db_path)
+    cfg = ConfigService(tmp_dir)
+    cfg.load()
+
+    xtream = _FakeXtream(fetch_results or {})
+
+    monitor = MonitorService.__new__(MonitorService)
+    monitor._cfg = cfg
+    monitor.cache_service = _FakeCacheService(series_list)
+    monitor.cart_service = None
+    monitor.notification_service = None
+    monitor.xtream_service = xtream
+    monitor.db_path = db_path
+    monitor._monitored_series = []
+    monitor._monitored_movies = []
+    monitor._check_in_progress = False
+    monitor.log_service = None
+
+    app = FastAPI()
+    app.state.config_service = cfg
+    app.state.monitor_service = monitor
+    app.state.xtream_service = xtream
+    app.include_router(monitor_api.router)
+    return app, monitor, xtream
+
+
+class TestSeriesLookupEndpoint:
+    """GET /api/monitor/series-lookup returns sources that have a given series."""
+
+    def test_returns_matching_sources_by_name(self, tmp_path):
+        series_list = [
+            {"_source_id": "srcA", "series_id": "11", "name": "Breaking Bad", "cover": "", "tmdb_id": None, "imdb_id": None},
+            {"_source_id": "srcB", "series_id": "22", "name": "Breaking Bad", "cover": "", "tmdb_id": None, "imdb_id": None},
+            {"_source_id": "srcC", "series_id": "33", "name": "Other Show", "cover": "", "tmdb_id": None, "imdb_id": None},
+        ]
+        app, _, _ = _build_monitor_app_with_cache(str(tmp_path), series_list)
+
+        with TestClient(app) as c:
+            r = c.get("/api/monitor/series-lookup", params={"name": "Breaking Bad"})
+
+        assert r.status_code == 200
+        results = r.json()["results"]
+        assert len(results) == 2
+        source_ids = {m["source_id"] for m in results}
+        assert source_ids == {"srcA", "srcB"}
+        # Verify source_name is resolved from config
+        for m in results:
+            assert "source_name" in m
+            assert m["series_ref"] in ("11", "22")
+
+    def test_returns_empty_for_empty_query(self, tmp_path):
+        app, _, _ = _build_monitor_app_with_cache(str(tmp_path), [])
+
+        with TestClient(app) as c:
+            r = c.get("/api/monitor/series-lookup", params={"name": ""})
+
+        assert r.status_code == 200
+        assert r.json()["results"] == []
+
+    def test_matches_by_tmdb_id(self, tmp_path):
+        series_list = [
+            {"_source_id": "srcA", "series_id": "11", "name": "Show A", "cover": "", "tmdb_id": "12345", "imdb_id": None},
+            {"_source_id": "srcB", "series_id": "22", "name": "Show B", "cover": "", "tmdb_id": "12345", "imdb_id": None},
+            {"_source_id": "srcC", "series_id": "33", "name": "Show C", "cover": "", "tmdb_id": "99999", "imdb_id": None},
+        ]
+        app, _, _ = _build_monitor_app_with_cache(str(tmp_path), series_list)
+
+        with TestClient(app) as c:
+            r = c.get("/api/monitor/series-lookup", params={"tmdb_id": "12345"})
+
+        assert r.status_code == 200
+        results = r.json()["results"]
+        assert len(results) == 2
+        source_ids = {m["source_id"] for m in results}
+        assert source_ids == {"srcA", "srcB"}
+        for m in results:
+            assert m["matched_by"] == "id"
+
+    def test_resolves_source_name_from_config(self, tmp_path):
+        series_list = [
+            {"_source_id": "srcA", "series_id": "11", "name": "My Show", "cover": "", "tmdb_id": None, "imdb_id": None},
+        ]
+        app, _, _ = _build_monitor_app_with_cache(str(tmp_path), series_list)
+
+        with TestClient(app) as c:
+            r = c.get("/api/monitor/series-lookup", params={"name": "My Show"})
+
+        assert r.status_code == 200
+        results = r.json()["results"]
+        assert len(results) == 1
+        assert results[0]["source_name"] == "Source A"

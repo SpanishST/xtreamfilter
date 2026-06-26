@@ -957,6 +957,13 @@
             const imdbId = entry.imdb_id || '';
             if (!name && !tmdbId && !imdbId) return;
 
+            const container = document.getElementById('edit-source-options');
+            const loadingRow = document.createElement('div');
+            loadingRow.id = 'edit-src-loading';
+            loadingRow.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 12px;color:#888;font-size:0.82em;';
+            loadingRow.innerHTML = '<span class="loading-spinner" style="width:12px;height:12px;border-width:2px;display:inline-block;"></span>Searching other sources…';
+            container.appendChild(loadingRow);
+
             try {
                 const params = new URLSearchParams();
                 if (name) params.set('name', name);
@@ -970,8 +977,15 @@
                 // Only re-render if we're still editing the same entry
                 if (_editModalId === entry.id && data.results && data.results.length > 0) {
                     _buildEditSourceList(entry, data.results);
+                } else {
+                    // Remove loading row if no results to show
+                    const lr = document.getElementById('edit-src-loading');
+                    if (lr) lr.remove();
                 }
-            } catch (_) { /* ignore fetch errors */ }
+            } catch (_) {
+                const lr = document.getElementById('edit-src-loading');
+                if (lr) lr.remove();
+            }
         }
 
         function _onEditSelectAllToggle(checkbox) {

@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
 from app.database import DB_NAME, db_connect
-from app.dependencies import get_config_service, get_monitor_service, get_xtream_service
+from app.dependencies import get_cart_service, get_config_service, get_monitor_service, get_xtream_service
 from app.services.config_service import ConfigService
 from app.services.filter_service import normalize_name
 from app.services.monitor_service import (  # noqa: F401 - _normalize_imdb_id used in series dup checks
@@ -440,6 +440,123 @@ async def preview_monitor_episodes(
     xtream: XtreamService = Depends(get_xtream_service),
 ):
     return await monitor.preview_episodes(monitor_id)
+
+
+@router.post("/api/monitor/{monitor_id}/redownload")
+async def redownload_episodes(
+    monitor_id: str,
+    request: Request,
+    monitor: MonitorService = Depends(get_monitor_service),
+    cart = Depends(get_cart_service),
+    xtream: XtreamService = Depends(get_xtream_service),
+    config_svc: ConfigService = Depends(get_config_service),
+):
+    """Re-download selected episodes from a specific source.
+
+    Body: { "source_id": "...", "episodes": [{"season": "1", "episode_num": 1}, ...] }
+    """
+    data = await request.json()
+    source_id = data.get("source_id", "")
+    episodes_req = data.get("episodes", [])
+
+    if not source_id:
+        return JSONResponse(status_code=400, content={"error": "source_id is required"})
+    if not episodes_req:
+        return JSONResponse(status_code=400, content={"error": "episodes list is required"})
+
+    # Find the monitor entry
+    entry = None
+    for e in monitor._monitored_series:
+        if e.get("id") == monitor_id:
+            entry = e
+            break
+    if not entry:
+        return JSONResponse(status_code=404, content={"error": "Monitor not found"})
+
+    # Resolve the series_ref for the requested source
+    series_ref = None
+    for ms in entry.get("monitor_sources") or []:
+        if ms.get("source_id") == source_id:
+            series_ref = ms.get("series_ref")
+            break
+    if not series_ref and entry.get("source_id") == source_id:
+        series_ref = entry.get("series_id")
+    if not series_ref:
+        return JSONResponse(status_code=400, content={"error": f"Source {source_id} not configured for this monitor"})
+
+    # Build set of requested (season, episode_num) keys
+    requested_keys: set[tuple] = set()
+    for ep_req in episodes_req:
+        s = str(ep_req.get("season", ""))
+        e = _safe_episode_num(ep_req.get("episode_num"))
+        requested_keys.add((s, e))
+
+    # Fetch episodes from the source
+    upstream_episodes = await xtream.fetch_series_episodes(source_id, str(series_ref))
+    if not upstream_episodes:
+        return JSONResponse(status_code=400, content={"error": "Could not fetch episodes from source"})
+
+    # Match requested episodes
+    series_name = entry.get("canonical_name") or entry.get("series_name", "")
+    queued_count = 0
+    skipped_in_cart = 0
+
+    for ep in upstream_episodes:
+        ep_key = (str(ep.get("season", "")), _safe_episode_num(ep.get("episode_num")))
+        if ep_key not in requested_keys:
+            continue
+
+        stream_id = str(ep.get("stream_id", ""))
+
+        # Skip if already in cart (queued/downloading)
+        if any(
+            i.get("source_id") == source_id
+            and i.get("stream_id") == stream_id
+            and i.get("status") in ("queued", "downloading")
+            for i in cart.cart
+        ):
+            skipped_in_cart += 1
+            continue
+
+        _sname = series_name or ep.get("series_name", "")
+        cart_item = {
+            "id": str(uuid.uuid4()),
+            "stream_id": stream_id,
+            "source_id": source_id,
+            "content_type": "series",
+            "name": ep.get("title", "") or f"Episode {ep.get('episode_num', '')}",
+            "series_name": _sname,
+            "monitor_canonical": _sname if series_name else None,
+            "series_id": str(series_ref),
+            "season": ep.get("season"),
+            "episode_num": ep.get("episode_num", 0),
+            "episode_title": ep.get("title", ""),
+            "episode_info": ep.get("info", {}),
+            "icon": entry.get("cover", ""),
+            "group": "",
+            "container_extension": ep.get("container_extension", "mp4"),
+            "added_at": datetime.now().isoformat(),
+            "status": "queued",
+            "progress": 0,
+            "error": None,
+            "file_path": None,
+            "file_size": None,
+        }
+        cart.cart.append(cart_item)
+        queued_count += 1
+
+    if queued_count:
+        cart.save_cart()
+
+    src = config_svc.get_source_by_id(source_id)
+    src_name = src.get("name", source_id) if src else source_id
+
+    return {
+        "status": "ok",
+        "queued": queued_count,
+        "skipped_in_cart": skipped_in_cart,
+        "source": src_name,
+    }
 
 
 # ===========================================================================

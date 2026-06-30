@@ -1126,6 +1126,12 @@ class MonitorService:
             ep["is_known"] = key in known_keys
             ep["is_downloaded"] = key in downloaded_keys
             ep["is_new"] = key not in (known_keys | downloaded_keys)
+            if ep["is_downloaded"]:
+                ep["status"] = "downloaded"
+            elif ep["is_known"]:
+                ep["status"] = "known"
+            else:
+                ep["status"] = "new"
 
         return {
             "entry": entry,

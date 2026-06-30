@@ -543,7 +543,8 @@ class CartService:
             rows = conn.execute(
                 "SELECT id, stream_id, source_id, content_type, name, series_name, "
                 "series_id, season, episode_num, episode_title, icon, grp, container_extension, "
-                "added_at, status, progress, error, file_path, file_size, temp_path "
+                "added_at, status, progress, error, file_path, file_size, temp_path, "
+                "monitor_canonical "
                 "FROM cart_items ORDER BY added_at"
             ).fetchall()
             logger.info(f"load_cart: loaded {len(rows)} items from DB")
@@ -569,6 +570,7 @@ class CartService:
                     "file_path": r["file_path"],
                     "file_size": r["file_size"],
                     "temp_path": r["temp_path"],
+                    "monitor_canonical": r["monitor_canonical"],
                 }
                 for r in rows
             ]
@@ -619,6 +621,7 @@ class CartService:
                     i.get("file_path"),
                     i.get("file_size"),
                     i.get("temp_path"),
+                    i.get("monitor_canonical"),
                 )
                 for i in self._download_cart
                 if i.get("id")
@@ -629,8 +632,8 @@ class CartService:
                     "(id, stream_id, source_id, content_type, name, series_name, "
                     "series_id, season, episode_num, episode_title, icon, grp, "
                     "container_extension, added_at, status, progress, "
-                    "error, file_path, file_size, temp_path) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "error, file_path, file_size, temp_path, monitor_canonical) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     rows,
                 )
             conn.commit()
@@ -676,10 +679,19 @@ class CartService:
                 if series_id:
                     # If the monitor already stamped a canonical name, use it
                     # directly and skip the API lookup for series_name entirely.
-                    locked_canon = item.get("_monitor_canonical")
+                    locked_canon = item.get("monitor_canonical")
                     if locked_canon:
+                        old_name = item.get("series_name")
                         item["series_name"] = locked_canon
-                        logger.info(f"[META] Using monitor-locked canonical name: '{locked_canon}'")
+                        logger.info(
+                            f"[META] Using monitor-locked canonical name: '{locked_canon}' "
+                            f"(source_id={source_id}, series_id={series_id})"
+                        )
+                        if old_name and old_name != locked_canon:
+                            logger.warning(
+                                f"[META] series_name changed by monitor lock: "
+                                f"'{old_name}' -> '{locked_canon}'"
+                            )
                         # Still fetch series info for NFO generation, but don't
                         # let it touch series_name.
                         try:
@@ -753,7 +765,13 @@ class CartService:
                 filename = f"{series_name} {season_str}{episode_str} - {ep_title_clean}.{ext}"
             else:
                 filename = f"{series_name} {season_str}{episode_str}.{ext}"
-            return os.path.join(base_path, "Series", series_name, season_str, filename)
+            full_path = os.path.join(base_path, "Series", series_name, season_str, filename)
+            logger.debug(
+                f"[PATH] Series folder='{series_name}' "
+                f"(monitor_canonical={item.get('monitor_canonical')!r}), "
+                f"path={full_path}"
+            )
+            return full_path
         else:
             return os.path.join(base_path, f"{name}.{ext}")
 
@@ -782,6 +800,15 @@ class CartService:
         content_type = data.get("content_type", "vod")
         add_mode = data.get("add_mode", "episode")
         added_items: list[dict] = []
+
+        # Resolve monitor canonical name for series items so the folder
+        # name is always the monitor title, even for manual additions.
+        _series_monitor_canon: str | None = None
+        if content_type == "series" and self.monitor_service is not None:
+            _src_id = data.get("source_id", "")
+            _ref_id = data.get("series_id", data.get("stream_id", ""))
+            if _src_id and _ref_id:
+                _series_monitor_canon = self.monitor_service.resolve_canonical_name_by_source(_src_id, _ref_id)
 
         if content_type == "series" and add_mode in ("series", "season"):
             series_id = data.get("series_id", data.get("stream_id", ""))
@@ -815,6 +842,7 @@ class CartService:
                     icon=data.get("icon", ""),
                     group=data.get("group", ""),
                     container_extension=ep.get("container_extension", "mp4"),
+                    monitor_canonical=_series_monitor_canon,
                 )
                 self._download_cart.append(item)
                 added_items.append(item)
@@ -842,6 +870,7 @@ class CartService:
                 icon=data.get("icon", ""),
                 group=data.get("group", ""),
                 container_extension=data.get("container_extension", "mp4"),
+                monitor_canonical=_series_monitor_canon,
             )
             self._download_cart.append(item)
             added_items.append(item)
@@ -878,6 +907,7 @@ class CartService:
             "error": None,
             "file_path": None,
             "file_size": None,
+            "monitor_canonical": kwargs.get("monitor_canonical"),
         }
 
     def cancel_download(self) -> bool:
@@ -963,8 +993,6 @@ class CartService:
             item["status"] = "downloading"
             item["progress"] = 0
             self.save_cart()
-            if getattr(self, 'log_service', None):
-                await getattr(self, 'log_service', None).log("cart", "info", f"Download started: {item.get('name', 'Unknown')}")
 
             upstream_url = self.build_upstream_url(item)
             if not upstream_url:
@@ -977,10 +1005,44 @@ class CartService:
 
             # Enrich item name from upstream metadata (title, year) before
             # building the file path so directories/filenames are canonical.
+            _pre_enrich_name = item.get("series_name")
             await self._enrich_item_name_from_metadata(item)
+            _post_enrich_name = item.get("series_name")
 
             file_path = self.build_download_filepath(item)
             item["file_path"] = file_path
+
+            if getattr(self, 'log_service', None):
+                _src = self.config_service.get_source_by_id(item.get("source_id", ""))
+                _src_name = _src.get("name", item.get("source_id", "")) if _src else item.get("source_id", "")
+                _log_details: dict = {
+                    "source": _src_name,
+                    "source_id": item.get("source_id", ""),
+                    "path": file_path,
+                }
+                if item.get("content_type") == "series":
+                    _log_details["series_name"] = _post_enrich_name
+                    _log_details["monitor_canonical"] = item.get("monitor_canonical")
+                    _log_details["name_changed_by_enrichment"] = _pre_enrich_name != _post_enrich_name
+                    await getattr(self, 'log_service', None).log(
+                        "cart", "info",
+                        f"Download started: '{_post_enrich_name}' S{item.get('season', '?')}E{item.get('episode_num', '?')} — {_src_name}",
+                        _log_details,
+                    )
+                else:
+                    await getattr(self, 'log_service', None).log(
+                        "cart", "info",
+                        f"Download started: {item.get('name', 'Unknown')} — {_src_name}",
+                        _log_details,
+                    )
+
+            if item.get("content_type") == "series":
+                logger.info(
+                    f"[DOWNLOAD] series_name: '{_post_enrich_name}' "
+                    f"(monitor_canonical={item.get('monitor_canonical')!r}), "
+                    f"changed={'yes' if _pre_enrich_name != _post_enrich_name else 'no'}, "
+                    f"path={file_path}"
+                )
             temp_dir = self.config_service.get_download_temp_path()
             temp_filename = f"{item['id']}_{os.path.basename(file_path)}"
             temp_path = os.path.join(temp_dir, temp_filename)
@@ -1177,7 +1239,22 @@ class CartService:
                         continue
                     await self._finalize_completed_download(item)
                     if getattr(self, 'log_service', None):
-                        await getattr(self, 'log_service', None).log("cart", "info", f"Download completed: {item.get('name', 'Unknown')}")
+                        _fp = item.get("file_path", "")
+                        _log_done: dict = {"path": _fp, "file_size": item.get("file_size")}
+                        if item.get("content_type") == "series":
+                            _sname = item.get("series_name", "")
+                            _log_done["series_name"] = _sname
+                            await getattr(self, 'log_service', None).log(
+                                "cart", "info",
+                                f"Download completed: '{_sname}' S{item.get('season', '?')}E{item.get('episode_num', '?')} -> {_fp}",
+                                _log_done,
+                            )
+                        else:
+                            await getattr(self, 'log_service', None).log(
+                                "cart", "info",
+                                f"Download completed: {item.get('name', 'Unknown')} -> {_fp}",
+                                _log_done,
+                            )
 
                 if pause_interval > 0 and pause_duration > 0:
                     self._download_progress["paused"] = True

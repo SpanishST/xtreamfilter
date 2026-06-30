@@ -665,11 +665,50 @@ class MonitorService:
                     label = ", ".join(ep_labels)
                     if len(new_eps) > 5:
                         label += f" +{len(new_eps) - 5} more"
-                    await self.log_service.log("monitor", "info", f"New episode(s) for '{series_name}': {label}", {
-                        "series_name": series_name,
-                        "count": len(new_eps),
-                        "action": action,
-                    })
+
+                    # Collect unique sources and compute output folder
+                    _sources_seen: dict[str, str] = {}
+                    _output_folder = None
+                    for ep in new_eps:
+                        _sid = ep.get("source_id", "")
+                        if _sid and _sid not in _sources_seen:
+                            try:
+                                _si = self._cfg.get_source_by_id(_sid)
+                                _sources_seen[_sid] = _si.get("name", _sid) if _si else _sid
+                            except (AttributeError, Exception):
+                                _sources_seen[_sid] = _sid
+                        if _output_folder is None:
+                            try:
+                                _fp = self.cart_service.build_download_filepath(ep)
+                                _output_folder = os.path.dirname(_fp)
+                            except Exception:
+                                pass
+
+                    _source_list = list(_sources_seen.values())
+                    _canonical = new_eps[0].get("monitor_canonical")
+                    _ep_details = [
+                        {
+                            "season": ep.get("season"),
+                            "episode": ep.get("episode_num"),
+                            "title": ep.get("episode_title", ""),
+                            "source_id": ep.get("source_id"),
+                        }
+                        for ep in new_eps[:10]
+                    ]
+
+                    await self.log_service.log(
+                        "monitor", "info",
+                        f"New episode(s) for '{series_name}': {label}",
+                        {
+                            "series_name": series_name,
+                            "canonical_name": _canonical,
+                            "count": len(new_eps),
+                            "action": action,
+                            "sources": _source_list,
+                            "output_folder": _output_folder,
+                            "episodes": _ep_details,
+                        },
+                    )
         finally:
             self._check_in_progress = False
 
@@ -779,18 +818,21 @@ class MonitorService:
                     continue
 
                 _sname = series_name or ep.get("series_name", "")
+                _season = ep.get("season")
+                _ep_num = ep.get("episode_num", 0)
+                _ep_title = ep.get("title", "") or f"Episode {_ep_num}"
                 cart_item = {
                     "id": str(uuid.uuid4()),
                     "stream_id": stream_id,
                     "source_id": src_source_id,
                     "content_type": "series",
-                    "name": ep.get("title", "") or f"Episode {ep.get('episode_num', '')}",
+                    "name": _ep_title,
                     "series_name": _sname,
                     # Preserved so _enrich_item_name_from_metadata never overwrites it
-                    "_monitor_canonical": _sname if series_name else None,
+                    "monitor_canonical": _sname if series_name else None,
                     "series_id": src_series_id or series_id,
-                    "season": ep.get("season"),
-                    "episode_num": ep.get("episode_num", 0),
+                    "season": _season,
+                    "episode_num": _ep_num,
                     "episode_title": ep.get("title", ""),
                     "episode_info": ep.get("info", {}),
                     "icon": entry.get("cover", ""),
@@ -804,9 +846,34 @@ class MonitorService:
                     "file_size": None,
                 }
 
+                # Resolve source name for logging
+                try:
+                    _src_info = self._cfg.get_source_by_id(src_source_id)
+                    _src_name = _src_info.get("name", src_source_id) if _src_info else src_source_id
+                except (AttributeError, Exception):
+                    _src_name = src_source_id
+
+                # Compute expected output path for logging
+                _expected_path = self.cart_service.build_download_filepath(cart_item)
+
+                logger.info(
+                    f"Series monitoring: NEW EPISODE — monitor='{series_name}' "
+                    f"(canonical={entry.get('canonical_name')!r}, raw={entry.get('series_name')!r}), "
+                    f"source={_src_name} (id={src_source_id}), "
+                    f"series_ref={src_series_id}, "
+                    f"episode=S{_season}E{_ep_num} — {_ep_title}, "
+                    f"output_folder={os.path.dirname(_expected_path)}, "
+                    f"action={'download' if should_download else 'notify'}"
+                )
+
                 if should_download:
-                    filepath = self.cart_service.build_download_filepath(cart_item)
+                    filepath = _expected_path
                     if os.path.exists(filepath):
+                        logger.info(
+                            f"Series monitoring: SKIP (already on disk) — "
+                            f"monitor='{series_name}', episode=S{_season}E{_ep_num}, "
+                            f"path={filepath}"
+                        )
                         entry.setdefault("downloaded_episodes", []).append({
                             "stream_id": stream_id,
                             "source_id": src_source_id,
@@ -953,7 +1020,7 @@ class MonitorService:
                     "name": ep.get("title", "") or f"Episode {ep.get('episode_num', '')}",
                     "series_name": _sname_bf,
                     # Preserved so _enrich_item_name_from_metadata never overwrites it
-                    "_monitor_canonical": _sname_bf if series_name else None,
+                    "monitor_canonical": _sname_bf if series_name else None,
                     "series_id": used_series_id or series_id,
                     "season": ep.get("season"),
                     "episode_num": ep.get("episode_num", 0),

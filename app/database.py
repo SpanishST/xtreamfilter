@@ -436,6 +436,8 @@ _COLUMN_UPGRADES: list[tuple[str, str, str]] = [
     ("refresh_progress", "last_error", "TEXT NOT NULL DEFAULT ''"),
     ("refresh_progress", "heartbeat_at", "TEXT"),
     ("cart_items", "monitor_canonical", "TEXT"),
+    ("cart_items", "expected_size", "INTEGER"),
+    ("cart_items", "retried_once", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

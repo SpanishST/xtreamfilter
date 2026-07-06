@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -48,6 +49,21 @@ def sanitize_filename(name: str) -> str:
 def get_player_headers(profile_key: str = "tivimate") -> dict:
     profile = PLAYER_PROFILES.get(profile_key, PLAYER_PROFILES["tivimate"])
     return dict(profile["headers"])
+
+
+def _partial_file_hash(path: str, sample_size: int = 1024 * 1024) -> str:
+    """Hash the first and last *sample_size* bytes of a file for quick integrity checks."""
+    h = hashlib.sha256()
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            h.update(f.read(sample_size))
+            if size > sample_size:
+                f.seek(max(0, size - sample_size))
+                h.update(f.read(sample_size))
+    except OSError:
+        return ""
+    return h.hexdigest()
 
 
 # ------------------------------------------------------------------
@@ -1158,6 +1174,26 @@ class CartService:
                                         download_failed = True
                                         break
                                 item["error"] = None
+
+                                # When resuming (downloaded > 0), verify the server
+                                # actually honoured the Range request.  A 200 OK means
+                                # the server is re-sending the entire file; appending
+                                # that onto the existing partial temp file would produce
+                                # a corrupted (doubled) file.  Reset and start fresh.
+                                if downloaded > 0 and response.status_code == 200:
+                                    logger.warning(
+                                        "[DOWNLOAD] Server returned 200 for Range request "
+                                        "(expected 206). Truncating temp file and restarting "
+                                        "download for '%s'.", item.get("name"),
+                                    )
+                                    try:
+                                        with open(temp_path, "wb"):
+                                            pass  # truncate
+                                    except OSError:
+                                        pass
+                                    downloaded = 0
+                                    total = 0
+
                                 if total == 0:
                                     content_range = response.headers.get("content-range", "")
                                     if content_range and "/" in content_range:
@@ -1304,6 +1340,55 @@ class CartService:
                             except OSError:
                                 pass
                             continue
+
+                    # When the server didn't provide Content-Length (total == 0),
+                    # the byte-count check above is skipped entirely.  As a
+                    # fallback, compare the counter against the actual file size
+                    # on disk to catch append-mode corruption from bad resumes.
+                    if total == 0 and downloaded > 0 and os.path.exists(temp_path):
+                        disk_size = os.path.getsize(temp_path)
+                        if disk_size != downloaded:
+                            logger.warning(
+                                "[DOWNLOAD] Disk size mismatch for '%s': "
+                                "downloaded counter=%d, file on disk=%d",
+                                item.get("name"), downloaded, disk_size,
+                            )
+                            if not item.get("retried_once"):
+                                item["retried_once"] = True
+                                item["status"] = "queued"
+                                item["error"] = f"Retrying: size mismatch (counter={downloaded:,}, disk={disk_size:,})"
+                                self.save_cart()
+                                if getattr(self, 'log_service', None):
+                                    await getattr(self, 'log_service', None).log("cart", "warning",
+                                        f"Auto-retry (disk mismatch): {item.get('name', 'Unknown')} — counter={downloaded:,} disk={disk_size:,}",
+                                        {"downloaded": downloaded, "disk_size": disk_size, "path": file_path})
+                                try:
+                                    os.remove(temp_path)
+                                except OSError:
+                                    pass
+                                continue
+                            else:
+                                item["status"] = "failed"
+                                item["error"] = f"Size mismatch after retry (counter={downloaded:,}, disk={disk_size:,})"
+                                self.save_cart()
+                                if getattr(self, 'log_service', None):
+                                    await getattr(self, 'log_service', None).log("cart", "error",
+                                        f"Download failed (disk mismatch after retry): {item.get('name', 'Unknown')}",
+                                        {"downloaded": downloaded, "disk_size": disk_size, "path": file_path})
+                                await self.notification_service.send_download_file_notification(item)
+                                try:
+                                    os.remove(temp_path)
+                                except OSError:
+                                    pass
+                                continue
+
+                    # Flush OS page cache to disk before moving, so the move
+                    # operation reads fully-written data (critical on CIFS/NFS).
+                    try:
+                        with open(temp_path, "rb") as _f:
+                            os.fsync(_f.fileno())
+                    except OSError as fsync_err:
+                        logger.warning("[DOWNLOAD] fsync failed for '%s': %s", item.get("name"), fsync_err)
 
                     move_ok = await self._move_temp_to_destination(item, temp_path, file_path)
                     if not move_ok:
@@ -1471,7 +1556,21 @@ class CartService:
             if not moved:
                 try:
                     shutil.copy2(temp_path, file_path)
-                    moved = True
+                    # Verify data integrity after copy — partial hash of first+last 1 MB
+                    src_hash = _partial_file_hash(temp_path)
+                    dst_hash = _partial_file_hash(file_path)
+                    if src_hash and dst_hash and src_hash != dst_hash:
+                        logger.error(
+                            "[MOVE] Data integrity check failed after copy2 for '%s': "
+                            "src_hash=%s dst_hash=%s", item_name, src_hash[:16], dst_hash[:16],
+                        )
+                        try:
+                            os.remove(file_path)
+                        except OSError:
+                            pass
+                        copy_error = Exception("Partial hash mismatch after copy2")
+                    else:
+                        moved = True
                 except Exception as cexc:
                     copy_error = cexc
                     logger.exception(
@@ -1862,8 +1961,9 @@ class CartService:
         if result.returncode == 0 and os.path.exists(tmp_path):
             tmp_size = os.path.getsize(tmp_path)
             orig_size = os.path.getsize(file_path)
-            # Sanity check: remuxed file should be roughly the same size
-            if tmp_size > orig_size * 0.9:
+            # Sanity check: a copy-remux only changes container overhead, so the
+            # output should be nearly the same size (>99% of the original).
+            if tmp_size > orig_size * 0.99:
                 os.replace(tmp_path, file_path)
                 logger.info(f"[META] Embedded container metadata (ffmpeg): {file_path}")
             else:

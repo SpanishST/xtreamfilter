@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -48,6 +49,21 @@ def sanitize_filename(name: str) -> str:
 def get_player_headers(profile_key: str = "tivimate") -> dict:
     profile = PLAYER_PROFILES.get(profile_key, PLAYER_PROFILES["tivimate"])
     return dict(profile["headers"])
+
+
+def _partial_file_hash(path: str, sample_size: int = 1024 * 1024) -> str:
+    """Hash the first and last *sample_size* bytes of a file for quick integrity checks."""
+    h = hashlib.sha256()
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            h.update(f.read(sample_size))
+            if size > sample_size:
+                f.seek(max(0, size - sample_size))
+                h.update(f.read(sample_size))
+    except OSError:
+        return ""
+    return h.hexdigest()
 
 
 # ------------------------------------------------------------------
@@ -543,7 +559,8 @@ class CartService:
             rows = conn.execute(
                 "SELECT id, stream_id, source_id, content_type, name, series_name, "
                 "series_id, season, episode_num, episode_title, icon, grp, container_extension, "
-                "added_at, status, progress, error, file_path, file_size, temp_path "
+                "added_at, status, progress, error, file_path, file_size, temp_path, "
+                "monitor_canonical, expected_size, retried_once "
                 "FROM cart_items ORDER BY added_at"
             ).fetchall()
             logger.info(f"load_cart: loaded {len(rows)} items from DB")
@@ -569,6 +586,9 @@ class CartService:
                     "file_path": r["file_path"],
                     "file_size": r["file_size"],
                     "temp_path": r["temp_path"],
+                    "monitor_canonical": r["monitor_canonical"],
+                    "expected_size": r["expected_size"],
+                    "retried_once": bool(r["retried_once"]),
                 }
                 for r in rows
             ]
@@ -619,6 +639,9 @@ class CartService:
                     i.get("file_path"),
                     i.get("file_size"),
                     i.get("temp_path"),
+                    i.get("monitor_canonical"),
+                    i.get("expected_size"),
+                    int(bool(i.get("retried_once", False))),
                 )
                 for i in self._download_cart
                 if i.get("id")
@@ -629,8 +652,9 @@ class CartService:
                     "(id, stream_id, source_id, content_type, name, series_name, "
                     "series_id, season, episode_num, episode_title, icon, grp, "
                     "container_extension, added_at, status, progress, "
-                    "error, file_path, file_size, temp_path) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "error, file_path, file_size, temp_path, monitor_canonical, "
+                    "expected_size, retried_once) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     rows,
                 )
             conn.commit()
@@ -676,10 +700,19 @@ class CartService:
                 if series_id:
                     # If the monitor already stamped a canonical name, use it
                     # directly and skip the API lookup for series_name entirely.
-                    locked_canon = item.get("_monitor_canonical")
+                    locked_canon = item.get("monitor_canonical")
                     if locked_canon:
+                        old_name = item.get("series_name")
                         item["series_name"] = locked_canon
-                        logger.info(f"[META] Using monitor-locked canonical name: '{locked_canon}'")
+                        logger.info(
+                            f"[META] Using monitor-locked canonical name: '{locked_canon}' "
+                            f"(source_id={source_id}, series_id={series_id})"
+                        )
+                        if old_name and old_name != locked_canon:
+                            logger.warning(
+                                f"[META] series_name changed by monitor lock: "
+                                f"'{old_name}' -> '{locked_canon}'"
+                            )
                         # Still fetch series info for NFO generation, but don't
                         # let it touch series_name.
                         try:
@@ -722,16 +755,26 @@ class CartService:
                             item["series_name"] = monitor_canon
                             logger.info(f"[META] Using monitored canonical name: '{monitor_canon}'")
                         else:
-                            # Fall back to metadata title (strips provider prefixes)
-                            meta_title = _str_val(
-                                info.get("name") or info.get("title")
-                            ).strip()
-                            if meta_title:
-                                year = _extract_year(info)
-                                if year and year not in meta_title:
-                                    meta_title = f"{meta_title} ({year})"
-                                item["series_name"] = meta_title
-                                logger.info(f"[META] Enriched series name: '{meta_title}'")
+                            # Check if current series_name is a monitored canonical
+                            # name (e.g. set by the user via the UI). If so, don't
+                            # overwrite it with the API metadata title.
+                            _cur_sname = item.get("series_name", "")
+                            _is_monitored_name = (
+                                self.monitor_service is not None
+                                and _cur_sname
+                                and self.monitor_service.resolve_canonical_name_by_series_name(_cur_sname)
+                            )
+                            if not _is_monitored_name:
+                                # Fall back to metadata title (strips provider prefixes)
+                                meta_title = _str_val(
+                                    info.get("name") or info.get("title")
+                                ).strip()
+                                if meta_title:
+                                    year = _extract_year(info)
+                                    if year and year not in meta_title:
+                                        meta_title = f"{meta_title} ({year})"
+                                    item["series_name"] = meta_title
+                                    logger.info(f"[META] Enriched series name: '{meta_title}'")
         except Exception as e:
             logger.debug(f"Could not enrich item name from metadata: {e}")
 
@@ -753,7 +796,13 @@ class CartService:
                 filename = f"{series_name} {season_str}{episode_str} - {ep_title_clean}.{ext}"
             else:
                 filename = f"{series_name} {season_str}{episode_str}.{ext}"
-            return os.path.join(base_path, "Series", series_name, season_str, filename)
+            full_path = os.path.join(base_path, "Series", series_name, season_str, filename)
+            logger.debug(
+                f"[PATH] Series folder='{series_name}' "
+                f"(monitor_canonical={item.get('monitor_canonical')!r}), "
+                f"path={full_path}"
+            )
+            return full_path
         else:
             return os.path.join(base_path, f"{name}.{ext}")
 
@@ -782,6 +831,23 @@ class CartService:
         content_type = data.get("content_type", "vod")
         add_mode = data.get("add_mode", "episode")
         added_items: list[dict] = []
+
+        # Resolve monitor canonical name for series items so the folder
+        # name is always the monitor title, even for manual additions.
+        _series_monitor_canon: str | None = None
+        if content_type == "series" and self.monitor_service is not None:
+            # Prefer explicit canonical from the frontend (already resolved)
+            _series_monitor_canon = data.get("monitor_canonical") or None
+            if not _series_monitor_canon:
+                _src_id = data.get("source_id", "")
+                _ref_id = data.get("series_id", data.get("stream_id", ""))
+                if _src_id and _ref_id:
+                    _series_monitor_canon = self.monitor_service.resolve_canonical_name_by_source(_src_id, _ref_id)
+            # Final fallback: match by series_name against monitored canonical names
+            if not _series_monitor_canon:
+                _sname = data.get("series_name", "")
+                if _sname:
+                    _series_monitor_canon = self.monitor_service.resolve_canonical_name_by_series_name(_sname)
 
         if content_type == "series" and add_mode in ("series", "season"):
             series_id = data.get("series_id", data.get("stream_id", ""))
@@ -815,6 +881,7 @@ class CartService:
                     icon=data.get("icon", ""),
                     group=data.get("group", ""),
                     container_extension=ep.get("container_extension", "mp4"),
+                    monitor_canonical=_series_monitor_canon,
                 )
                 self._download_cart.append(item)
                 added_items.append(item)
@@ -842,6 +909,7 @@ class CartService:
                 icon=data.get("icon", ""),
                 group=data.get("group", ""),
                 container_extension=data.get("container_extension", "mp4"),
+                monitor_canonical=_series_monitor_canon,
             )
             self._download_cart.append(item)
             added_items.append(item)
@@ -878,6 +946,9 @@ class CartService:
             "error": None,
             "file_path": None,
             "file_size": None,
+            "monitor_canonical": kwargs.get("monitor_canonical"),
+            "expected_size": kwargs.get("expected_size"),
+            "retried_once": kwargs.get("retried_once", False),
         }
 
     def cancel_download(self) -> bool:
@@ -963,8 +1034,6 @@ class CartService:
             item["status"] = "downloading"
             item["progress"] = 0
             self.save_cart()
-            if getattr(self, 'log_service', None):
-                await getattr(self, 'log_service', None).log("cart", "info", f"Download started: {item.get('name', 'Unknown')}")
 
             upstream_url = self.build_upstream_url(item)
             if not upstream_url:
@@ -977,10 +1046,44 @@ class CartService:
 
             # Enrich item name from upstream metadata (title, year) before
             # building the file path so directories/filenames are canonical.
+            _pre_enrich_name = item.get("series_name")
             await self._enrich_item_name_from_metadata(item)
+            _post_enrich_name = item.get("series_name")
 
             file_path = self.build_download_filepath(item)
             item["file_path"] = file_path
+
+            if getattr(self, 'log_service', None):
+                _src = self.config_service.get_source_by_id(item.get("source_id", ""))
+                _src_name = _src.get("name", item.get("source_id", "")) if _src else item.get("source_id", "")
+                _log_details: dict = {
+                    "source": _src_name,
+                    "source_id": item.get("source_id", ""),
+                    "path": file_path,
+                }
+                if item.get("content_type") == "series":
+                    _log_details["series_name"] = _post_enrich_name
+                    _log_details["monitor_canonical"] = item.get("monitor_canonical")
+                    _log_details["name_changed_by_enrichment"] = _pre_enrich_name != _post_enrich_name
+                    await getattr(self, 'log_service', None).log(
+                        "cart", "info",
+                        f"Download started: '{_post_enrich_name}' S{item.get('season', '?')}E{item.get('episode_num', '?')} — {_src_name}",
+                        _log_details,
+                    )
+                else:
+                    await getattr(self, 'log_service', None).log(
+                        "cart", "info",
+                        f"Download started: {item.get('name', 'Unknown')} — {_src_name}",
+                        _log_details,
+                    )
+
+            if item.get("content_type") == "series":
+                logger.info(
+                    f"[DOWNLOAD] series_name: '{_post_enrich_name}' "
+                    f"(monitor_canonical={item.get('monitor_canonical')!r}), "
+                    f"changed={'yes' if _pre_enrich_name != _post_enrich_name else 'no'}, "
+                    f"path={file_path}"
+                )
             temp_dir = self.config_service.get_download_temp_path()
             temp_filename = f"{item['id']}_{os.path.basename(file_path)}"
             temp_path = os.path.join(temp_dir, temp_filename)
@@ -1028,6 +1131,11 @@ class CartService:
                         self._download_progress["pause_remaining"] = delay
                         item["error"] = f"Retrying in {delay}s ({attempt}/{max_retries})"
                         self.save_cart()
+                        if getattr(self, 'log_service', None):
+                            await getattr(self, 'log_service', None).log("cart", "warning",
+                                f"Retry {attempt}/{max_retries}: {item.get('name', 'Unknown')}",
+                                {"attempt": attempt, "max_retries": max_retries, "delay_seconds": delay,
+                                 "downloaded": downloaded, "expected": total})
                         remaining = delay
                         while remaining > 0:
                             if self._download_cancel_event.is_set():
@@ -1055,18 +1163,55 @@ class CartService:
                                 if response.status_code in RETRYABLE_CODES and attempt < max_retries:
                                     break
                                 if response.status_code >= 400:
-                                    item["status"] = "failed"
-                                    item["error"] = f"HTTP {response.status_code}"
-                                    self.save_cart()
-                                    await self.notification_service.send_download_file_notification(item)
+                                    if not item.get("retried_once") and response.status_code not in RETRYABLE_CODES:
+                                        # Auto-retry once for non-retryable HTTP errors
+                                        item["retried_once"] = True
+                                        item["status"] = "queued"
+                                        item["error"] = f"Retrying: HTTP {response.status_code}"
+                                        self.save_cart()
+                                        if getattr(self, 'log_service', None):
+                                            await getattr(self, 'log_service', None).log("cart", "warning",
+                                                f"Auto-retry (HTTP {response.status_code}): {item.get('name', 'Unknown')}",
+                                                {"http_status": response.status_code})
+                                        download_failed = True
+                                        break
+                                    else:
+                                        item["status"] = "failed"
+                                        item["error"] = f"HTTP {response.status_code}"
+                                        self.save_cart()
+                                        if getattr(self, 'log_service', None):
+                                            await getattr(self, 'log_service', None).log("cart", "error",
+                                                f"Download failed: {item.get('name', 'Unknown')} — HTTP {response.status_code}",
+                                                {"http_status": response.status_code})
+                                        await self.notification_service.send_download_file_notification(item)
+                                        try:
+                                            if os.path.exists(temp_path):
+                                                os.remove(temp_path)
+                                        except OSError:
+                                            pass
+                                        download_failed = True
+                                        break
+                                item["error"] = None
+
+                                # When resuming (downloaded > 0), verify the server
+                                # actually honoured the Range request.  A 200 OK means
+                                # the server is re-sending the entire file; appending
+                                # that onto the existing partial temp file would produce
+                                # a corrupted (doubled) file.  Reset and start fresh.
+                                if downloaded > 0 and response.status_code == 200:
+                                    logger.warning(
+                                        "[DOWNLOAD] Server returned 200 for Range request "
+                                        "(expected 206). Truncating temp file and restarting "
+                                        "download for '%s'.", item.get("name"),
+                                    )
                                     try:
-                                        if os.path.exists(temp_path):
-                                            os.remove(temp_path)
+                                        with open(temp_path, "wb"):
+                                            pass  # truncate
                                     except OSError:
                                         pass
-                                    download_failed = True
-                                    break
-                                item["error"] = None
+                                    downloaded = 0
+                                    total = 0
+
                                 if total == 0:
                                     content_range = response.headers.get("content-range", "")
                                     if content_range and "/" in content_range:
@@ -1077,6 +1222,8 @@ class CartService:
                                     if not total:
                                         total = int(response.headers.get("content-length", 0))
                                     self._download_progress["total_bytes"] = total
+                                    if total > 0:
+                                        item["expected_size"] = total
 
                                 segment_start_time = time.time()
                                 should_reconnect = False
@@ -1170,14 +1317,131 @@ class CartService:
                         break
 
                 if item.get("status") == "downloading" and not download_failed:
+                    # Verify download integrity — exact byte match
+                    if total > 0 and downloaded != total:
+                        logger.warning("[DOWNLOAD] Size mismatch: '%s' downloaded=%d expected=%d", item.get("name"), downloaded, total)
+                        if not item.get("retried_once"):
+                            # Auto-retry once
+                            item["retried_once"] = True
+                            item["status"] = "queued"
+                            item["error"] = f"Retrying: incomplete {downloaded:,}/{total:,} bytes"
+                            item["expected_size"] = total
+                            self.save_cart()
+                            if getattr(self, 'log_service', None):
+                                await getattr(self, 'log_service', None).log("cart", "warning",
+                                    f"Auto-retry (incomplete): {item.get('name', 'Unknown')} — {downloaded:,}/{total:,} bytes",
+                                    {"downloaded": downloaded, "expected": total, "path": file_path})
+                            try:
+                                if os.path.exists(temp_path):
+                                    os.remove(temp_path)
+                            except OSError:
+                                pass
+                            continue
+                        else:
+                            # Already retried — mark as failed
+                            item["status"] = "failed"
+                            item["error"] = (
+                                f"Incomplete: {downloaded:,}/{total:,} bytes "
+                                f"({round(downloaded / total * 100, 1)}%)"
+                            )
+                            item["expected_size"] = total
+                            self.save_cart()
+                            if getattr(self, 'log_service', None):
+                                await getattr(self, 'log_service', None).log("cart", "error",
+                                    f"Download failed (incomplete after retry): {item.get('name', 'Unknown')} — {downloaded:,}/{total:,} bytes",
+                                    {"downloaded": downloaded, "expected": total, "path": file_path,
+                                     "pct": round(downloaded / total * 100, 1)})
+                            await self.notification_service.send_download_file_notification(item)
+                            try:
+                                if os.path.exists(temp_path):
+                                    os.remove(temp_path)
+                            except OSError:
+                                pass
+                            continue
+
+                    # When the server didn't provide Content-Length (total == 0),
+                    # the byte-count check above is skipped entirely.  As a
+                    # fallback, compare the counter against the actual file size
+                    # on disk to catch append-mode corruption from bad resumes.
+                    if total == 0 and downloaded > 0 and os.path.exists(temp_path):
+                        disk_size = os.path.getsize(temp_path)
+                        if disk_size != downloaded:
+                            logger.warning(
+                                "[DOWNLOAD] Disk size mismatch for '%s': "
+                                "downloaded counter=%d, file on disk=%d",
+                                item.get("name"), downloaded, disk_size,
+                            )
+                            if not item.get("retried_once"):
+                                item["retried_once"] = True
+                                item["status"] = "queued"
+                                item["error"] = f"Retrying: size mismatch (counter={downloaded:,}, disk={disk_size:,})"
+                                self.save_cart()
+                                if getattr(self, 'log_service', None):
+                                    await getattr(self, 'log_service', None).log("cart", "warning",
+                                        f"Auto-retry (disk mismatch): {item.get('name', 'Unknown')} — counter={downloaded:,} disk={disk_size:,}",
+                                        {"downloaded": downloaded, "disk_size": disk_size, "path": file_path})
+                                try:
+                                    os.remove(temp_path)
+                                except OSError:
+                                    pass
+                                continue
+                            else:
+                                item["status"] = "failed"
+                                item["error"] = f"Size mismatch after retry (counter={downloaded:,}, disk={disk_size:,})"
+                                self.save_cart()
+                                if getattr(self, 'log_service', None):
+                                    await getattr(self, 'log_service', None).log("cart", "error",
+                                        f"Download failed (disk mismatch after retry): {item.get('name', 'Unknown')}",
+                                        {"downloaded": downloaded, "disk_size": disk_size, "path": file_path})
+                                await self.notification_service.send_download_file_notification(item)
+                                try:
+                                    os.remove(temp_path)
+                                except OSError:
+                                    pass
+                                continue
+
+                    # Flush OS page cache to disk before moving, so the move
+                    # operation reads fully-written data (critical on CIFS/NFS).
+                    try:
+                        with open(temp_path, "rb") as _f:
+                            os.fsync(_f.fileno())
+                    except OSError as fsync_err:
+                        logger.warning("[DOWNLOAD] fsync failed for '%s': %s", item.get("name"), fsync_err)
+
                     move_ok = await self._move_temp_to_destination(item, temp_path, file_path)
                     if not move_ok:
                         if getattr(self, 'log_service', None):
                             await getattr(self, 'log_service', None).log("cart", "error", f"File move failed: {item.get('name', 'Unknown')}", {"error": item.get("error", "")})
                         continue
+                    # Log move success
+                    if getattr(self, 'log_service', None):
+                        _fs = item.get("file_size", 0)
+                        _es = item.get("expected_size")
+                        _move_details: dict = {"path": file_path, "file_size": _fs}
+                        if _es:
+                            _move_details["expected_size"] = _es
+                            _move_details["size_match"] = _fs == _es
+                        await getattr(self, 'log_service', None).log("cart", "info",
+                            f"File moved: {item.get('name', 'Unknown')} -> {file_path} ({_fs / 1024 / 1024:.1f} MB)",
+                            _move_details)
                     await self._finalize_completed_download(item)
                     if getattr(self, 'log_service', None):
-                        await getattr(self, 'log_service', None).log("cart", "info", f"Download completed: {item.get('name', 'Unknown')}")
+                        _fp = item.get("file_path", "")
+                        _log_done: dict = {"path": _fp, "file_size": item.get("file_size"), "expected_size": item.get("expected_size")}
+                        if item.get("content_type") == "series":
+                            _sname = item.get("series_name", "")
+                            _log_done["series_name"] = _sname
+                            await getattr(self, 'log_service', None).log(
+                                "cart", "info",
+                                f"Download completed: '{_sname}' S{item.get('season', '?')}E{item.get('episode_num', '?')} -> {_fp}",
+                                _log_done,
+                            )
+                        else:
+                            await getattr(self, 'log_service', None).log(
+                                "cart", "info",
+                                f"Download completed: {item.get('name', 'Unknown')} -> {_fp}",
+                                _log_done,
+                            )
 
                 if pause_interval > 0 and pause_duration > 0:
                     self._download_progress["paused"] = True
@@ -1194,17 +1458,37 @@ class CartService:
 
             except Exception as e:
                 logger.error(f"Download error for {item.get('name')}: {e}")
-                item["status"] = "failed"
-                item["error"] = str(e)
-                self.save_cart()
-                if getattr(self, 'log_service', None):
-                    await getattr(self, 'log_service', None).log("cart", "error", f"Download failed: {item.get('name', 'Unknown')}", {"error": str(e)})
-                await self.notification_service.send_download_file_notification(item)
-                try:
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-                except OSError:
-                    pass
+                if not item.get("retried_once"):
+                    # Auto-retry once
+                    item["retried_once"] = True
+                    item["status"] = "queued"
+                    item["error"] = f"Retrying: {str(e)[:100]}"
+                    self.save_cart()
+                    if getattr(self, 'log_service', None):
+                        await getattr(self, 'log_service', None).log("cart", "warning",
+                            f"Auto-retry (error): {item.get('name', 'Unknown')} — {str(e)[:100]}",
+                            {"error": str(e)})
+                    try:
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                    except OSError:
+                        pass
+                    continue
+                else:
+                    # Already retried — mark as failed permanently
+                    item["status"] = "failed"
+                    item["error"] = str(e)
+                    self.save_cart()
+                    if getattr(self, 'log_service', None):
+                        await getattr(self, 'log_service', None).log("cart", "error",
+                            f"Download failed after retry: {item.get('name', 'Unknown')}",
+                            {"error": str(e)})
+                    await self.notification_service.send_download_file_notification(item)
+                    try:
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                    except OSError:
+                        pass
 
         self._download_current_item = None
         self._download_progress = {"bytes_downloaded": 0, "total_bytes": 0, "speed": 0, "paused": False, "pause_remaining": 0}
@@ -1290,7 +1574,21 @@ class CartService:
             if not moved:
                 try:
                     shutil.copy2(temp_path, file_path)
-                    moved = True
+                    # Verify data integrity after copy — partial hash of first+last 1 MB
+                    src_hash = _partial_file_hash(temp_path)
+                    dst_hash = _partial_file_hash(file_path)
+                    if src_hash and dst_hash and src_hash != dst_hash:
+                        logger.error(
+                            "[MOVE] Data integrity check failed after copy2 for '%s': "
+                            "src_hash=%s dst_hash=%s", item_name, src_hash[:16], dst_hash[:16],
+                        )
+                        try:
+                            os.remove(file_path)
+                        except OSError:
+                            pass
+                        copy_error = Exception("Partial hash mismatch after copy2")
+                    else:
+                        moved = True
                 except Exception as cexc:
                     copy_error = cexc
                     logger.exception(
@@ -1681,8 +1979,9 @@ class CartService:
         if result.returncode == 0 and os.path.exists(tmp_path):
             tmp_size = os.path.getsize(tmp_path)
             orig_size = os.path.getsize(file_path)
-            # Sanity check: remuxed file should be roughly the same size
-            if tmp_size > orig_size * 0.9:
+            # Sanity check: a copy-remux only changes container overhead, so the
+            # output should be nearly the same size (>99% of the original).
+            if tmp_size > orig_size * 0.99:
                 os.replace(tmp_path, file_path)
                 logger.info(f"[META] Embedded container metadata (ffmpeg): {file_path}")
             else:

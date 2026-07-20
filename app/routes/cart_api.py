@@ -9,9 +9,10 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
-from app.dependencies import get_cart_service, get_config_service, get_xtream_service
+from app.dependencies import get_cart_service, get_config_service, get_log_service, get_xtream_service
 from app.services.cart_service import CartService
 from app.services.config_service import ConfigService
+from app.services.log_service import LogService
 from app.services.xtream_service import XtreamService
 
 router = APIRouter(tags=["cart"])
@@ -129,17 +130,31 @@ async def add_to_cart(
 
 
 @router.delete("/api/cart/{item_id}")
-async def remove_from_cart(item_id: str, cart: CartService = Depends(get_cart_service)):
+async def remove_from_cart(
+    item_id: str,
+    cart: CartService = Depends(get_cart_service),
+    log_service: LogService = Depends(get_log_service),
+):
+    removed_name = "Unknown"
     original_len = len(cart._download_cart)
+    for i in cart._download_cart:
+        if i.get("id") == item_id:
+            removed_name = i.get("name", "Unknown")
+            break
     cart._download_cart[:] = [i for i in cart._download_cart if i.get("id") != item_id]
     if len(cart._download_cart) == original_len:
         return JSONResponse(status_code=404, content={"error": "Item not found"})
     cart.save_cart()
+    await log_service.log("cart", "info", f"Removed from cart: {removed_name}", {"item_id": item_id})
     return {"status": "ok"}
 
 
 @router.post("/api/cart/{item_id}/retry")
-async def retry_cart_item(item_id: str, cart: CartService = Depends(get_cart_service)):
+async def retry_cart_item(
+    item_id: str,
+    cart: CartService = Depends(get_cart_service),
+    log_service: LogService = Depends(get_log_service),
+):
     for item in cart._download_cart:
         if item.get("id") == item_id:
             if item.get("status") not in ("failed", "cancelled", "move_failed"):
@@ -149,14 +164,20 @@ async def retry_cart_item(item_id: str, cart: CartService = Depends(get_cart_ser
             item["error"] = None
             item["file_path"] = None
             item["file_size"] = None
+            item["retried_once"] = False
             item.pop("temp_path", None)
             cart.save_cart()
+            await log_service.log("cart", "info", f"Manual retry: {item.get('name', '')}", {"item_id": item_id})
             return {"status": "ok", "message": f"Re-queued: {item.get('name', '')}"}
     return JSONResponse(status_code=404, content={"error": "Item not found"})
 
 
 @router.post("/api/cart/{item_id}/move")
-async def move_cart_item(item_id: str, cart: CartService = Depends(get_cart_service)):
+async def move_cart_item(
+    item_id: str,
+    cart: CartService = Depends(get_cart_service),
+    log_service: LogService = Depends(get_log_service),
+):
     for item in cart._download_cart:
         if item.get("id") == item_id:
             if item.get("status") != "move_failed":
@@ -169,13 +190,18 @@ async def move_cart_item(item_id: str, cart: CartService = Depends(get_cart_serv
             move_ok = await cart._move_temp_to_destination(item, temp_path, file_path)
             if move_ok:
                 await cart._finalize_completed_download(item)
+                await log_service.log("cart", "info", f"Move retry succeeded: {item.get('name', '')}", {"item_id": item_id})
                 return {"status": "ok", "message": f"Moved successfully: {item.get('name', '')}"}
+            await log_service.log("cart", "error", f"Move retry failed: {item.get('name', '')}", {"item_id": item_id, "error": item.get("error", "")})
             return JSONResponse(status_code=500, content={"error": item.get("error", "Move failed")})
     return JSONResponse(status_code=404, content={"error": "Item not found"})
 
 
 @router.post("/api/cart/retry-all")
-async def retry_all_failed(cart: CartService = Depends(get_cart_service)):
+async def retry_all_failed(
+    cart: CartService = Depends(get_cart_service),
+    log_service: LogService = Depends(get_log_service),
+):
     count = 0
     for item in cart._download_cart:
         if item.get("status") in ("failed", "cancelled", "move_failed"):
@@ -184,14 +210,20 @@ async def retry_all_failed(cart: CartService = Depends(get_cart_service)):
             item["error"] = None
             item["file_path"] = None
             item["file_size"] = None
+            item["retried_once"] = False
             item.pop("temp_path", None)
             count += 1
     cart.save_cart()
+    await log_service.log("cart", "info", f"Retry all: {count} item(s) re-queued", {"count": count})
     return {"status": "ok", "retried": count}
 
 
 @router.post("/api/cart/clear")
-async def clear_cart(request: Request, cart: CartService = Depends(get_cart_service)):
+async def clear_cart(
+    request: Request,
+    cart: CartService = Depends(get_cart_service),
+    log_service: LogService = Depends(get_log_service),
+):
     data = await request.json()
     mode = data.get("mode", "completed")
     dl = cart._download_cart
@@ -204,6 +236,7 @@ async def clear_cart(request: Request, cart: CartService = Depends(get_cart_serv
     elif mode == "finished":
         dl[:] = [i for i in dl if i.get("status") not in ("completed", "failed", "cancelled", "move_failed")]
     cart.save_cart()
+    await log_service.log("cart", "info", f"Cart cleared (mode={mode})", {"mode": mode, "remaining": len(dl)})
     return {"status": "ok", "remaining": len(dl)}
 
 
@@ -211,6 +244,7 @@ async def clear_cart(request: Request, cart: CartService = Depends(get_cart_serv
 async def start_downloads(
     cart: CartService = Depends(get_cart_service),
     cfg: ConfigService = Depends(get_config_service),
+    log_service: LogService = Depends(get_log_service),
 ):
     queued = [i for i in cart._download_cart if i.get("status") == "queued"]
     if not queued:
@@ -224,13 +258,18 @@ async def start_downloads(
         return JSONResponse(status_code=500, content={"error": f"Cannot create download directory: {e}"})
     cart._force_started = True
     cart._download_task = asyncio.create_task(cart.download_worker())
+    await log_service.log("cart", "info", f"Download started manually: {len(queued)} item(s)", {"count": len(queued)})
     return {"status": "ok", "message": f"Started downloading {len(queued)} items"}
 
 
 @router.post("/api/cart/cancel")
-async def cancel_download(cart: CartService = Depends(get_cart_service)):
+async def cancel_download(
+    cart: CartService = Depends(get_cart_service),
+    log_service: LogService = Depends(get_log_service),
+):
     if cart._download_cancel_event:
         cart._download_cancel_event.set()
+        await log_service.log("cart", "warning", "Download cancellation requested")
         return {"status": "ok", "message": "Download cancellation requested"}
     return JSONResponse(status_code=400, content={"error": "No active download"})
 

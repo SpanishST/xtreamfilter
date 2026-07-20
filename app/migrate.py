@@ -127,7 +127,7 @@ def _migrate_api_cache(conn: sqlite3.Connection, data_dir: str) -> int:
                 cat_id = str(cat.get("category_id", ""))
                 cat_name = cat.get("category_name", "")
                 cat_rows.append((
-                    source_id, content_type, cat_id, cat_name, json.dumps(cat),
+                    source_id, content_type, cat_id, cat_name, json.dumps(cat, ensure_ascii=False),
                 ))
 
         # Streams
@@ -144,7 +144,7 @@ def _migrate_api_cache(conn: sqlite3.Connection, data_dir: str) -> int:
                 except (ValueError, TypeError):
                     added = 0
                 stream_rows.append((
-                    source_id, content_type, stream_id, name, category_id, added, json.dumps(stream),
+                    source_id, content_type, stream_id, name, category_id, added, json.dumps(stream, ensure_ascii=False),
                 ))
 
     conn.executemany(

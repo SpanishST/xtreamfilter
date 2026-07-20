@@ -678,7 +678,7 @@ class CacheService:
                             source_id, ct,
                             str(cat.get("category_id", "")),
                             cat.get("category_name", ""),
-                            json.dumps(cat),
+                            json.dumps(cat, ensure_ascii=False),
                         ))
                 if cat_rows:
                     conn.executemany(
@@ -704,7 +704,7 @@ class CacheService:
                             stream.get("name", ""),
                             str(stream.get("category_id", "")),
                             added,
-                            json.dumps(stream),
+                            json.dumps(stream, ensure_ascii=False),
                         ))
                 if stream_rows:
                     conn.executemany(
@@ -779,7 +779,7 @@ class CacheService:
                             source_id, ct,
                             str(cat.get("category_id", "")),
                             cat.get("category_name", ""),
-                            json.dumps(cat),
+                            json.dumps(cat, ensure_ascii=False),
                         ))
                 if cat_rows:
                     await conn.executemany(
@@ -805,7 +805,7 @@ class CacheService:
                             stream.get("name", ""),
                             str(stream.get("category_id", "")),
                             added,
-                            json.dumps(stream),
+                            json.dumps(stream, ensure_ascii=False),
                         ))
                 if stream_rows:
                     await conn.executemany(

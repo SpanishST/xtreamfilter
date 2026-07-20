@@ -93,4 +93,5 @@ ICON_EMOJI_MAP = {
     "check": "✅",
     "play": "▶️",
     "list": "📋",
+    "game": "🎮",
 }

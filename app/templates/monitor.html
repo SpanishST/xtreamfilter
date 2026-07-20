@@ -98,6 +98,26 @@
         .check-status { display: flex; align-items: center; gap: 10px; font-size: 0.85em; color: #888; }
         .check-status .checking { color: #00d4ff; }
 
+        /* Re-download modal */
+        #redownload-modal .modal { max-width: min(750px, 95vw); }
+        #rd-source-select option { background: #1a1a2e; color: #fff; padding: 8px; }
+        .rd-episodes { max-height: 350px; overflow-y: auto; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; }
+        .rd-season-group { border-bottom: 1px solid rgba(255,255,255,0.05); }
+        .rd-season-group:last-child { border-bottom: none; }
+        .rd-season-header { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: rgba(0,0,0,0.2); cursor: pointer; user-select: none; }
+        .rd-season-header:hover { background: rgba(0,0,0,0.3); }
+        .rd-season-header input[type=checkbox] { width: 15px; height: 15px; accent-color: #a29bfe; cursor: pointer; flex-shrink: 0; }
+        .rd-season-header .rd-season-label { font-weight: 600; color: #00d4ff; font-size: 0.9em; }
+        .rd-season-header .rd-season-count { font-size: 0.78em; color: #888; margin-left: auto; }
+        .rd-ep-row { display: flex; align-items: center; gap: 10px; padding: 7px 14px 7px 38px; border-top: 1px solid rgba(255,255,255,0.03); transition: background 0.15s; }
+        .rd-ep-row:hover { background: rgba(255,255,255,0.03); }
+        .rd-ep-row input[type=checkbox] { width: 14px; height: 14px; accent-color: #a29bfe; cursor: pointer; flex-shrink: 0; }
+        .rd-ep-row .rd-ep-num { color: #888; min-width: 60px; font-size: 0.85em; }
+        .rd-ep-row .rd-ep-title { flex: 1; font-size: 0.88em; color: #ccc; }
+        .rd-ep-row .rd-ep-status { font-size: 0.75em; padding: 2px 7px; border-radius: 10px; }
+        .rd-summary { display: flex; align-items: center; gap: 12px; padding: 12px; background: rgba(0,0,0,0.2); border-radius: 8px; margin-top: 12px; font-size: 0.88em; color: #888; }
+        .rd-summary strong { color: #00d4ff; }
+
         /* Edit modal form styles */
         .edit-form .form-group { margin-bottom: 18px; }
         .edit-form .form-group label { display: block; font-size: 0.85em; color: #888; margin-bottom: 8px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -128,6 +148,9 @@
         .edit-form .source-select-all { display: flex; align-items: center; gap: 8px; padding: 4px 12px; margin-bottom: 2px; cursor: pointer; user-select: none; }
         .edit-form .source-select-all input[type=checkbox] { width: 14px; height: 14px; flex-shrink: 0; accent-color: #a29bfe; cursor: pointer; }
         .edit-form .source-select-all span { font-size: 0.78em; color: #a29bfe; font-weight: 500; }
+        .edit-form .source-check-item.source-available { background: rgba(0, 212, 255, 0.04); border-color: rgba(0, 212, 255, 0.15); }
+        .edit-form .source-check-item.source-available .src-name { color: #b0c4de; }
+        .edit-form .source-check-item .src-new-badge { font-size: 0.68em; color: #00d4ff; background: rgba(0, 212, 255, 0.12); border-radius: 4px; padding: 1px 5px; margin-left: 6px; white-space: nowrap; }
 
         @media (max-width: 768px) {
             .series-grid { grid-template-columns: 1fr; }
@@ -410,6 +433,38 @@
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closePreviewModal()">Close</button>
+                <button class="btn btn-primary" id="preview-redownload-btn" onclick="openRedownloadFromPreview()" style="display:none;">Re-download</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Re-download Modal -->
+    <div class="modal-overlay" id="redownload-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 id="rd-modal-title">Re-download Episodes</h2>
+                <button class="modal-close" onclick="closeRedownloadModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Source</label>
+                    <div class="rd-source-list" id="rd-source-list">
+                        <!-- populated by JS -->
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Episodes</label>
+                    <div class="rd-episodes" id="rd-episodes">
+                        <!-- populated by JS -->
+                    </div>
+                </div>
+                <div class="rd-summary" id="rd-summary">
+                    Select episodes to re-download
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeRedownloadModal()">Cancel</button>
+                <button class="btn btn-primary" id="rd-submit-btn" onclick="submitRedownload()">Download selected</button>
             </div>
         </div>
     </div>
@@ -838,8 +893,9 @@
                 o.classList.toggle('selected', o.dataset.action === (entry.action || 'both'));
             });
 
-            // Build source checkboxes
+            // Build source checkboxes (current sources immediately, then enrich with available)
             _buildEditSourceList(entry);
+            _fetchAvailableSources(entry);
 
             // Build custom category channels (series type)
             _buildCustomCatSection('edit-series-custom-cats', 'series', entry.custom_category_ids || []);
@@ -876,7 +932,7 @@
             if (editBackfillGroup) editBackfillGroup.style.display = (action === 'notify') ? 'none' : 'block';
         }
 
-        function _buildEditSourceList(entry) {
+        function _buildEditSourceList(entry, availableMatches) {
             const container = document.getElementById('edit-source-options');
 
             // Build flat list: prefer monitor_sources, fall back to legacy source_id
@@ -891,7 +947,13 @@
                     series_name: '',
                   }] : []);
 
-            if (effectiveSources.length === 0) {
+            // Collect source_ids already monitored
+            const monitoredIds = new Set(effectiveSources.map(s => s.source_id));
+
+            // Filter available matches to only those NOT already monitored
+            const extraSources = (availableMatches || []).filter(m => !monitoredIds.has(m.source_id));
+
+            if (effectiveSources.length === 0 && extraSources.length === 0) {
                 container.innerHTML = '<span style="color:#888;font-size:0.85em;padding:6px 12px;">No explicit sources — searches all sources automatically (filtered by custom categories if selected).</span>';
                 return;
             }
@@ -902,6 +964,7 @@
                 '<span>Select / deselect all</span>' +
                 '</label>';
 
+            // Currently monitored sources (checked)
             for (const ms of effectiveSources) {
                 const cat = ms.category || '';
                 const sn = ms.series_name || '';
@@ -919,7 +982,62 @@
                     '</label>';
             }
 
+            // Available sources found in other providers (unchecked)
+            for (const m of extraSources) {
+                const cat = '';
+                const sn = m.name || '';
+                html += '<label class="source-check-item source-available">' +
+                    '<input type="checkbox" class="edit-src-specific"' +
+                    ' data-source-id="' + escapeAttr(m.source_id) + '"' +
+                    ' data-series-ref="' + escapeAttr(m.series_ref || '') + '"' +
+                    ' data-source-name="' + escapeAttr(m.source_name || '') + '"' +
+                    ' data-category="' + escapeAttr(cat) + '"' +
+                    ' data-series-name="' + escapeAttr(sn) + '"' +
+                    ' onchange="_onEditSrcChange()">' +
+                    '<span class="src-name">' + escapeHtml(m.source_name || m.source_id) + '</span>' +
+                    '<span class="src-new-badge">available</span>' +
+                    (sn ? '<span class="src-series">' + escapeHtml(sn) + '</span>' : '') +
+                    '</label>';
+            }
+
             container.innerHTML = html;
+        }
+
+        async function _fetchAvailableSources(entry) {
+            const name = entry.series_name || entry.canonical_name || '';
+            const tmdbId = entry.tmdb_id || '';
+            const imdbId = entry.imdb_id || '';
+            if (!name && !tmdbId && !imdbId) return;
+
+            const container = document.getElementById('edit-source-options');
+            const loadingRow = document.createElement('div');
+            loadingRow.id = 'edit-src-loading';
+            loadingRow.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 12px;color:#888;font-size:0.82em;';
+            loadingRow.innerHTML = '<span class="loading-spinner" style="width:12px;height:12px;border-width:2px;display:inline-block;"></span>Searching other sources…';
+            container.appendChild(loadingRow);
+
+            try {
+                const params = new URLSearchParams();
+                if (name) params.set('name', name);
+                if (tmdbId) params.set('tmdb_id', String(tmdbId));
+                if (imdbId) params.set('imdb_id', String(imdbId));
+
+                const resp = await fetch('/api/monitor/series-lookup?' + params.toString());
+                if (!resp.ok) return;
+                const data = await resp.json();
+
+                // Only re-render if we're still editing the same entry
+                if (_editModalId === entry.id && data.results && data.results.length > 0) {
+                    _buildEditSourceList(entry, data.results);
+                } else {
+                    // Remove loading row if no results to show
+                    const lr = document.getElementById('edit-src-loading');
+                    if (lr) lr.remove();
+                }
+            } catch (_) {
+                const lr = document.getElementById('edit-src-loading');
+                if (lr) lr.remove();
+            }
         }
 
         function _onEditSelectAllToggle(checkbox) {
@@ -1000,11 +1118,17 @@
             }
         }
 
+        // Re-download state
+        let _rdMonitorId = null;
+        let _rdMonitorEntry = null;
+        let _rdPreviewEpisodes = [];
+
         async function previewEpisodes(id, name) {
             const modal = document.getElementById('preview-modal');
             document.getElementById('preview-modal-title').textContent = 'Preview: ' + name;
             document.getElementById('preview-summary').textContent = 'Loading...';
             document.getElementById('preview-list').innerHTML = '<div style="text-align:center; padding:30px;"><div class="loading-spinner"></div></div>';
+            document.getElementById('preview-redownload-btn').style.display = 'none';
             modal.classList.add('show');
 
             try {
@@ -1018,6 +1142,11 @@
                     throw new Error(errMsg);
                 }
                 const data = await resp.json();
+
+                // Store data for re-download
+                _rdMonitorId = id;
+                _rdPreviewEpisodes = data.episodes || [];
+                _rdMonitorEntry = (monitoredSeries || []).find(e => e.id === id) || null;
 
                 document.getElementById('preview-summary').innerHTML =
                     'Total: <strong>' + data.episodes.length + '</strong> episodes — ' +
@@ -1048,6 +1177,10 @@
                     html += '</div>';
                 }
                 document.getElementById('preview-list').innerHTML = html;
+
+                // Show re-download button if there are known or downloaded episodes
+                const hasReDownloadable = data.episodes.some(ep => ep.status === 'known' || ep.status === 'downloaded');
+                document.getElementById('preview-redownload-btn').style.display = hasReDownloadable ? '' : 'none';
             } catch (e) {
                 document.getElementById('preview-summary').textContent = '';
                 document.getElementById('preview-list').innerHTML = '<p style="color:#ff4757">Error loading preview: ' + escapeHtml(e.message) + '</p>';
@@ -1056,6 +1189,176 @@
 
         function closePreviewModal() {
             document.getElementById('preview-modal').classList.remove('show');
+        }
+
+        // ── Re-download modal ──────────────────────────────────────────────
+
+        function openRedownloadFromPreview() {
+            if (!_rdMonitorId || !_rdMonitorEntry) {
+                showToast('Monitor data not loaded', 'error');
+                return;
+            }
+            closePreviewModal();
+            openRedownloadModal(_rdMonitorId, _rdMonitorEntry, _rdPreviewEpisodes);
+        }
+
+        function openRedownloadModal(id, entry, episodes) {
+            document.getElementById('rd-modal-title').textContent = 'Re-download: ' + (entry.canonical_name || entry.series_name);
+
+            // Populate sources
+            const srcContainer = document.getElementById('rd-source-list');
+            const mSources = entry.monitor_sources || [];
+            const effectiveSources = mSources.length > 0
+                ? mSources
+                : (entry.source_id ? [{
+                    source_id: entry.source_id,
+                    series_ref: entry.series_id || '',
+                    source_name: entry.source_name || entry.source_id,
+                    category: entry.source_category || '',
+                  }] : []);
+
+            if (effectiveSources.length === 0) {
+                srcContainer.innerHTML = '<span style="color:#888;font-size:0.85em;">No sources configured</span>';
+            } else {
+                let srcHtml = '<select id="rd-source-select" style="width:100%;padding:10px 12px;background:#1a1a2e;border:1px solid rgba(255,255,255,0.15);border-radius:8px;color:#fff;font-size:0.9em;outline:none;">';
+                for (const s of effectiveSources) {
+                    const cat = s.category || '';
+                    const sname = s.series_name || '';
+                    let extra = cat || sname || '';
+                    const label = escapeHtml(s.source_name || s.source_id) + (extra ? ' — ' + escapeHtml(extra) : '');
+                    srcHtml += '<option value="' + escapeAttr(s.source_id) + '"' +
+                        ' data-series-ref="' + escapeAttr(s.series_ref || '') + '">' +
+                        label + '</option>';
+                }
+                srcHtml += '</select>';
+                srcContainer.innerHTML = srcHtml;
+            }
+
+            // Populate episodes (only known or downloaded)
+            const epContainer = document.getElementById('rd-episodes');
+            const reDownloadable = (episodes || []).filter(ep => ep.status === 'known' || ep.status === 'downloaded');
+
+            if (reDownloadable.length === 0) {
+                epContainer.innerHTML = '<div style="padding:20px;text-align:center;color:#888;">No episodes available for re-download</div>';
+            } else {
+                const seasons = {};
+                for (const ep of reDownloadable) {
+                    const s = ep.season || '?';
+                    if (!seasons[s]) seasons[s] = [];
+                    seasons[s].push(ep);
+                }
+
+                let epHtml = '';
+                const sortedSeasons = Object.keys(seasons).sort((a, b) => parseInt(a) - parseInt(b));
+                for (const sNum of sortedSeasons) {
+                    const eps = seasons[sNum];
+                    epHtml += '<div class="rd-season-group" data-season="' + sNum + '">';
+                    epHtml += '<div class="rd-season-header" onclick="rdToggleSeason(this)">' +
+                        '<input type="checkbox" onclick="event.stopPropagation(); rdToggleSeason(this.parentElement)">' +
+                        '<span class="rd-season-label">Season ' + sNum + '</span>' +
+                        '<span class="rd-season-count">' + eps.length + ' episodes</span>' +
+                        '</div>';
+                    for (const ep of eps) {
+                        const statusClass = 'ep-status-' + ep.status;
+                        const statusLabel = ep.status === 'downloaded' ? 'Downloaded' : 'Known';
+                        epHtml += '<div class="rd-ep-row">' +
+                            '<input type="checkbox" class="rd-ep-check"' +
+                            ' data-season="' + escapeAttr(ep.season) + '"' +
+                            ' data-episode-num="' + escapeAttr(ep.episode_num) + '">' +
+                            '<span class="rd-ep-num">S' + String(ep.season).padStart(2, '0') + 'E' + String(ep.episode_num).padStart(2, '0') + '</span>' +
+                            '<span class="rd-ep-title">' + escapeHtml(ep.title || 'Episode ' + ep.episode_num) + '</span>' +
+                            '<span class="rd-ep-status ep-status ' + statusClass + '">' + statusLabel + '</span>' +
+                            '</div>';
+                    }
+                    epHtml += '</div>';
+                }
+                epContainer.innerHTML = epHtml;
+            }
+
+            rdUpdateSummary();
+            document.getElementById('redownload-modal').classList.add('show');
+        }
+
+        function closeRedownloadModal() {
+            document.getElementById('redownload-modal').classList.remove('show');
+        }
+
+        function rdToggleSeason(header) {
+            const group = header.closest('.rd-season-group');
+            const checkboxes = group.querySelectorAll('.rd-ep-check');
+            const seasonCb = header.querySelector('input[type=checkbox]');
+            const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+            const newState = !allChecked;
+            checkboxes.forEach(cb => cb.checked = newState);
+            seasonCb.checked = newState;
+            rdUpdateSummary();
+        }
+
+        function rdUpdateSummary() {
+            const checked = document.querySelectorAll('.rd-ep-check:checked');
+            document.getElementById('rd-summary').innerHTML =
+                '<strong>' + checked.length + '</strong> episode(s) selected for re-download';
+            document.getElementById('rd-submit-btn').disabled = checked.length === 0;
+        }
+
+        // Delegate change events on episode checkboxes
+        document.addEventListener('change', function(e) {
+            if (e.target.classList.contains('rd-ep-check')) {
+                // Update season header checkbox
+                const group = e.target.closest('.rd-season-group');
+                if (group) {
+                    const allCbs = group.querySelectorAll('.rd-ep-check');
+                    const seasonCb = group.querySelector('.rd-season-header input[type=checkbox]');
+                    if (seasonCb) seasonCb.checked = Array.from(allCbs).every(cb => cb.checked);
+                }
+                rdUpdateSummary();
+            }
+        });
+
+        async function submitRedownload() {
+            const select = document.getElementById('rd-source-select');
+            if (!select || !select.value) {
+                showToast('Select a source', 'error');
+                return;
+            }
+
+            const sourceId = select.value;
+            const checkedEps = document.querySelectorAll('.rd-ep-check:checked');
+            if (checkedEps.length === 0) {
+                showToast('Select at least one episode', 'error');
+                return;
+            }
+
+            const episodes = Array.from(checkedEps).map(cb => ({
+                season: cb.dataset.season,
+                episode_num: parseInt(cb.dataset.episodeNum, 10),
+            }));
+
+            const btn = document.getElementById('rd-submit-btn');
+            const origHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<div class="loading-spinner"></div> Queueing...';
+
+            try {
+                const resp = await fetch('/api/monitor/' + _rdMonitorId + '/redownload', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ source_id: sourceId, episodes: episodes }),
+                });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    throw new Error(data.error || 'Server error');
+                }
+                let msg = data.queued + ' episode(s) queued for download';
+                if (data.skipped_in_cart > 0) msg += ', ' + data.skipped_in_cart + ' already in cart';
+                showToast(msg, 'success');
+                closeRedownloadModal();
+            } catch (e) {
+                showToast('Error: ' + e.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
+            }
         }
 
         function formatRelativeTime(value) {
@@ -1139,8 +1442,10 @@
         let _vodCategoriesCache = null;   // {by_source: {}, sources: []}
         let _customCategoriesCache = null; // [{id, name, icon, content_types}]
         const _iconMap = {
-            'folder': '📁', 'heart': '❤️', 'star': '⭐', 'film': '🎬', 'tv': '📺',
-            'game': '🎮', 'music': '🎵', 'sport': '🏀', 'fire': '🔥', 'bookmark': '🔖'
+            'folder': '📁', 'heart': '❤️', 'star': '⭐', 'fire': '🔥', 'clock': '🕐',
+            'film': '🎬', 'tv': '📺', 'music': '🎵', 'sports': '⚽', 'news': '📰',
+            'kids': '👶', 'bookmark': '🔖', 'tag': '🏷️', 'check': '✅', 'play': '▶️',
+            'list': '📋', 'game': '🎮'
         };
 
         document.addEventListener('DOMContentLoaded', function() {

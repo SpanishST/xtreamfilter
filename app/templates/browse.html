@@ -432,13 +432,20 @@
                             <div class="icon-option selected" data-icon="folder">📁</div>
                             <div class="icon-option" data-icon="heart">❤️</div>
                             <div class="icon-option" data-icon="star">⭐</div>
+                            <div class="icon-option" data-icon="fire">🔥</div>
+                            <div class="icon-option" data-icon="clock">🕐</div>
                             <div class="icon-option" data-icon="film">🎬</div>
                             <div class="icon-option" data-icon="tv">📺</div>
-                            <div class="icon-option" data-icon="game">🎮</div>
                             <div class="icon-option" data-icon="music">🎵</div>
-                            <div class="icon-option" data-icon="sport">🏀</div>
-                            <div class="icon-option" data-icon="fire">🔥</div>
+                            <div class="icon-option" data-icon="sports">⚽</div>
+                            <div class="icon-option" data-icon="news">📰</div>
+                            <div class="icon-option" data-icon="kids">👶</div>
                             <div class="icon-option" data-icon="bookmark">🔖</div>
+                            <div class="icon-option" data-icon="tag">🏷️</div>
+                            <div class="icon-option" data-icon="check">✅</div>
+                            <div class="icon-option" data-icon="play">▶️</div>
+                            <div class="icon-option" data-icon="list">📋</div>
+                            <div class="icon-option" data-icon="game">🎮</div>
                         </div>
                     </div>
                 </div>
@@ -1373,8 +1380,10 @@
         let _pendingCategoryId = null;
 
         const iconMap = {
-            'folder': '📁', 'heart': '❤️', 'star': '⭐', 'film': '🎬', 'tv': '📺',
-            'game': '🎮', 'music': '🎵', 'sport': '🏀', 'fire': '🔥', 'bookmark': '🔖'
+            'folder': '📁', 'heart': '❤️', 'star': '⭐', 'fire': '🔥', 'clock': '🕐',
+            'film': '🎬', 'tv': '📺', 'music': '🎵', 'sports': '⚽', 'news': '📰',
+            'kids': '👶', 'bookmark': '🔖', 'tag': '🏷️', 'check': '✅', 'play': '▶️',
+            'list': '📋', 'game': '🎮'
         };
 
         document.addEventListener('DOMContentLoaded', function() {
@@ -2491,6 +2500,7 @@
         async function addAllEpisodesToCart() {
             const d = _episodeModalData;
             const folderName = document.getElementById('episode-series-name').value.trim() || d.seriesName;
+            const canonName = _findMonitoredCanonical(d.sourceId, d.seriesId, d.seriesName);
             try {
                 const resp = await fetch('/api/cart', {
                     method: 'POST',
@@ -2502,6 +2512,7 @@
                         add_mode: 'series',
                         name: folderName,
                         series_name: folderName,
+                        monitor_canonical: canonName || null,
                         icon: d.icon,
                         group: d.group
                     })
@@ -2520,6 +2531,7 @@
         async function addSeasonToCart(seasonNum) {
             const d = _episodeModalData;
             const folderName = document.getElementById('episode-series-name').value.trim() || d.seriesName;
+            const canonName = _findMonitoredCanonical(d.sourceId, d.seriesId, d.seriesName);
             try {
                 const resp = await fetch('/api/cart', {
                     method: 'POST',
@@ -2532,6 +2544,7 @@
                         season_num: seasonNum,
                         name: folderName,
                         series_name: folderName,
+                        monitor_canonical: canonName || null,
                         icon: d.icon,
                         group: d.group
                     })
@@ -2549,6 +2562,7 @@
         async function addSelectedEpisodesToCart() {
             const d = _episodeModalData;
             const folderName = document.getElementById('episode-series-name').value.trim() || d.seriesName;
+            const canonName = _findMonitoredCanonical(d.sourceId, d.seriesId, d.seriesName);
             const checked = document.querySelectorAll('#episode-list input[type="checkbox"]:checked');
             if (checked.length === 0) { showToast('No episodes selected', 'info'); return; }
 
@@ -2566,6 +2580,7 @@
                             series_id: d.seriesId,
                             name: cb.dataset.title || 'Episode ' + cb.dataset.epNum,
                             series_name: folderName,
+                            monitor_canonical: canonName || null,
                             season: cb.dataset.season,
                             episode_num: parseInt(cb.dataset.epNum),
                             episode_title: cb.dataset.title,

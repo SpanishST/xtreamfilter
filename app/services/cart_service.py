@@ -755,16 +755,26 @@ class CartService:
                             item["series_name"] = monitor_canon
                             logger.info(f"[META] Using monitored canonical name: '{monitor_canon}'")
                         else:
-                            # Fall back to metadata title (strips provider prefixes)
-                            meta_title = _str_val(
-                                info.get("name") or info.get("title")
-                            ).strip()
-                            if meta_title:
-                                year = _extract_year(info)
-                                if year and year not in meta_title:
-                                    meta_title = f"{meta_title} ({year})"
-                                item["series_name"] = meta_title
-                                logger.info(f"[META] Enriched series name: '{meta_title}'")
+                            # Check if current series_name is a monitored canonical
+                            # name (e.g. set by the user via the UI). If so, don't
+                            # overwrite it with the API metadata title.
+                            _cur_sname = item.get("series_name", "")
+                            _is_monitored_name = (
+                                self.monitor_service is not None
+                                and _cur_sname
+                                and self.monitor_service.resolve_canonical_name_by_series_name(_cur_sname)
+                            )
+                            if not _is_monitored_name:
+                                # Fall back to metadata title (strips provider prefixes)
+                                meta_title = _str_val(
+                                    info.get("name") or info.get("title")
+                                ).strip()
+                                if meta_title:
+                                    year = _extract_year(info)
+                                    if year and year not in meta_title:
+                                        meta_title = f"{meta_title} ({year})"
+                                    item["series_name"] = meta_title
+                                    logger.info(f"[META] Enriched series name: '{meta_title}'")
         except Exception as e:
             logger.debug(f"Could not enrich item name from metadata: {e}")
 
@@ -826,10 +836,18 @@ class CartService:
         # name is always the monitor title, even for manual additions.
         _series_monitor_canon: str | None = None
         if content_type == "series" and self.monitor_service is not None:
-            _src_id = data.get("source_id", "")
-            _ref_id = data.get("series_id", data.get("stream_id", ""))
-            if _src_id and _ref_id:
-                _series_monitor_canon = self.monitor_service.resolve_canonical_name_by_source(_src_id, _ref_id)
+            # Prefer explicit canonical from the frontend (already resolved)
+            _series_monitor_canon = data.get("monitor_canonical") or None
+            if not _series_monitor_canon:
+                _src_id = data.get("source_id", "")
+                _ref_id = data.get("series_id", data.get("stream_id", ""))
+                if _src_id and _ref_id:
+                    _series_monitor_canon = self.monitor_service.resolve_canonical_name_by_source(_src_id, _ref_id)
+            # Final fallback: match by series_name against monitored canonical names
+            if not _series_monitor_canon:
+                _sname = data.get("series_name", "")
+                if _sname:
+                    _series_monitor_canon = self.monitor_service.resolve_canonical_name_by_series_name(_sname)
 
         if content_type == "series" and add_mode in ("series", "season"):
             series_id = data.get("series_id", data.get("stream_id", ""))

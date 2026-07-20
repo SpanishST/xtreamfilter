@@ -384,6 +384,19 @@ class MonitorService:
                     return canon
         return None
 
+    def resolve_canonical_name_by_series_name(self, series_name: str) -> str | None:
+        """Return the user-set canonical_name for a monitored entry whose
+        canonical_name matches *series_name* (case-insensitive, trimmed).
+        Used as a last-resort fallback for manual downloads."""
+        if not series_name:
+            return None
+        norm = series_name.lower().strip()
+        for entry in self._monitored_series:
+            canon = entry.get("canonical_name")
+            if canon and canon.lower().strip() == norm:
+                return canon
+        return None
+
     # ------------------------------------------------------------------
     # Cross-source lookup
     # ------------------------------------------------------------------

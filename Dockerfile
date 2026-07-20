@@ -4,6 +4,9 @@ WORKDIR /src
 
 # Ensure app package is importable regardless of working directory
 ENV PYTHONPATH=/src
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV PYTHONIOENCODING=utf-8
 
 # Install gosu for user switching, ffmpeg for stream remuxing, mkvtoolnix for MKV metadata
 RUN apt-get update \

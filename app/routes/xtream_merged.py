@@ -175,6 +175,9 @@ def _handle_get_streams(action: str, request: Request, enabled_sources, cache: C
         categories = cache.get_cached(cat_key, source_id)
         cat_map = build_category_map(categories)
 
+        # First pass: filter using slim dicts to find matching stream IDs
+        matching_ids: list[str] = []
+        matching_meta: dict[str, dict] = {}  # stream_id -> {virtual_cat_id, custom_cids, epg_prefix}
         for stream in cache.get_cached(stream_key, source_id):
             cat_id = str(stream.get("category_id", ""))
             group_name = cat_map.get(cat_id, "")
@@ -184,21 +187,55 @@ def _handle_get_streams(action: str, request: Request, enabled_sources, cache: C
             if should_include(group_name, group_filters) and should_include(channel_name, channel_filters):
                 virtual_cat_id = str(encode_virtual_id(idx, stream.get("category_id", 0)))
                 if requested_cat_id is None or requested_cat_id == virtual_cat_id:
-                    stream_copy = stream.copy()
-                    stream_copy[id_field] = encode_virtual_id(idx, stream.get(id_field, 0))
-                    stream_copy["category_id"] = virtual_cat_id
-                    stream_copy["category_ids"] = [int(virtual_cat_id)]
-                    if ct == "live":
-                        epg_id = stream.get("epg_channel_id", "")
-                        if epg_id:
-                            stream_copy["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
-                    result.append(stream_copy)
+                    matching_ids.append(stream_id_raw)
+                    matching_meta[stream_id_raw] = {
+                        "virtual_cat_id": virtual_cat_id,
+                        "id_value": encode_virtual_id(idx, stream.get(id_field, 0)),
+                        "epg_prefix": True if ct == "live" else False,
+                    }
 
             cids = custom_item_cats.get((source_id, stream_id_raw), [])
             for cid in cids:
                 if requested_cat_id is None or requested_cat_id == cid:
+                    if stream_id_raw not in matching_meta:
+                        matching_ids.append(stream_id_raw)
+                    matching_meta.setdefault(stream_id_raw, {})["custom_cids"] = matching_meta.get(stream_id_raw, {}).get("custom_cids", [])
+                    matching_meta[stream_id_raw]["custom_cids"].append(cid)
+                    matching_meta[stream_id_raw]["id_value"] = encode_virtual_id(idx, stream.get(id_field, 0))
+
+        # Fetch full data from SQLite in batch
+        full_data = cache.get_streams_full_data_batch(ct, source_id, matching_ids)
+
+        # Second pass: build result from full data
+        seen: set[str] = set()
+        for stream_id_raw in matching_ids:
+            if stream_id_raw in seen:
+                continue
+            seen.add(stream_id_raw)
+            stream = full_data.get(stream_id_raw)
+            if not stream:
+                continue
+            meta = matching_meta.get(stream_id_raw, {})
+            virtual_cat_id = meta.get("virtual_cat_id")
+            id_value = meta.get("id_value", encode_virtual_id(idx, stream.get(id_field, 0)))
+
+            # Add for the main category
+            if virtual_cat_id and (requested_cat_id is None or requested_cat_id == virtual_cat_id):
+                stream_copy = stream.copy()
+                stream_copy[id_field] = id_value
+                stream_copy["category_id"] = virtual_cat_id
+                stream_copy["category_ids"] = [int(virtual_cat_id)]
+                if ct == "live":
+                    epg_id = stream.get("epg_channel_id", "")
+                    if epg_id:
+                        stream_copy["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
+                result.append(stream_copy)
+
+            # Add for custom categories
+            for cid in meta.get("custom_cids", []):
+                if requested_cat_id is None or requested_cat_id == cid:
                     stream_copy = stream.copy()
-                    stream_copy[id_field] = encode_virtual_id(idx, stream.get(id_field, 0))
+                    stream_copy[id_field] = id_value
                     stream_copy["category_id"] = cid
                     stream_copy["category_ids"] = [int(cid)]
                     if ct == "live":

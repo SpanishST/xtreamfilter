@@ -165,6 +165,10 @@ CREATE INDEX IF NOT EXISTS idx_streams_source_ct_cat
     ON streams (source_id, content_type, category_id);
 CREATE INDEX IF NOT EXISTS idx_streams_name_lower
     ON streams (lower(name));
+CREATE INDEX IF NOT EXISTS idx_streams_ct
+    ON streams (content_type);
+CREATE INDEX IF NOT EXISTS idx_streams_ct_added
+    ON streams (content_type, added);
 
 CREATE TABLE IF NOT EXISTS source_categories (
     source_id     TEXT NOT NULL,
@@ -177,6 +181,25 @@ CREATE TABLE IF NOT EXISTS source_categories (
 
 CREATE INDEX IF NOT EXISTS idx_source_cats_source_ct
     ON source_categories (source_id, content_type);
+
+-- ── Full-text search for stream names ────────────────────────────────────
+
+CREATE VIRTUAL TABLE IF NOT EXISTS streams_fts USING fts5(
+    name, content='streams', content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+-- Triggers to keep FTS index in sync with the streams table
+CREATE TRIGGER IF NOT EXISTS streams_ai AFTER INSERT ON streams BEGIN
+    INSERT INTO streams_fts(rowid, name) VALUES (new.rowid, new.name);
+END;
+CREATE TRIGGER IF NOT EXISTS streams_ad AFTER DELETE ON streams BEGIN
+    INSERT INTO streams_fts(streams_fts, rowid, name) VALUES('delete', old.rowid, old.name);
+END;
+CREATE TRIGGER IF NOT EXISTS streams_au AFTER UPDATE ON streams BEGIN
+    INSERT INTO streams_fts(streams_fts, rowid, name) VALUES('delete', old.rowid, old.name);
+    INSERT INTO streams_fts(rowid, name) VALUES (new.rowid, new.name);
+END;
 
 -- ── Refresh progress ───────────────────────────────────────────────────────
 

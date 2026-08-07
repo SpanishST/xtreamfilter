@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -172,9 +171,6 @@ async def api_browse(
     if use_source_filters:
         sources_config = {s.get("id"): s for s in cfg.config.get("sources", [])}
 
-    current_time = int(time.time())
-    news_cutoff = current_time - (news_days * 86400) if news_days > 0 else 0
-
     # Determine which content types to query
     cat_data = None
     category_item_sets: dict[str, set[tuple]] = {}
@@ -211,99 +207,126 @@ async def api_browse(
             continue
         streams_key, cats_key = TYPE_MAP[ct]
 
-        # Build the category map (needed for group names)
-        categories = cache.get_categories_raw(cats_key)
-        cat_map = build_category_map(categories)
-
         cat_item_set = category_item_sets.get(ct, set())
 
         # Fast path: when browsing a specific category, fetch only the
         # matching streams via the pre-built index instead of iterating
         # every stream in the cache.
         if category_id and cat_item_set:
+            categories = cache.get_categories_raw(cats_key)
+            cat_map = build_category_map(categories)
             streams = cache.get_streams_by_ids(ct, cat_item_set)
+
+            for s in streams:
+                src_id = s.get("_source_id", "")
+                src_name = s.get("_source_name", "Unknown")
+                if src_id:
+                    source_set[src_id] = src_name
+                cat_id_str = str(s.get("category_id", ""))
+                grp = cat_map.get(cat_id_str, "Unknown")
+                group_counts[grp] = group_counts.get(grp, 0) + 1
+
+                name = s.get("name", "")
+                icon = s.get("stream_icon", "") or s.get("cover", "")
+                item_id = str(s.get("stream_id") or s.get("series_id") or "")
+                added = s.get("added") or s.get("last_modified", 0)
+                try:
+                    added_ts = int(added) if added else 0
+                except (ValueError, TypeError):
+                    added_ts = 0
+
+                if source and src_id != source:
+                    continue
+                if src_id in sources_config:
+                    source_cfg = sources_config[src_id]
+                    filters = source_cfg.get("filters", {})
+                    content_filters = filters.get(ct, {})
+                    if content_filters.get("groups") and not should_include(grp, content_filters["groups"]):
+                        continue
+                    if content_filters.get("channels") and not should_include(name, content_filters["channels"]):
+                        continue
+                if tmdb_search_id is not None:
+                    raw_tmdb = s.get("tmdb_id") or s.get("tmdb")
+                    if not raw_tmdb:
+                        continue
+                    norm = str(raw_tmdb).strip().lower()
+                    if norm.startswith("tmdb:"):
+                        norm = norm[5:].strip()
+                    if norm != tmdb_search_id:
+                        continue
+                elif search_lower and search_lower not in name.lower() and search_lower not in grp.lower():
+                    continue
+
+                raw_rating = s.get("rating", 0)
+                try:
+                    rating_val = float(raw_rating) if raw_rating else 0.0
+                except (ValueError, TypeError):
+                    rating_val = 0.0
+
+                if min_rating > 0 and rating_val < min_rating:
+                    continue
+
+                item_data = {
+                    "name": name,
+                    "group": grp,
+                    "icon": icon,
+                    "id": item_id,
+                    "source_id": src_id,
+                    "source_name": src_name,
+                    "added": added_ts,
+                    "rating": rating_val,
+                    "content_type": ct,
+                }
+                if ct in ("vod", "series"):
+                    raw_tmdb = s.get("tmdb_id") or s.get("tmdb")
+                    item_data["tmdb_id"] = raw_tmdb if raw_tmdb else None
+                if ct == "vod":
+                    item_data["container_extension"] = s.get("container_extension", "mp4")
+                items.append(item_data)
+
+            # Merge group counts and sources from this content type
+            for g, c in group_counts.items():
+                group_counts[g] = group_counts.get(g, 0) + c
         else:
-            streams, _ = cache.get_cached_with_source_info(streams_key, cats_key)
+            # SQLite-backed browse: query directly from the database
+            result = await asyncio.to_thread(
+                cache.browse_streams_db,
+                content_type=ct,
+                search=search_lower,
+                group=group,
+                source=source,
+                news_days=news_days,
+                min_rating=min_rating,
+                max_added_days=max_added_days,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                page=1,
+                per_page=0,  # we need all items for grouping/sorting across types
+                tmdb_search_id=tmdb_search_id,
+            )
+            items.extend(result["items"])
+            for g, c in result["group_counts"].items():
+                group_counts[g] = group_counts.get(g, 0) + c
+            for sid, sname in result["source_set"].items():
+                source_set[sid] = sname
 
-        for s in streams:
-            src_id = s.get("_source_id", "")
-            src_name = s.get("_source_name", "Unknown")
-            if src_id:
-                source_set[src_id] = src_name
-            cat_id_str = str(s.get("category_id", ""))
-            grp = cat_map.get(cat_id_str, "Unknown")
-            group_counts[grp] = group_counts.get(grp, 0) + 1
-
-            name = s.get("name", "")
-            icon = s.get("stream_icon", "") or s.get("cover", "")
-            item_id = str(s.get("stream_id") or s.get("series_id") or "")
-            added = s.get("added") or s.get("last_modified", 0)
-            try:
-                added_ts = int(added) if added else 0
-            except (ValueError, TypeError):
-                added_ts = 0
-
-            if source and src_id != source:
-                continue
+    # Apply source filters in Python (can't express in SQL)
+    if sources_config:
+        filtered = []
+        for item in items:
+            src_id = item.get("source_id", "")
             if src_id in sources_config:
                 source_cfg = sources_config[src_id]
                 filters = source_cfg.get("filters", {})
-                content_filters = filters.get(ct, {})
+                content_filters = filters.get(item.get("content_type", ""), {})
+                grp = item.get("group", "")
+                name = item.get("name", "")
                 if content_filters.get("groups") and not should_include(grp, content_filters["groups"]):
                     continue
                 if content_filters.get("channels") and not should_include(name, content_filters["channels"]):
                     continue
-            if news_days > 0 and added_ts < news_cutoff:
-                continue
-            if tmdb_search_id is not None:
-                raw_tmdb = s.get("tmdb_id") or s.get("tmdb")
-                if not raw_tmdb:
-                    continue
-                # Normalise: strip "tmdb:" prefix and whitespace before comparing
-                norm = str(raw_tmdb).strip().lower()
-                if norm.startswith("tmdb:"):
-                    norm = norm[5:].strip()
-                if norm != tmdb_search_id:
-                    continue
-            elif search_lower and search_lower not in name.lower() and search_lower not in grp.lower():
-                continue
-            if group and grp != group:
-                continue
-
-            # Parse rating
-            raw_rating = s.get("rating", 0)
-            try:
-                rating_val = float(raw_rating) if raw_rating else 0.0
-            except (ValueError, TypeError):
-                rating_val = 0.0
-
-            # Apply rating filter
-            if min_rating > 0 and rating_val < min_rating:
-                continue
-
-            # Apply max_added_days filter
-            if max_added_days > 0:
-                added_cutoff = current_time - (max_added_days * 86400)
-                if added_ts < added_cutoff:
-                    continue
-
-            item_data = {
-                "name": name,
-                "group": grp,
-                "icon": icon,
-                "id": item_id,
-                "source_id": src_id,
-                "source_name": src_name,
-                "added": added_ts,
-                "rating": rating_val,
-                "content_type": ct,
-            }
-            if ct in ("vod", "series"):
-                raw_tmdb = s.get("tmdb_id") or s.get("tmdb")
-                item_data["tmdb_id"] = raw_tmdb if raw_tmdb else None
-            if ct == "vod":
-                item_data["container_extension"] = s.get("container_extension", "mp4")
-            items.append(item_data)
+            filtered.append(item)
+        items = filtered
 
     total = len(items)
     reverse = sort_order == "desc"
@@ -324,8 +347,10 @@ async def api_browse(
         ct in ("vod", "series") for ct in content_types_to_query
     )
 
+    _GROUP_THRESHOLD = 500  # skip full-set grouping when result count exceeds this
     grouped = False
-    if should_group:
+    if should_group and total <= _GROUP_THRESHOLD:
+        # Small result set: group the full set, then paginate (exact grouping)
         loop = asyncio.get_event_loop()
         grouped_items = await loop.run_in_executor(
             None, functools.partial(group_similar_items, items, 85)
@@ -341,34 +366,63 @@ async def api_browse(
         grouped = True
         start = (page - 1) * per_page
         paginated = grouped_items[start : start + per_page]
+    elif should_group and total > _GROUP_THRESHOLD:
+        # Large result set: paginate first, then group only the current page
+        # to avoid O(n²) fuzzy comparison on the full set.
+        start = (page - 1) * per_page
+        page_items = items[start : start + per_page]
+        loop = asyncio.get_event_loop()
+        grouped_page = await loop.run_in_executor(
+            None, functools.partial(group_similar_items, page_items, 85)
+        )
+        if sort_by == "added":
+            grouped_page.sort(key=lambda x: x["added"], reverse=reverse)
+        elif sort_by == "rating":
+            grouped_page.sort(key=lambda x: x["rating"], reverse=reverse)
+        elif sort_by == "name":
+            grouped_page.sort(key=lambda x: x["name"].lower(), reverse=reverse)
+        grouped = True
+        paginated = grouped_page
     else:
         start = (page - 1) * per_page
         paginated = items[start : start + per_page]
 
     # Build category membership for paginated items only (not the full table).
     # Collect the unique (stream_id, source_id, content_type) triples from
-    # the current page and query just those from the DB.
-    _page_keys: set[tuple[str, str, str]] = set()
+    # the current page and query just those from the DB in a single batch.
+    _page_keys: list[tuple[str, str, str]] = []
+    _seen_keys: set[tuple[str, str, str]] = set()
     if grouped:
         for gi in paginated:
             for sub in gi["items"]:
-                _page_keys.add((sub["id"], sub["source_id"], sub.get("content_type", type)))
+                _pk = (sub["id"], sub["source_id"], sub.get("content_type", type))
+                if _pk not in _seen_keys:
+                    _seen_keys.add(_pk)
+                    _page_keys.append(_pk)
     else:
         for item in paginated:
-            _page_keys.add((item["id"], item["source_id"], item.get("content_type", type)))
+            _pk = (item["id"], item["source_id"], item.get("content_type", type))
+            if _pk not in _seen_keys:
+                _seen_keys.add(_pk)
+                _page_keys.append(_pk)
 
     category_membership: dict[tuple, list] = {}
     if _page_keys:
         _cm_conn = db_connect(cat_svc.db_path)
         try:
-            # Query only items on the current page
-            for _pk in _page_keys:
-                for _row in _cm_conn.execute(
-                    "SELECT category_id FROM category_manual_items "
-                    "WHERE stream_id=? AND source_id=? AND content_type=?",
-                    _pk,
-                ).fetchall():
-                    category_membership.setdefault(_pk, []).append(_row["category_id"])
+            conditions = " OR ".join(
+                "(stream_id=? AND source_id=? AND content_type=?)" for _ in _page_keys
+            )
+            params: list[str] = []
+            for sid, src, ct in _page_keys:
+                params.extend([sid, src, ct])
+            for _row in _cm_conn.execute(
+                f"SELECT stream_id, source_id, content_type, category_id "
+                f"FROM category_manual_items WHERE {conditions}",
+                params,
+            ).fetchall():
+                _key = (_row["stream_id"], _row["source_id"], _row["content_type"])
+                category_membership.setdefault(_key, []).append(_row["category_id"])
         finally:
             _cm_conn.close()
 
@@ -394,7 +448,7 @@ async def api_browse(
         "total": total,
         "page": page,
         "per_page": per_page,
-        "total_pages": (total + per_page - 1) // per_page,
+        "total_pages": (total + per_page - 1) // per_page if total > 0 else 0,
         "content_type": type,
     }
 

@@ -2,17 +2,16 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from app.database import DB_NAME, db_connect, adb_connect, adb_transaction, _row_to_dict
+from app.database import DB_NAME, db_connect, adb_transaction, _row_to_dict
 
 if TYPE_CHECKING:
     from app.services.config_service import ConfigService
@@ -509,7 +508,8 @@ class CacheService:
                 key = STREAM_KEY.get(ct)
                 if key:
                     try:
-                        sources[src][key].append(json.loads(row["data"]))
+                        full_data = json.loads(row["data"])
+                        sources[src][key].append(self._slim_stream(full_data, ct))
                     except (json.JSONDecodeError, TypeError):
                         pass
 
@@ -604,7 +604,8 @@ class CacheService:
             key = STREAM_KEY.get(ct)
             if key:
                 try:
-                    sources[src][key].append(json.loads(row["data"]))
+                    full_data = json.loads(row["data"])
+                    sources[src][key].append(self._slim_stream(full_data, ct))
                 except (json.JSONDecodeError, TypeError):
                     pass
 
@@ -870,6 +871,109 @@ class CacheService:
                     item["_source_id"] = src_id
                     item["_source_name"] = src_name
 
+    @staticmethod
+    def _slim_stream(stream: dict, content_type: str) -> dict:
+        """Extract only the fields needed for routing, M3U, monitoring, and display."""
+        slim: dict = {}
+        # ID fields
+        if content_type == "series":
+            slim["series_id"] = stream.get("series_id", "")
+        else:
+            slim["stream_id"] = stream.get("stream_id", "")
+        # Common fields
+        slim["name"] = stream.get("name", "")
+        slim["category_id"] = stream.get("category_id", "")
+        slim["added"] = stream.get("added") or stream.get("last_modified", 0)
+        # Icon/cover
+        slim["stream_icon"] = stream.get("stream_icon", "")
+        slim["cover"] = stream.get("cover", "")
+        # Type-specific fields
+        if content_type == "live":
+            slim["epg_channel_id"] = stream.get("epg_channel_id", "")
+        elif content_type == "vod":
+            slim["container_extension"] = stream.get("container_extension", "mp4")
+            slim["tmdb_id"] = stream.get("tmdb_id", "")
+            slim["tmdb"] = stream.get("tmdb", "")
+            slim["rating"] = stream.get("rating", 0)
+        elif content_type == "series":
+            slim["tmdb_id"] = stream.get("tmdb_id", "")
+            slim["tmdb"] = stream.get("tmdb", "")
+            slim["imdb_id"] = stream.get("imdb_id", "")
+            slim["imdb"] = stream.get("imdb", "")
+        return slim
+
+    def _slim_cache_in_memory(self) -> None:
+        """Replace full stream dicts in the in-memory cache with slim versions.
+
+        Call this AFTER the full data has been persisted to SQLite. The slim
+        dicts contain only the fields needed for routing, M3U, monitoring,
+        and display — the full upstream JSON blob stays in the DB only.
+        """
+        STREAM_KEYS = {
+            "live_streams": "live",
+            "vod_streams": "vod",
+            "series": "series",
+        }
+        sources = self._api_cache.get("sources", {})
+        for _src_id, src_cache in sources.items():
+            for list_key, ct in STREAM_KEYS.items():
+                slim_list = [
+                    self._slim_stream(item, ct)
+                    for item in src_cache.get(list_key, [])
+                ]
+                src_cache[list_key] = slim_list
+
+    def get_stream_full_data(
+        self, content_type: str, source_id: str, stream_id: str
+    ) -> dict | None:
+        """Fetch the full stream JSON from SQLite on demand.
+
+        Use this when a consumer (e.g. Xtream API emulation) needs the
+        complete upstream data blob that is no longer kept in memory.
+        """
+        conn = db_connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT data FROM streams "
+                "WHERE source_id=? AND content_type=? AND stream_id=?",
+                (source_id, content_type, stream_id),
+            ).fetchone()
+            if row:
+                try:
+                    return json.loads(row["data"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        finally:
+            conn.close()
+        return None
+
+    def get_streams_full_data_batch(
+        self, content_type: str, source_id: str, stream_ids: list[str]
+    ) -> dict[str, dict]:
+        """Fetch multiple full stream JSON blobs from SQLite in one query.
+
+        Returns a dict mapping stream_id -> full stream dict.
+        """
+        if not stream_ids:
+            return {}
+        conn = db_connect(self.db_path)
+        try:
+            placeholders = ",".join("?" * len(stream_ids))
+            rows = conn.execute(
+                f"SELECT stream_id, data FROM streams "
+                f"WHERE source_id=? AND content_type=? AND stream_id IN ({placeholders})",
+                [source_id, content_type] + stream_ids,
+            ).fetchall()
+            result: dict[str, dict] = {}
+            for row in rows:
+                try:
+                    result[row["stream_id"]] = json.loads(row["data"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            return result
+        finally:
+            conn.close()
+
     def _rebuild_stream_index(self) -> None:
         """Build a (content_type, source_id, stream_id) → dict lookup index."""
         idx: dict[tuple[str, str, str], dict] = {}
@@ -909,6 +1013,236 @@ class CacheService:
         for src_cache in self._api_cache.get("sources", {}).values():
             result.extend(src_cache.get(category_key, []))
         return result
+
+    # ------------------------------------------------------------------
+    # SQLite-backed browse
+    # ------------------------------------------------------------------
+
+    def browse_streams_db(
+        self,
+        content_type: str,
+        search: str = "",
+        group: str = "",
+        source: str = "",
+        news_days: int = 0,
+        min_rating: float = 0,
+        max_added_days: int = 0,
+        sort_by: str = "",
+        sort_order: str = "desc",
+        page: int = 1,
+        per_page: int = 50,
+        tmdb_search_id: str | None = None,
+    ) -> dict:
+        """Query streams directly from SQLite with filters, sort and pagination.
+
+        Returns a dict with: {items, total, page, per_page, total_pages,
+        group_counts, source_counts} where items are lightweight dicts
+        containing only the fields needed by the browse UI.
+        """
+        current_time = int(time.time())
+        news_cutoff = current_time - (news_days * 86400) if news_days > 0 else 0
+        added_cutoff = current_time - (max_added_days * 86400) if max_added_days > 0 else 0
+
+        conn = db_connect(self.db_path)
+        try:
+            # Build WHERE clauses
+            conditions: list[str] = ["s.content_type = ?"]
+            params: list = [content_type]
+
+            if source:
+                conditions.append("s.source_id = ?")
+                params.append(source)
+
+            if news_days > 0:
+                conditions.append("s.added >= ?")
+                params.append(news_cutoff)
+
+            if max_added_days > 0:
+                conditions.append("s.added >= ?")
+                params.append(added_cutoff)
+
+            # Search: LIKE on name and group name
+            if tmdb_search_id is not None:
+                # TMDB search: match against json_extract on data column
+                conditions.append(
+                    "(json_extract(s.data, '$.tmdb_id') = ? OR "
+                    "json_extract(s.data, '$.tmdb') = ? OR "
+                    "json_extract(s.data, '$.tmdb_id') = ? OR "
+                    "json_extract(s.data, '$.tmdb') = ?)"
+                )
+                tmdb_prefixed = f"tmdb:{tmdb_search_id}"
+                params.extend([tmdb_search_id, tmdb_search_id, tmdb_prefixed, tmdb_prefixed])
+            elif search:
+                # Use FTS5 for fast name search, fall back to LIKE for group name
+                fts_query = search.replace('"', '""')
+                conditions.append(
+                    "(s.rowid IN (SELECT rowid FROM streams_fts WHERE streams_fts MATCH ?) "
+                    "OR lower(sc.category_name) LIKE lower(?))"
+                )
+                params.extend([fts_query, f"%{search}%"])
+
+            if group:
+                conditions.append("sc.category_name = ?")
+                params.append(group)
+
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+            # Sorting
+            order_map = {
+                "added": "s.added",
+                "name": "lower(s.name)",
+                "rating": "CAST(json_extract(s.data, '$.rating') AS REAL)",
+            }
+            order_col = order_map.get(sort_by, "")
+            if order_col:
+                direction = "DESC" if sort_order == "desc" else "ASC"
+                order_clause = f"{order_col} {direction}"
+            elif news_days > 0:
+                order_clause = "s.added DESC"
+            else:
+                order_clause = "lower(sc.category_name), lower(s.name)"
+
+            # Count total matching rows
+            count_sql = f"""
+                SELECT COUNT(*) as cnt
+                FROM streams s
+                LEFT JOIN source_categories sc
+                    ON s.source_id = sc.source_id
+                    AND s.content_type = sc.content_type
+                    AND s.category_id = sc.category_id
+                WHERE {where_clause}
+            """
+            total = conn.execute(count_sql, params).fetchone()["cnt"]
+
+            # Fetch the page of results
+            if per_page > 0:
+                offset = (page - 1) * per_page
+                limit_clause = "LIMIT ? OFFSET ?"
+                limit_params: list = [per_page, offset]
+            else:
+                limit_clause = ""
+                limit_params = []
+            data_sql = f"""
+                SELECT s.source_id, s.content_type, s.stream_id, s.name,
+                       s.category_id, s.added, s.data,
+                       COALESCE(sc.category_name, 'Unknown') as group_name
+                FROM streams s
+                LEFT JOIN source_categories sc
+                    ON s.source_id = sc.source_id
+                    AND s.content_type = sc.content_type
+                    AND s.category_id = sc.category_id
+                WHERE {where_clause}
+                ORDER BY {order_clause}
+                {limit_clause}
+            """
+            rows = conn.execute(data_sql, params + limit_params).fetchall()
+
+            # Resolve source names from in-memory config
+            source_names = self._source_names
+
+            items = []
+            for row in rows:
+                src_id = row["source_id"]
+                src_name = source_names.get(src_id, "Unknown")
+                grp = row["group_name"]
+                name = row["name"]
+
+                try:
+                    data = json.loads(row["data"])
+                except (json.JSONDecodeError, TypeError):
+                    data = {}
+
+                icon = data.get("stream_icon", "") or data.get("cover", "")
+                item_id = str(data.get("stream_id") or data.get("series_id") or row["stream_id"])
+                added_ts = row["added"] or 0
+
+                raw_rating = data.get("rating", 0)
+                try:
+                    rating_val = float(raw_rating) if raw_rating else 0.0
+                except (ValueError, TypeError):
+                    rating_val = 0.0
+
+                # Apply rating filter in Python (json_extract in WHERE is slower)
+                if min_rating > 0 and rating_val < min_rating:
+                    continue
+
+                item_data = {
+                    "name": name,
+                    "group": grp,
+                    "icon": icon,
+                    "id": item_id,
+                    "source_id": src_id,
+                    "source_name": src_name,
+                    "added": added_ts,
+                    "rating": rating_val,
+                    "content_type": row["content_type"],
+                }
+                if content_type in ("vod", "series"):
+                    raw_tmdb = data.get("tmdb_id") or data.get("tmdb")
+                    item_data["tmdb_id"] = raw_tmdb if raw_tmdb else None
+                if content_type == "vod":
+                    item_data["container_extension"] = data.get("container_extension", "mp4")
+                items.append(item_data)
+
+            # Collect group counts and source set for the response metadata.
+            # We need these for the full (unfiltered) result set, so run a
+            # separate lightweight query.
+            gc_conditions: list[str] = ["s.content_type = ?"]
+            gc_params: list = [content_type]
+            if source:
+                gc_conditions.append("s.source_id = ?")
+                gc_params.append(source)
+            if news_days > 0:
+                gc_conditions.append("s.added >= ?")
+                gc_params.append(news_cutoff)
+            if max_added_days > 0:
+                gc_conditions.append("s.added >= ?")
+                gc_params.append(added_cutoff)
+            # For tmdb search, include the tmdb filter in group counts too
+            if tmdb_search_id is not None:
+                gc_conditions.append(
+                    "(json_extract(s.data, '$.tmdb_id') = ? OR "
+                    "json_extract(s.data, '$.tmdb') = ? OR "
+                    "json_extract(s.data, '$.tmdb_id') = ? OR "
+                    "json_extract(s.data, '$.tmdb') = ?)"
+                )
+                tmdb_prefixed = f"tmdb:{tmdb_search_id}"
+                gc_params.extend([tmdb_search_id, tmdb_search_id, tmdb_prefixed, tmdb_prefixed])
+
+            gc_where = " AND ".join(gc_conditions)
+            gc_sql = f"""
+                SELECT COALESCE(sc.category_name, 'Unknown') as grp, COUNT(*) as cnt,
+                       s.source_id
+                FROM streams s
+                LEFT JOIN source_categories sc
+                    ON s.source_id = sc.source_id
+                    AND s.content_type = sc.content_type
+                    AND s.category_id = sc.category_id
+                WHERE {gc_where}
+                GROUP BY grp, s.source_id
+            """
+            group_counts: dict[str, int] = {}
+            source_set: dict[str, str] = {}
+            for row in conn.execute(gc_sql, gc_params).fetchall():
+                grp = row["grp"]
+                group_counts[grp] = group_counts.get(grp, 0) + row["cnt"]
+                src_id = row["source_id"]
+                if src_id:
+                    source_set[src_id] = source_names.get(src_id, "Unknown")
+
+            total_pages = (total + per_page - 1) // per_page if total > 0 and per_page > 0 else 0
+
+            return {
+                "items": items,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": total_pages,
+                "group_counts": group_counts,
+                "source_set": source_set,
+            }
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # Stream source map
@@ -1211,10 +1545,11 @@ class CacheService:
 
         logger.info(f"Refreshing source: {source_name}")
 
-        existing_source_cache = copy.deepcopy(
-            existing_sources_snapshot.get(source_id, self._empty_source_cache())
-        )
-        source_cache = copy.deepcopy(existing_source_cache)
+        existing_source_cache = json.loads(json.dumps(
+            existing_sources_snapshot.get(source_id, self._empty_source_cache()),
+            ensure_ascii=False,
+        ))
+        source_cache = json.loads(json.dumps(existing_source_cache, ensure_ascii=False))
         source_updated = False
 
         for step_idx, (cache_key, label, action) in enumerate(REFRESH_STEP_DEFINITIONS):
@@ -1452,7 +1787,9 @@ class CacheService:
             raw_sources = self._api_cache.get("sources", {})
             previous_last_refresh = self._api_cache.get("last_refresh")
             self._api_cache["refresh_in_progress"] = True
-        existing_sources_snapshot = await asyncio.to_thread(copy.deepcopy, raw_sources)
+        existing_sources_snapshot = await asyncio.to_thread(
+            lambda: json.loads(json.dumps(raw_sources, ensure_ascii=False))
+        )
 
         source_results = [
             self._build_source_result(
@@ -1524,6 +1861,11 @@ class CacheService:
                 await self.rebuild_stream_source_map()
                 await asyncio.to_thread(self._rebuild_stream_index)
                 await self.save_cache_to_disk_async()
+                # Slim down in-memory cache now that full data is in DB
+                await asyncio.to_thread(self._slim_cache_in_memory)
+                # Re-inject source info on the new slim dicts
+                await asyncio.to_thread(self._inject_source_info)
+                await asyncio.to_thread(self._rebuild_stream_index)
 
                 if on_cache_refreshed and any_source_updated:
                     progress["in_progress"] = True

@@ -98,18 +98,28 @@ async def player_api_source(
             streams = cache.get_cached(f"{ct}_streams", source_id)
             categories = cache.get_cached(f"{ct}_categories", source_id)
             cat_map = build_category_map(categories)
-            result = []
+            # Filter using slim dicts, then fetch full data for matches
+            matching_ids: list[str] = []
             for stream in streams:
                 cat_id = str(stream.get("category_id", ""))
                 group_name = cat_map.get(cat_id, "")
                 channel_name = stream.get("name", "")
                 if should_include(group_name, group_filters) and should_include(channel_name, channel_filters):
-                    stream_copy = stream.copy()
-                    if ct == "live":
-                        epg_id = stream.get("epg_channel_id", "")
-                        if epg_id:
-                            stream_copy["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
-                    result.append(stream_copy)
+                    sid = str(stream.get("stream_id", ""))
+                    if sid:
+                        matching_ids.append(sid)
+            # Fetch full data from SQLite in batch
+            full_data = cache.get_streams_full_data_batch(ct, source_id, matching_ids)
+            result = []
+            for sid in matching_ids:
+                stream = full_data.get(sid)
+                if not stream:
+                    continue
+                if ct == "live":
+                    epg_id = stream.get("epg_channel_id", "")
+                    if epg_id:
+                        stream["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
+                result.append(stream)
             return result
 
         elif action == "get_series":
@@ -118,11 +128,16 @@ async def player_api_source(
             series_list = cache.get_cached("series", source_id)
             categories = cache.get_cached("series_categories", source_id)
             cat_map = build_category_map(categories)
-            return [
-                s for s in series_list
+            # Filter using slim dicts, then fetch full data for matches
+            matching_ids = [
+                str(s.get("series_id", ""))
+                for s in series_list
                 if should_include(cat_map.get(str(s.get("category_id", "")), ""), group_filters)
                 and should_include(s.get("name", ""), channel_filters)
+                and s.get("series_id")
             ]
+            full_data = cache.get_streams_full_data_batch("series", source_id, matching_ids)
+            return [full_data[sid] for sid in matching_ids if sid in full_data]
 
         elif action in ("get_series_info", "get_vod_info"):
             param_key = "series_id" if action == "get_series_info" else "vod_id"
@@ -201,20 +216,30 @@ async def player_api_source_full(
 
         elif action == "get_live_streams":
             streams = cache.get_cached("live_streams", source_id)
+            stream_ids = [str(s.get("stream_id", "")) for s in streams if s.get("stream_id")]
+            full_data = cache.get_streams_full_data_batch("live", source_id, stream_ids)
             result = []
-            for stream in streams:
-                stream_copy = stream.copy()
+            for sid in stream_ids:
+                stream = full_data.get(sid)
+                if not stream:
+                    continue
                 epg_id = stream.get("epg_channel_id", "")
                 if epg_id:
-                    stream_copy["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
-                result.append(stream_copy)
+                    stream["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
+                result.append(stream)
             return result
 
         elif action == "get_vod_streams":
-            return cache.get_cached("vod_streams", source_id)
+            streams = cache.get_cached("vod_streams", source_id)
+            stream_ids = [str(s.get("stream_id", "")) for s in streams if s.get("stream_id")]
+            full_data = cache.get_streams_full_data_batch("vod", source_id, stream_ids)
+            return [full_data[sid] for sid in stream_ids if sid in full_data]
 
         elif action == "get_series":
-            return cache.get_cached("series", source_id)
+            series_list = cache.get_cached("series", source_id)
+            series_ids = [str(s.get("series_id", "")) for s in series_list if s.get("series_id")]
+            full_data = cache.get_streams_full_data_batch("series", source_id, series_ids)
+            return [full_data[sid] for sid in series_ids if sid in full_data]
 
         elif action in ("get_series_info", "get_vod_info"):
             param_key = "series_id" if action == "get_series_info" else "vod_id"

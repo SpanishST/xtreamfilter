@@ -20,14 +20,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "*/*",
-    "Accept-Encoding": "gzip, deflate",
-    "Connection": "keep-alive",
-}
-
 REFRESH_STEP_DEFINITIONS: list[tuple[str, str, str]] = [
     ("live_categories", "Live categories", "get_live_categories"),
     ("vod_categories", "VOD categories", "get_vod_categories"),
@@ -1396,69 +1388,65 @@ class CacheService:
         for attempt in range(retries + 1):
             start_time = time.time()
             try:
-                async with httpx.AsyncClient(
-                    headers=HEADERS,
-                    timeout=httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0),
-                    follow_redirects=True,
-                ) as client:
-                    response = await client.get(url, params=params)
-                    elapsed_ms = int((time.time() - start_time) * 1000)
-                    if response.status_code == 200:
-                        try:
-                            data = response.json()
-                        except ValueError as exc:
-                            last_error = {
-                                "type": "parse_error",
-                                "message": str(exc),
-                                "status_code": 200,
-                                "attempt": attempt + 1,
-                                "duration_ms": elapsed_ms,
-                            }
-                            logger.error(f"Invalid JSON for {action}: {exc} (attempt {attempt + 1}/{retries + 1})")
-                            if attempt < retries:
-                                await asyncio.sleep(2**attempt)
-                            continue
-
-                        if not isinstance(data, list):
-                            last_error = {
-                                "type": "invalid_payload",
-                                "message": f"Expected a list response for {action}",
-                                "status_code": 200,
-                                "attempt": attempt + 1,
-                                "duration_ms": elapsed_ms,
-                            }
-                            logger.error(
-                                f"Unexpected payload for {action}: {type(data).__name__} "
-                                f"(attempt {attempt + 1}/{retries + 1})"
-                            )
-                            if attempt < retries:
-                                await asyncio.sleep(2**attempt)
-                            continue
-
-                        logger.debug(
-                            f"Fetched {action}: {len(data)} items in {elapsed_ms / 1000:.1f}s"
-                        )
-                        return {
-                            "ok": True,
-                            "action": action,
-                            "data": data,
-                            "status_code": 200,
-                            "duration_ms": elapsed_ms,
-                            "attempts": attempt + 1,
-                            "error": None,
-                        }
-                    else:
+                client = await self.http_client.get_client()
+                response = await client.get(url, params=params)
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                    except ValueError as exc:
                         last_error = {
-                            "type": "http_error",
-                            "message": f"HTTP {response.status_code} while fetching {action}",
-                            "status_code": response.status_code,
+                            "type": "parse_error",
+                            "message": str(exc),
+                            "status_code": 200,
                             "attempt": attempt + 1,
                             "duration_ms": elapsed_ms,
                         }
-                        logger.warning(
-                            f"Fetch {action} failed with status {response.status_code} "
-                            f"in {elapsed_ms / 1000:.1f}s"
+                        logger.error(f"Invalid JSON for {action}: {exc} (attempt {attempt + 1}/{retries + 1})")
+                        if attempt < retries:
+                            await asyncio.sleep(2**attempt)
+                        continue
+
+                    if not isinstance(data, list):
+                        last_error = {
+                            "type": "invalid_payload",
+                            "message": f"Expected a list response for {action}",
+                            "status_code": 200,
+                            "attempt": attempt + 1,
+                            "duration_ms": elapsed_ms,
+                        }
+                        logger.error(
+                            f"Unexpected payload for {action}: {type(data).__name__} "
+                            f"(attempt {attempt + 1}/{retries + 1})"
                         )
+                        if attempt < retries:
+                            await asyncio.sleep(2**attempt)
+                        continue
+
+                    logger.debug(
+                        f"Fetched {action}: {len(data)} items in {elapsed_ms / 1000:.1f}s"
+                    )
+                    return {
+                        "ok": True,
+                        "action": action,
+                        "data": data,
+                        "status_code": 200,
+                        "duration_ms": elapsed_ms,
+                        "attempts": attempt + 1,
+                        "error": None,
+                    }
+                else:
+                    last_error = {
+                        "type": "http_error",
+                        "message": f"HTTP {response.status_code} while fetching {action}",
+                        "status_code": response.status_code,
+                        "attempt": attempt + 1,
+                        "duration_ms": elapsed_ms,
+                    }
+                    logger.warning(
+                        f"Fetch {action} failed with status {response.status_code} "
+                        f"in {elapsed_ms / 1000:.1f}s"
+                    )
             except httpx.TimeoutException:
                 last_error = {
                     "type": "timeout",
@@ -1525,7 +1513,7 @@ class CacheService:
         source: dict,
         source_idx: int,
         source_result: dict,
-        existing_sources_snapshot: dict[str, dict],
+        existing_sources_ref: dict[str, dict],
         total_sources: int,
         progress: dict,
     ) -> tuple[str, dict, bool]:
@@ -1545,11 +1533,11 @@ class CacheService:
 
         logger.info(f"Refreshing source: {source_name}")
 
-        existing_source_cache = json.loads(json.dumps(
-            existing_sources_snapshot.get(source_id, self._empty_source_cache()),
-            ensure_ascii=False,
-        ))
-        source_cache = json.loads(json.dumps(existing_source_cache, ensure_ascii=False))
+        # Start with an empty cache — no deep copy of existing data.
+        # On success we store fresh data; on failure we shallow-copy only
+        # the specific step's list from the existing cache (selective rollback).
+        source_cache: dict[str, Any] = {}
+        existing_source = existing_sources_ref.get(source_id, {})
         source_updated = False
 
         for step_idx, (cache_key, label, action) in enumerate(REFRESH_STEP_DEFINITIONS):
@@ -1579,10 +1567,12 @@ class CacheService:
                 step_result["count"] = len(data)
                 source_updated = True
             else:
+                # Selective rollback: shallow-copy only this step's existing list
+                source_cache[cache_key] = list(existing_source.get(cache_key, []))
                 error = dict(fetch_result.get("error") or {})
                 step_result["status"] = "failed"
                 step_result["error"] = error
-                step_result["preserved_existing"] = source_id in existing_sources_snapshot
+                step_result["preserved_existing"] = bool(source_cache[cache_key])
                 step_result["count"] = len(source_cache.get(cache_key, []))
                 source_result["errors"].append(
                     {
@@ -1605,6 +1595,8 @@ class CacheService:
 
         if source_updated:
             source_cache["last_refresh"] = datetime.now(timezone.utc).isoformat()
+        elif existing_source.get("last_refresh"):
+            source_cache["last_refresh"] = existing_source["last_refresh"]
 
         source_result["counts"] = self._build_source_counts(source_cache)
         source_result["last_refresh"] = source_cache.get("last_refresh")
@@ -1785,17 +1777,21 @@ class CacheService:
 
         async with self._cache_lock:
             raw_sources = self._api_cache.get("sources", {})
-            previous_last_refresh = self._api_cache.get("last_refresh")
             self._api_cache["refresh_in_progress"] = True
-        existing_sources_snapshot = await asyncio.to_thread(
-            lambda: json.loads(json.dumps(raw_sources, ensure_ascii=False))
-        )
+        # Lightweight snapshot: just record which sources exist and their
+        # last_refresh timestamps.  The full stream data is NOT copied here;
+        # _refresh_source_async reads from raw_sources directly and only
+        # shallow-copies individual step lists on failure (selective rollback).
+        existing_source_ids = set(raw_sources.keys())
+        existing_last_refresh: dict[str, str | None] = {
+            sid: src.get("last_refresh") for sid, src in raw_sources.items()
+        }
 
         source_results = [
             self._build_source_result(
                 source.get("id", "default"),
                 source.get("name", source.get("id", "default")),
-                existing_sources_snapshot.get(source.get("id", "default"), {}).get("last_refresh"),
+                existing_last_refresh.get(source.get("id", "default")),
             )
             for source in enabled_sources
         ]
@@ -1831,7 +1827,7 @@ class CacheService:
                     source,
                     source_idx,
                     progress["source_results"][source_idx],
-                    existing_sources_snapshot,
+                    raw_sources,
                     total_sources,
                     progress,
                 )
@@ -1842,14 +1838,14 @@ class CacheService:
             for source_id, source_cache, source_updated in results:
                 if source_updated:
                     any_source_updated = True
-                if source_updated or source_id in existing_sources_snapshot:
+                if source_updated or source_id in existing_source_ids:
                     new_sources_cache[source_id] = source_cache
 
             summary = self._build_refresh_summary(progress["source_results"], total_sources)
             failed_sources = summary.get("failed_sources", 0)
             partial_sources = summary.get("partial_sources", 0)
 
-            if new_sources_cache or existing_sources_snapshot:
+            if new_sources_cache or existing_source_ids:
                 async with self._cache_lock:
                     self._api_cache["sources"] = new_sources_cache
                     # Always update last_refresh so the UI shows the most recent

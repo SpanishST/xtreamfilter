@@ -5,7 +5,7 @@ import asyncio
 import io
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import httpx
@@ -50,10 +50,6 @@ class EpgService:
             "refresh_in_progress": False,
         }
         self._epg_cache_lock = asyncio.Lock()
-        # Cached parsed lxml root — avoids re-parsing the full XML on every
-        # get_now_next() call.  Invalidated whenever _epg_cache["data"] changes.
-        self._epg_parsed_root = None
-        self._epg_parsed_data_id: int | None = None
 
     # ------------------------------------------------------------------
     # Validity
@@ -77,14 +73,7 @@ class EpgService:
     def load_epg_cache_from_disk(self) -> None:
         if os.path.exists(self.epg_cache_file):
             try:
-                with open(self.epg_cache_file, "rb") as f:
-                    raw_data = f.read()
-                # Parse immediately and discard raw bytes
-                parser = etree.XMLParser(recover=True)
-                self._epg_parsed_root = etree.parse(io.BytesIO(raw_data), parser).getroot()
-                self._epg_parsed_data_id = id(self._epg_parsed_root)
                 self._epg_cache["data"] = True  # sentinel — bytes live on disk only
-                # Load timestamp from SQLite (replaces .meta sidecar)
                 conn = db_connect(self.db_path)
                 try:
                     row = conn.execute(
@@ -99,31 +88,6 @@ class EpgService:
                 )
             except Exception as e:
                 logger.error(f"Failed to load EPG cache from disk: {e}")
-
-    def save_epg_cache_to_disk(self) -> None:
-        try:
-            if self._epg_cache.get("data"):
-                os.makedirs(os.path.dirname(self.epg_cache_file), exist_ok=True)
-                # Serialize from parsed tree if raw bytes are not held in memory
-                if self._epg_parsed_root is not None:
-                    data = etree.tostring(self._epg_parsed_root, encoding="UTF-8", xml_declaration=True, pretty_print=False)
-                else:
-                    return  # nothing to save
-                with open(self.epg_cache_file, "wb") as f:
-                    f.write(data)
-                # Persist timestamp to SQLite (replaces .meta sidecar)
-                conn = db_connect(self.db_path)
-                try:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO epg_meta (id, last_refresh) VALUES (1, ?)",
-                        (self._epg_cache.get("last_refresh"),),
-                    )
-                    conn.commit()
-                finally:
-                    conn.close()
-                logger.info(f"EPG cache saved to disk at {datetime.now().isoformat()}")
-        except Exception as e:
-            logger.error(f"Failed to save EPG cache to disk: {e}")
 
     # ------------------------------------------------------------------
     # Fetch helpers
@@ -278,8 +242,7 @@ class EpgService:
                     logger.error(f"Error parsing EPG from source '{source.get('name', source_id)}': {e}")
             merged_data = etree.tostring(merged_root, encoding="UTF-8", xml_declaration=True, pretty_print=False)
 
-            # Save to disk first, then parse into tree and discard raw bytes
-            # to keep only the parsed tree in memory.
+            # Save to disk — bytes are not kept in memory
             try:
                 os.makedirs(os.path.dirname(self.epg_cache_file), exist_ok=True)
                 with open(self.epg_cache_file, "wb") as f:
@@ -287,15 +250,9 @@ class EpgService:
             except Exception as write_err:
                 logger.error(f"Failed to write EPG cache to disk: {write_err}")
 
-            parser = etree.XMLParser(recover=True)
-            parsed_root = etree.parse(io.BytesIO(merged_data), parser).getroot()
-            # merged_data is no longer referenced after this point → GC'd
-
             async with self._epg_cache_lock:
                 self._epg_cache["data"] = True  # sentinel — bytes live on disk only
                 self._epg_cache["last_refresh"] = datetime.now().isoformat()
-                self._epg_parsed_root = parsed_root
-                self._epg_parsed_data_id = id(parsed_root)
 
             # Persist timestamp to SQLite
             conn = db_connect(self.db_path)
@@ -347,124 +304,3 @@ class EpgService:
             "cache_ttl_seconds": self.config_service.get_epg_cache_ttl(),
             "cache_size_bytes": cache_size,
         }
-
-    # ------------------------------------------------------------------
-    # EPG now / next programme lookup
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _parse_xmltv_time(time_str: str) -> datetime | None:
-        """Parse XMLTV datetime string like '20260217120000 +0100' into a timezone-aware datetime."""
-        if not time_str:
-            return None
-        try:
-            # Strip whitespace and try common XMLTV formats
-            time_str = time_str.strip()
-            # Format: YYYYMMDDHHmmss +HHMM
-            if " " in time_str:
-                dt_part, tz_part = time_str.rsplit(" ", 1)
-            else:
-                dt_part = time_str
-                tz_part = "+0000"
-            dt = datetime.strptime(dt_part, "%Y%m%d%H%M%S")
-            # Parse timezone offset
-            tz_sign = 1 if tz_part[0] == "+" else -1
-            tz_hours = int(tz_part[1:3])
-            tz_minutes = int(tz_part[3:5])
-            from datetime import timedelta, timezone as tz
-            offset = timedelta(hours=tz_hours, minutes=tz_minutes) * tz_sign
-            dt = dt.replace(tzinfo=tz(offset))
-            return dt
-        except Exception:
-            return None
-
-    def get_now_next(self, channel_id: str) -> dict:
-        """Get current and next programme for a channel from cached EPG XML.
-
-        Args:
-            channel_id: The EPG channel ID (e.g. 'source1_channel.epg.id')
-
-        Returns:
-            Dict with 'current' and 'next' programme info, or empty values if unavailable.
-        """
-        result = {"current": None, "next": None}
-        if not self._epg_cache.get("data") or self._epg_parsed_root is None:
-            return result
-
-        try:
-            root = self._epg_parsed_root
-            now = datetime.now(timezone.utc)
-            channel_id_lower = channel_id.lower()
-
-            # Single-pass: track best current and next candidates without
-            # building a full list or sorting.
-            best_current = None   # (start, stop, title, desc)
-            best_next = None      # (start, title) — earliest future programme
-
-            for prog in root.findall("programme"):
-                prog_channel = (prog.get("channel") or "").lower()
-                if prog_channel != channel_id_lower:
-                    continue
-
-                start = self._parse_xmltv_time(prog.get("start", ""))
-                stop = self._parse_xmltv_time(prog.get("stop", ""))
-                if not start:
-                    continue
-
-                title_el = prog.find("title")
-                title = title_el.text if title_el is not None and title_el.text else ""
-                desc_el = prog.find("desc")
-                desc = desc_el.text if desc_el is not None and desc_el.text else ""
-
-                is_current = start <= now and (stop is None or now < stop)
-                is_future = start > now
-
-                if is_current:
-                    if best_current is None or start > best_current[0]:
-                        best_current = (start, stop, title, desc)
-
-                if is_future:
-                    if best_next is None or start < best_next[0]:
-                        best_next = (start, title)
-
-            if best_current:
-                start, stop, title, desc = best_current
-                duration = (stop - start).total_seconds() if stop else 0
-                elapsed = (now - start).total_seconds()
-                progress_pct = round((elapsed / duration) * 100, 1) if duration > 0 else 0
-                result["current"] = {
-                    "title": title,
-                    "description": desc,
-                    "start": int(start.timestamp()),
-                    "stop": int(stop.timestamp()) if stop else None,
-                    "progress_pct": min(progress_pct, 100.0),
-                }
-                # Find the next programme that starts at or after current.stop
-                if stop:
-                    for prog in root.findall("programme"):
-                        prog_channel = (prog.get("channel") or "").lower()
-                        if prog_channel != channel_id_lower:
-                            continue
-                        p_start = self._parse_xmltv_time(prog.get("start", ""))
-                        if p_start and p_start >= stop:
-                            title_el = prog.find("title")
-                            p_title = title_el.text if title_el is not None and title_el.text else ""
-                            if best_next is None or p_start < best_next[0]:
-                                best_next = (p_start, p_title)
-                                break  # XMLTV is sorted — first match is the earliest
-
-                if best_next:
-                    result["next"] = {
-                        "title": best_next[1],
-                        "start": int(best_next[0].timestamp()),
-                    }
-            elif best_next:
-                result["next"] = {
-                    "title": best_next[1],
-                    "start": int(best_next[0].timestamp()),
-                }
-
-        except Exception as e:
-            logger.error(f"Error parsing EPG for now/next (channel={channel_id}): {e}")
-
-        return result

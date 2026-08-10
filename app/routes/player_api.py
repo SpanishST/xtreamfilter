@@ -1,4 +1,4 @@
-"""Player API routes — stream info, remux proxy, EPG now/next for in-browser playback."""
+"""Player API routes — stream info, remux proxy for in-browser playback."""
 from __future__ import annotations
 
 import asyncio
@@ -11,11 +11,9 @@ from fastapi.responses import Response
 from app.dependencies import (
     get_cache_service,
     get_config_service,
-    get_epg_service,
 )
 from app.services.cache_service import CacheService
 from app.services.config_service import ConfigService
-from app.services.epg_service import EpgService
 from app.services.stream_service import proxy_stream, remux_stream, transcode_stream
 from app.services.xtream_service import decode_virtual_id
 
@@ -294,17 +292,3 @@ async def player_proxy_stream(
     upstream_url = _build_upstream_url(source, content_type, stream_id, ext)
     stream_type = "live" if content_type == "live" else content_type
     return await proxy_stream(upstream_url, request, stream_type=stream_type)
-
-
-# ------------------------------------------------------------------
-# EPG now / next for a channel
-# ------------------------------------------------------------------
-
-@router.get("/epg/now/{channel_id:path}")
-async def get_epg_now_next(
-    channel_id: str,
-    epg: EpgService = Depends(get_epg_service),
-):
-    """Return the current and next programme for a given EPG channel ID."""
-    result = epg.get_now_next(channel_id)
-    return result

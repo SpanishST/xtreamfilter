@@ -73,8 +73,7 @@ async def background_refresh_loop(
             cache_was_refreshed = False
             if not cache.is_cache_valid():
                 logger.info("Cache expired, triggering refresh…")
-                await cache.refresh_cache()
-                cache_was_refreshed = True
+                cache_was_refreshed = await cache.refresh_cache()
             else:
                 logger.info(f"Cache still valid. Last refresh: {cache._api_cache.get('last_refresh', 'Never')}")
 

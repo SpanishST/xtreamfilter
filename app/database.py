@@ -113,14 +113,15 @@ class adb_transaction:
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool | None:
         if self.conn is None:
             return False
-        if exc_type is not None:
-            await self.conn.rollback()
-            await self.conn.close()
+        try:
+            if exc_type is not None:
+                await self.conn.rollback()
+                return False
+            await self.conn.commit()
+            self._committed = True
             return False
-        await self.conn.commit()
-        await self.conn.close()
-        self._committed = True
-        return True
+        finally:
+            await self.conn.close()
 
 
 def _row_to_dict(row: aiosqlite.Row) -> dict:

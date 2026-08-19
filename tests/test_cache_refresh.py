@@ -184,3 +184,82 @@ def test_refresh_cache_dispatches_failure_notification(tmp_path):
 
     assert refreshed is True
     assert sent_statuses == ["partial"]
+
+
+def test_refresh_cache_slims_memory_cache_when_persistence_fails(tmp_path):
+    cache = _build_cache_service(tmp_path)
+    responses = _partial_refresh_responses()
+    responses["get_vod_streams"]["ok"] = True
+    responses["get_vod_streams"]["data"] = [
+        {
+            "stream_id": "vod-new",
+            "name": "New Movie",
+            "category_id": "20",
+            "plot": "Large metadata that must not remain in memory",
+        }
+    ]
+
+    async def fake_fetch(_host, _username, _password, action, retries=2):
+        return responses[action]
+
+    async def failed_save():
+        raise RuntimeError("database unavailable")
+
+    cache.fetch_from_upstream = fake_fetch
+    cache.save_cache_to_disk_async = failed_save
+
+    refreshed = asyncio.run(cache.refresh_cache())
+
+    assert refreshed is False
+    assert cache.load_refresh_progress()["status"] == "failed"
+    stream = cache._api_cache["sources"]["src-1"]["vod_streams"][0]
+    assert stream["stream_id"] == "vod-new"
+    assert "plot" not in stream
+
+
+def test_refresh_cache_does_not_overlap(tmp_path):
+    cache = _build_cache_service(tmp_path)
+    active = 0
+    maximum_active = 0
+
+    async def fake_refresh(_callback=None):
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return True
+
+    cache._refresh_cache_locked = fake_refresh
+
+    async def exercise():
+        return await asyncio.gather(cache.refresh_cache(), cache.refresh_cache())
+
+    results = asyncio.run(exercise())
+
+    assert sorted(results) == [False, True]
+    assert maximum_active == 1
+
+
+def test_start_refresh_owns_one_background_task(tmp_path):
+    cache = _build_cache_service(tmp_path)
+    started = 0
+
+    async def fake_refresh(on_cache_refreshed=None):
+        nonlocal started
+        started += 1
+        await asyncio.sleep(0)
+        return True
+
+    cache.refresh_cache = fake_refresh
+
+    async def exercise():
+        assert cache.start_refresh() is True
+        assert cache.start_refresh() is False
+        await cache._refresh_task
+        assert cache.start_refresh() is True
+        await cache._refresh_task
+
+    asyncio.run(exercise())
+
+    assert started == 2

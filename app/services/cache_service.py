@@ -55,6 +55,8 @@ class CacheService:
             "refresh_progress": self._default_refresh_progress(),
         }
         self._cache_lock = asyncio.Lock()
+        self._refresh_lock = asyncio.Lock()
+        self._refresh_task: asyncio.Task | None = None
 
         self._stream_source_map: dict[str, dict[str, str]] = {
             "live": {},
@@ -1604,7 +1606,37 @@ class CacheService:
 
         return source_id, source_cache, source_updated
 
+    def _refresh_task_done(self, task: asyncio.Task) -> None:
+        if self._refresh_task is task:
+            self._refresh_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.info("Cache refresh task cancelled")
+        except Exception:
+            logger.exception("Unhandled exception in cache refresh task")
+
+    def start_refresh(self, on_cache_refreshed=None) -> bool:
+        """Start one background refresh task, returning whether it was started."""
+        if self._refresh_lock.locked():
+            return False
+        if self._refresh_task is not None and not self._refresh_task.done():
+            return False
+        self._refresh_task = asyncio.create_task(
+            self.refresh_cache(on_cache_refreshed=on_cache_refreshed)
+        )
+        self._refresh_task.add_done_callback(self._refresh_task_done)
+        return True
+
     async def refresh_cache(self, on_cache_refreshed=None) -> bool:
+        """Run one cache refresh, never overlapping another refresh."""
+        if self._refresh_lock.locked():
+            logger.info("Refresh already running, skipping")
+            return False
+        async with self._refresh_lock:
+            return await self._refresh_cache_locked(on_cache_refreshed)
+
+    async def _refresh_cache_locked(self, on_cache_refreshed=None) -> bool:
         """Refresh all cached data from all configured sources.
 
         *on_cache_refreshed* is an optional async callback invoked after a
@@ -1819,6 +1851,7 @@ class CacheService:
 
         new_sources_cache: dict[str, dict] = {}
         any_source_updated = False
+        persistence_failed = False
         final_status = "failed"
 
         try:
@@ -1856,12 +1889,17 @@ class CacheService:
                 await asyncio.to_thread(self._inject_source_info)
                 await self.rebuild_stream_source_map()
                 await asyncio.to_thread(self._rebuild_stream_index)
-                await self.save_cache_to_disk_async()
-                # Slim down in-memory cache now that full data is in DB
-                await asyncio.to_thread(self._slim_cache_in_memory)
-                # Re-inject source info on the new slim dicts
-                await asyncio.to_thread(self._inject_source_info)
-                await asyncio.to_thread(self._rebuild_stream_index)
+                try:
+                    await self.save_cache_to_disk_async()
+                except Exception:
+                    persistence_failed = True
+                    raise
+                finally:
+                    # Persistence failures must not leave the full upstream
+                    # payload resident in the long-lived in-memory cache.
+                    await asyncio.to_thread(self._slim_cache_in_memory)
+                    await asyncio.to_thread(self._inject_source_info)
+                    await asyncio.to_thread(self._rebuild_stream_index)
 
                 if on_cache_refreshed and any_source_updated:
                     progress["in_progress"] = True
@@ -1907,7 +1945,11 @@ class CacheService:
             if getattr(self, 'log_service', None):
                 await getattr(self, 'log_service', None).log("cache", "error", f"Cache refresh failed unexpectedly: {exc}")
             progress["last_error"] = progress.get("last_error") or str(exc)
-            final_status = "partial" if any_source_updated else "failed"
+            final_status = (
+                "failed"
+                if persistence_failed
+                else ("partial" if any_source_updated else "failed")
+            )
             async with self._cache_lock:
                 self._api_cache["refresh_in_progress"] = False
         finally:

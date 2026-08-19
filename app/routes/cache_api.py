@@ -1,8 +1,7 @@
 """Cache management API routes."""
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends
 
@@ -83,13 +82,11 @@ async def trigger_cache_refresh(
         if cache._api_cache.get("refresh_in_progress"):
             return {"status": "already_running", "message": "A refresh is already in progress"}
 
-    async def _refresh_and_update_categories():
-        await cache.refresh_cache()
-        await cat.refresh_pattern_categories_async()
-
-    async with cache._cache_lock:
-        cache._api_cache["refresh_in_progress"] = True
-    asyncio.create_task(_refresh_and_update_categories())
+    started = cache.start_refresh(
+        on_cache_refreshed=cat.refresh_pattern_categories_async,
+    )
+    if not started:
+        return {"status": "already_running", "message": "A refresh is already in progress"}
     return {"status": "refresh_started", "message": "Cache refresh has been triggered in the background"}
 
 

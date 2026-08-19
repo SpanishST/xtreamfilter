@@ -15,7 +15,6 @@ from app.dependencies import (
 from app.services.cache_service import CacheService
 from app.services.config_service import ConfigService
 from app.services.stream_service import proxy_stream, remux_stream, transcode_stream
-from app.services.xtream_service import decode_virtual_id
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +24,19 @@ router = APIRouter(prefix="/api/player", tags=["player"])
 _NATIVE_EXTENSIONS = {"mp4", "m4v", "webm", "ogg", "mp3", "aac"}
 
 HEADERS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+
+async def _cleanup_probe_process(proc) -> None:
+    """Terminate and reap a probe process, including after cancellation."""
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        await proc.communicate()
+    except (ProcessLookupError, OSError):
+        await proc.wait()
 
 
 def _build_upstream_url(source: dict, content_type: str, original_id: int, ext: str) -> str:
@@ -49,6 +61,7 @@ async def _probe_media_info(upstream_url: str) -> dict:
     ffprobe_path = shutil.which("ffprobe")
     if not ffprobe_path:
         return {"duration": None, "video_codec": None}
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             ffprobe_path,
@@ -77,6 +90,9 @@ async def _probe_media_info(upstream_url: str) -> dict:
     except Exception as e:
         logger.debug(f"ffprobe media info failed: {e}")
         return {"duration": None, "video_codec": None}
+    finally:
+        if proc is not None:
+            await _cleanup_probe_process(proc)
 
 
 async def _probe_audio_tracks(upstream_url: str) -> list[dict]:
@@ -89,6 +105,7 @@ async def _probe_audio_tracks(upstream_url: str) -> list[dict]:
     ffprobe_path = shutil.which("ffprobe")
     if not ffprobe_path:
         return []
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             ffprobe_path,
@@ -120,6 +137,9 @@ async def _probe_audio_tracks(upstream_url: str) -> list[dict]:
     except Exception as e:
         logger.debug(f"ffprobe audio tracks failed: {e}")
         return []
+    finally:
+        if proc is not None:
+            await _cleanup_probe_process(proc)
 
 
 @router.get("/info/{content_type}/{source_index}/{stream_id}")

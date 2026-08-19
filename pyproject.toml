@@ -38,6 +38,9 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "e2e: browser-based end-to-end tests",
+]
 
 [dependency-groups]
 dev = [

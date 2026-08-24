@@ -52,6 +52,7 @@ def db_connect(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA cache_size=-32768")   # 32 MB page cache
+    conn.execute("PRAGMA recursive_triggers=ON")
     conn.create_function("regexp", 2, _regexp)
     return conn
 
@@ -62,6 +63,7 @@ async def _pragma_setup_async(conn) -> None:
     await conn.execute("PRAGMA foreign_keys=ON")
     await conn.execute("PRAGMA synchronous=NORMAL")
     await conn.execute("PRAGMA cache_size=-32768")
+    await conn.execute("PRAGMA recursive_triggers=ON")
     await conn.create_function("regexp", 2, _regexp)
 
 
@@ -225,6 +227,35 @@ INSERT OR IGNORE INTO refresh_progress
     (id, in_progress, current_source, total_sources,
     current_source_name, current_step, percent, started_at)
 VALUES (1, 0, 0, 0, '', '', 0, NULL);
+
+-- ── Database maintenance progress ─────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS database_maintenance_progress (
+    id                      INTEGER PRIMARY KEY CHECK (id = 1),
+    status                  TEXT NOT NULL DEFAULT 'idle',
+    phase                   TEXT NOT NULL DEFAULT 'idle',
+    percent                 INTEGER NOT NULL DEFAULT 0,
+    started_at              TEXT,
+    heartbeat_at            TEXT,
+    finished_at             TEXT,
+    database_size_before    INTEGER NOT NULL DEFAULT 0,
+    database_size_after     INTEGER NOT NULL DEFAULT 0,
+    sources_removed         INTEGER NOT NULL DEFAULT 0,
+    rows_removed            INTEGER NOT NULL DEFAULT 0,
+    categories_removed      INTEGER NOT NULL DEFAULT 0,
+    category_items_removed  INTEGER NOT NULL DEFAULT 0,
+    fts_documents_before    INTEGER NOT NULL DEFAULT 0,
+    fts_documents_after     INTEGER NOT NULL DEFAULT 0,
+    fts_orphans_before      INTEGER NOT NULL DEFAULT 0,
+    fts_orphans_after       INTEGER NOT NULL DEFAULT 0,
+    vacuumed                INTEGER NOT NULL DEFAULT 0,
+    fts_rebuilt             INTEGER NOT NULL DEFAULT 0,
+    last_error              TEXT NOT NULL DEFAULT '',
+    details                 TEXT NOT NULL DEFAULT '{}'
+);
+
+INSERT OR IGNORE INTO database_maintenance_progress
+    (id, status, phase, percent)
+VALUES (1, 'idle', 'idle', 0);
 
 -- ── Custom categories ─────────────────────────────────────────────────────
 

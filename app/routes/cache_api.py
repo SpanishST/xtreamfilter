@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 
 from app.dependencies import get_cache_service, get_category_service
 from app.services.cache_service import CacheService
@@ -76,6 +77,14 @@ async def trigger_cache_refresh(
     cache: CacheService = Depends(get_cache_service),
     cat: CategoryService = Depends(get_category_service),
 ):
+    if cache.is_maintenance_active():
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "maintenance_running",
+                "message": "Database maintenance is currently running",
+            },
+        )
     progress = cache.load_refresh_progress()
     if progress.get("in_progress"):
         return {"status": "already_running", "message": "A refresh is already in progress"}
@@ -87,6 +96,14 @@ async def trigger_cache_refresh(
         on_cache_refreshed=cat.refresh_pattern_categories_async,
     )
     if not started:
+        if cache.is_maintenance_active():
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "maintenance_running",
+                    "message": "Database maintenance is currently running",
+                },
+            )
         return {"status": "already_running", "message": "A refresh is already in progress"}
     return {"status": "refresh_started", "message": "Cache refresh has been triggered in the background"}
 
@@ -102,5 +119,8 @@ async def cancel_cache_refresh(cache: CacheService = Depends(get_cache_service))
 
 @router.post("/api/cache/clear")
 async def clear_cache(cache: CacheService = Depends(get_cache_service)):
-    await cache.clear_cache()
+    try:
+        await cache.clear_cache()
+    except RuntimeError as exc:
+        return JSONResponse(status_code=409, content={"status": "busy", "message": str(exc)})
     return {"status": "ok", "message": "Cache cleared"}

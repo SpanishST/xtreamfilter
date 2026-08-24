@@ -7,6 +7,7 @@ from app.services.cache_service import CacheService
 from app.services.cart_service import CartService
 from app.services.category_service import CategoryService
 from app.services.config_service import ConfigService
+from app.services.database_maintenance_service import DatabaseMaintenanceService
 from app.services.epg_service import EpgService
 from app.services.http_client import HttpClientService
 from app.services.jellyfin_service import JellyfinService
@@ -63,3 +64,7 @@ def get_m3u_service(request: Request) -> M3uService:
 
 def get_log_service(request: Request) -> LogService:
     return request.app.state.log_service
+
+
+def get_database_maintenance_service(request: Request) -> DatabaseMaintenanceService:
+    return request.app.state.database_maintenance_service

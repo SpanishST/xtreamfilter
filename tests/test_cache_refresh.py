@@ -163,6 +163,59 @@ def test_refresh_cache_preserves_stale_data_on_partial_failure(tmp_path):
     assert cache._api_cache["last_refresh"] is not None
 
 
+def test_refresh_cache_replaces_successful_steps_in_database(tmp_path):
+    cache = _build_cache_service(tmp_path)
+    _seed_existing_source(cache)
+    cache.save_cache_to_disk()
+
+    responses = _partial_refresh_responses()
+    responses["get_vod_streams"] = {
+        "ok": True,
+        "action": "get_vod_streams",
+        "data": [{"stream_id": "vod-new", "name": "Fresh Movie", "category_id": "20"}],
+        "status_code": 200,
+        "duration_ms": 10,
+        "attempts": 1,
+        "error": None,
+    }
+
+    async def fake_fetch(_host, _username, _password, action, retries=2):
+        return responses[action]
+
+    cache.fetch_from_upstream = fake_fetch
+    assert asyncio.run(cache.refresh_cache()) is True
+
+    conn = db_connect(os.path.join(tmp_path, DB_NAME))
+    try:
+        stream_rows = conn.execute(
+            "SELECT content_type, stream_id FROM streams ORDER BY content_type, stream_id"
+        ).fetchall()
+        category_rows = conn.execute(
+            "SELECT content_type, category_id FROM source_categories ORDER BY content_type, category_id"
+        ).fetchall()
+        fts_old = conn.execute(
+            "SELECT COUNT(*) FROM streams_fts WHERE streams_fts MATCH ?", ("Old",)
+        ).fetchone()[0]
+        fts_new = conn.execute(
+            "SELECT COUNT(*) FROM streams_fts WHERE streams_fts MATCH ?", ("Fresh",)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert [(row["content_type"], row["stream_id"]) for row in stream_rows] == [
+        ("live", "live-new"),
+        ("series", "series-new"),
+        ("vod", "vod-new"),
+    ]
+    assert [(row["content_type"], row["category_id"]) for row in category_rows] == [
+        ("live", "10"),
+        ("series", "30"),
+        ("vod", "20"),
+    ]
+    assert fts_old == 0
+    assert fts_new == 3
+
+
 def test_refresh_cache_dispatches_failure_notification(tmp_path):
     cache = _build_cache_service(tmp_path)
     _seed_existing_source(cache)

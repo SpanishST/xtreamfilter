@@ -452,7 +452,96 @@
             border-color: rgba(255, 255, 255, 0.16);
             color: #c7c7c7;
         }
-        
+
+        .maintenance-progress {
+            display: none;
+            margin-top: 15px;
+            padding: 14px;
+            border-radius: 10px;
+            background: rgba(0, 0, 0, 0.22);
+            border: 1px solid rgba(255, 193, 7, 0.2);
+        }
+
+        .maintenance-progress.active {
+            display: block;
+        }
+
+        .maintenance-progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            color: #fff;
+            font-size: 0.9em;
+        }
+
+        .maintenance-progress-phase {
+            color: #ffd866;
+            font-weight: 600;
+        }
+
+        .maintenance-progress-percent {
+            color: #2ed573;
+            white-space: nowrap;
+        }
+
+        .maintenance-progress-track {
+            height: 8px;
+            margin-top: 8px;
+            overflow: hidden;
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .maintenance-progress-bar {
+            height: 100%;
+            width: 0%;
+            border-radius: 4px;
+            background: linear-gradient(90deg, #ffd866, #ff9f43);
+            transition: width 0.3s ease;
+        }
+
+        .maintenance-progress-bar.indeterminate {
+            width: 45% !important;
+            animation: maintenance-progress-slide 1.2s ease-in-out infinite;
+        }
+
+        @keyframes maintenance-progress-slide {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(240%); }
+        }
+
+        .maintenance-details {
+            display: none;
+            margin-top: 12px;
+            color: #c7c7c7;
+            font-size: 0.85em;
+            line-height: 1.5;
+        }
+
+        .maintenance-details.active {
+            display: block;
+        }
+
+        .maintenance-warning {
+            margin-top: 8px;
+            color: #ffd866;
+            font-size: 0.82em;
+            line-height: 1.45;
+        }
+
+        .maintenance-error {
+            display: none;
+            margin-top: 12px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 71, 87, 0.35);
+            background: rgba(255, 71, 87, 0.12);
+            color: #ff9aa5;
+            font-size: 0.85em;
+        }
+
         /* Filter Builder */
         .filter-builder {
             display: grid;
@@ -995,7 +1084,7 @@
                 <button type="button" class="btn btn-sm" onclick="clearCache()" id="clear-cache-btn" style="background: #ff6b6b;">🗑️ Clear Cache</button>
             </div>
         </div>
-        
+
         <!-- Connection URLs Card -->
         <div class="card">
             <h2>🔗 Connection URLs</h2>
@@ -1277,6 +1366,37 @@
                 <a href="/playlist.m3u" class="btn btn-secondary" target="_blank">👁️ View Raw M3U</a>
             </div>
         </div>
+
+        <!-- Database Maintenance Card -->
+        <div class="card" id="database-maintenance-card">
+            <h2>🧹 Database Cleanup / Optimization</h2>
+            <p style="color: #888; font-size: 0.9em; margin-bottom: 12px;">
+                Removes obsolete source data, rebuilds the search index, and compacts the SQLite database.
+                This may temporarily pause database writes.
+            </p>
+            <div id="maintenance-progress-container" class="maintenance-progress">
+                <div class="maintenance-progress-header">
+                    <span id="maintenance-progress-phase" class="maintenance-progress-phase">Preparing...</span>
+                    <span id="maintenance-progress-percent" class="maintenance-progress-percent">0%</span>
+                </div>
+                <div class="maintenance-progress-track" role="progressbar" aria-label="Database maintenance progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                    <div id="maintenance-progress-bar" class="maintenance-progress-bar"></div>
+                </div>
+                <div id="maintenance-progress-detail" style="margin-top: 6px; color: #888; font-size: 0.8em;">
+                    Preparing database maintenance...
+                </div>
+            </div>
+            <div id="maintenance-details" class="maintenance-details"></div>
+            <div id="maintenance-warning" class="maintenance-warning">
+                A full optimization can require temporary free space roughly twice the database size.
+            </div>
+            <div id="maintenance-error" class="maintenance-error"></div>
+            <div style="margin-top: 15px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                <span style="color: #888; font-size: 0.85em;">Database: <span id="maintenance-database-size">-</span></span>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="runDatabaseMaintenance()" id="database-maintenance-btn">🧹 Optimize Database</button>
+                <button type="button" class="btn btn-sm" onclick="cancelDatabaseMaintenance()" id="database-maintenance-cancel-btn" style="display: none; background: #dc3545;">✕ Stop After Current Phase</button>
+            </div>
+        </div>
     </div>
     
     <!-- Telegram Settings Modal -->
@@ -1455,10 +1575,14 @@
         // Guard: set when user clicks Refresh, cleared once API confirms refresh is in progress.
         // Prevents loadCacheStatus from hiding the progress bar before the background task starts.
         let refreshTriggered = false;
+        let maintenancePollInterval = null;
+        let maintenancePollIntervalMs = null;
+        let maintenanceTriggered = false;
         
         // Load sources, filters and cache status on page load
         loadSources();
         loadCacheStatus();
+        loadDatabaseMaintenanceStatus();
         checkVersion();
         
         // Refresh cache status every 30 seconds (when not actively refreshing)
@@ -2475,6 +2599,196 @@
                 })
                 .catch((error) => {
                     showRefreshRequestError(error.message || 'Failed to cancel refresh');
+                });
+        }
+
+        function formatMaintenanceBytes(bytes) {
+            const value = Number(bytes || 0);
+            if (!value) return '-';
+            const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+            return `${(value / Math.pow(1024, index)).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+        }
+
+        function maintenancePhaseLabel(phase) {
+            return {
+                idle: 'Ready',
+                preflight: 'Checking database',
+                cleanup: 'Removing obsolete source data',
+                vacuum: 'Compacting SQLite database',
+                fts_rebuild: 'Rebuilding search index',
+                optimize: 'Optimizing database statistics',
+                complete: 'Optimization complete',
+                cancelled: 'Optimization stopped',
+                interrupted: 'Optimization interrupted'
+            }[phase] || 'Processing database';
+        }
+
+        function maintenanceStatusLabel(status) {
+            return {
+                idle: 'Ready',
+                running: 'Running',
+                stop_requested: 'Stopping safely',
+                succeeded: 'Successful',
+                failed: 'Failed',
+                cancelled: 'Cancelled',
+                interrupted: 'Interrupted'
+            }[status] || 'Ready';
+        }
+
+        function setMaintenancePolling(intervalMs) {
+            if (maintenancePollInterval && maintenancePollIntervalMs === intervalMs) return;
+            if (maintenancePollInterval) clearInterval(maintenancePollInterval);
+            maintenancePollInterval = setInterval(loadDatabaseMaintenanceStatus, intervalMs);
+            maintenancePollIntervalMs = intervalMs;
+        }
+
+        function clearMaintenancePolling() {
+            if (maintenancePollInterval) clearInterval(maintenancePollInterval);
+            maintenancePollInterval = null;
+            maintenancePollIntervalMs = null;
+        }
+
+        function renderDatabaseMaintenance(data) {
+            const status = data.status || 'idle';
+            const active = status === 'running' || status === 'stop_requested';
+            const progressContainer = document.getElementById('maintenance-progress-container');
+            const progressBar = document.getElementById('maintenance-progress-bar');
+            const progressTrack = progressBar.parentElement;
+            const phaseEl = document.getElementById('maintenance-progress-phase');
+            const percentEl = document.getElementById('maintenance-progress-percent');
+            const detailEl = document.getElementById('maintenance-progress-detail');
+            const detailsEl = document.getElementById('maintenance-details');
+            const errorEl = document.getElementById('maintenance-error');
+            const runBtn = document.getElementById('database-maintenance-btn');
+            const cancelBtn = document.getElementById('database-maintenance-cancel-btn');
+
+            const percent = Math.max(0, Math.min(100, Number(data.percent || 0)));
+            const indeterminate = Boolean(data.indeterminate);
+            document.getElementById('maintenance-database-size').textContent = formatMaintenanceBytes(
+                data.database_size_current || data.database_size_after || data.database_size_before
+            );
+
+            phaseEl.textContent = maintenancePhaseLabel(data.phase);
+            percentEl.textContent = indeterminate ? 'Working...' : `${percent}%`;
+            progressBar.style.width = `${percent}%`;
+            progressBar.classList.toggle('indeterminate', indeterminate);
+            progressTrack.setAttribute('aria-valuenow', String(percent));
+            progressTrack.setAttribute('aria-valuetext', indeterminate ? 'Working' : `${percent}%`);
+            detailEl.textContent = active
+                ? (status === 'stop_requested'
+                    ? 'A safe stop was requested. The current SQLite phase will finish before stopping.'
+                    : (indeterminate
+                        ? 'This phase may take a while on a large database.'
+                        : 'Database maintenance is running.'))
+                : maintenanceStatusLabel(status);
+
+            progressContainer.classList.toggle('active', active);
+            runBtn.disabled = active;
+            cancelBtn.style.display = status === 'running' ? 'inline-block' : 'none';
+            runBtn.textContent = active ? '⏳ Optimizing...' : '🧹 Optimize Database';
+
+            const beforeSize = formatMaintenanceBytes(data.database_size_before);
+            const afterSize = formatMaintenanceBytes(data.database_size_after);
+            const sizeChange = data.database_size_after && data.database_size_before
+                ? `Database size: ${beforeSize} -> ${afterSize}`
+                : `Database size: ${formatMaintenanceBytes(data.database_size_current || data.database_size_before)}`;
+            const resultParts = [
+                sizeChange,
+                `Streams removed: ${Number(data.rows_removed || 0).toLocaleString()}`,
+                `Categories removed: ${Number(data.categories_removed || 0).toLocaleString()}`,
+                `FTS documents before: ${Number(data.fts_documents_before || 0).toLocaleString()}`,
+                `FTS orphans after: ${Number(data.fts_orphans_after || 0).toLocaleString()}`
+            ];
+            if (data.finished_at || status === 'failed' || status === 'cancelled' || status === 'interrupted') {
+                detailsEl.textContent = resultParts.join(' • ');
+                detailsEl.classList.add('active');
+            } else {
+                detailsEl.classList.remove('active');
+                detailsEl.textContent = '';
+            }
+
+            if (data.last_error) {
+                errorEl.textContent = data.last_error;
+                errorEl.style.display = 'block';
+            } else {
+                errorEl.textContent = '';
+                errorEl.style.display = 'none';
+            }
+
+            if (active) {
+                setMaintenancePolling(1500);
+            } else {
+                clearMaintenancePolling();
+            }
+        }
+
+        function loadDatabaseMaintenanceStatus() {
+            return fetch('/api/database/cleanup/status')
+                .then(parseJsonResponse)
+                .then(renderDatabaseMaintenance)
+                .catch(error => {
+                    const errorEl = document.getElementById('maintenance-error');
+                    errorEl.textContent = error.message || 'Failed to load database maintenance status';
+                    errorEl.style.display = 'block';
+                });
+        }
+
+        function runDatabaseMaintenance() {
+            const size = document.getElementById('maintenance-database-size').textContent;
+            if (!confirm(`Run full database cleanup and optimization? The current database is ${size}. This may take several minutes and temporarily block database writes.`)) return;
+
+            maintenanceTriggered = true;
+            const runBtn = document.getElementById('database-maintenance-btn');
+            const cancelBtn = document.getElementById('database-maintenance-cancel-btn');
+            runBtn.disabled = true;
+            runBtn.textContent = '⏳ Starting...';
+            cancelBtn.style.display = 'inline-block';
+            document.getElementById('maintenance-error').style.display = 'none';
+            document.getElementById('maintenance-progress-container').classList.add('active');
+            setMaintenancePolling(1500);
+
+            fetch('/api/database/cleanup', { method: 'POST' })
+                .then(parseJsonResponse)
+                .then(data => {
+                    if (data.status === 'busy' || data.status === 'already_running') {
+                        maintenanceTriggered = false;
+                        runBtn.disabled = false;
+                        runBtn.textContent = '🧹 Optimize Database';
+                        cancelBtn.style.display = 'none';
+                        const errorEl = document.getElementById('maintenance-error');
+                        errorEl.textContent = data.message || 'Database maintenance is already running';
+                        errorEl.style.display = 'block';
+                        loadDatabaseMaintenanceStatus();
+                        return;
+                    }
+                    loadDatabaseMaintenanceStatus();
+                })
+                .catch(error => {
+                    maintenanceTriggered = false;
+                    runBtn.disabled = false;
+                    runBtn.textContent = '🧹 Optimize Database';
+                    cancelBtn.style.display = 'none';
+                    clearMaintenancePolling();
+                    const errorEl = document.getElementById('maintenance-error');
+                    errorEl.textContent = error.message || 'Failed to start database maintenance';
+                    errorEl.style.display = 'block';
+                });
+        }
+
+        function cancelDatabaseMaintenance() {
+            if (!confirm('Stop database maintenance after the current safe phase?')) return;
+
+            fetch('/api/database/cleanup/cancel', { method: 'POST' })
+                .then(parseJsonResponse)
+                .then(() => {
+                    maintenanceTriggered = false;
+                    loadDatabaseMaintenanceStatus();
+                })
+                .catch(error => {
+                    const errorEl = document.getElementById('maintenance-error');
+                    errorEl.textContent = error.message || 'Failed to stop database maintenance';
+                    errorEl.style.display = 'block';
                 });
         }
         

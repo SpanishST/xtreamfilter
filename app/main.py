@@ -21,6 +21,7 @@ from app.routes import (
     cart_api,
     category_api,
     config_api,
+    database_api,
     epg,
     filter_api,
     health,
@@ -38,6 +39,7 @@ from app.services.cache_service import CacheService
 from app.services.cart_service import CartService
 from app.services.category_service import CategoryService
 from app.services.config_service import ConfigService
+from app.services.database_maintenance_service import DatabaseMaintenanceService
 from app.services.epg_service import EpgService
 from app.services.http_client import HttpClientService
 from app.services.jellyfin_service import JellyfinService
@@ -174,6 +176,8 @@ async def lifespan(app: FastAPI):
     notif = NotificationService(cfg, http)
 
     cache = CacheService(cfg, http, notif)
+    database_maintenance = DatabaseMaintenanceService(cfg, cache)
+    database_maintenance.recover_interrupted()
 
     epg_svc = EpgService(cfg, http, cache)
     xtream = XtreamService(cfg, cache, http)
@@ -191,6 +195,7 @@ async def lifespan(app: FastAPI):
     app.state.config_service = cfg
     app.state.http_client = http
     app.state.cache_service = cache
+    app.state.database_maintenance_service = database_maintenance
     app.state.epg_service = epg_svc
     app.state.xtream_service = xtream
     app.state.notification_service = notif
@@ -246,6 +251,7 @@ async def lifespan(app: FastAPI):
         await schedule_task
     except asyncio.CancelledError:
         pass
+    await database_maintenance.shutdown()
     await http.close()
     logger.info("Application shutdown complete")
 
@@ -277,6 +283,7 @@ app.include_router(filter_api.router)
 app.include_router(source_api.router)
 app.include_router(config_api.router)
 app.include_router(cache_api.router)
+app.include_router(database_api.router)
 app.include_router(cart_api.router)
 app.include_router(monitor_api.router)
 app.include_router(log_api.router)

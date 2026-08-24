@@ -64,6 +64,7 @@ class CacheService:
         self._refresh_task: asyncio.Task | None = None
         self._refresh_cancel_requested = False
         self._refresh_cancel_reason = ""
+        self._maintenance_active = False
 
         self._stream_source_map: dict[str, dict[str, str]] = {
             "live": {},
@@ -378,6 +379,40 @@ class CacheService:
         finally:
             conn.close()
         return self._default_refresh_progress()
+
+    # ------------------------------------------------------------------
+    # Database maintenance coordination
+    # ------------------------------------------------------------------
+
+    def is_maintenance_active(self) -> bool:
+        return self._maintenance_active
+
+    def try_begin_maintenance(self) -> bool:
+        """Claim the cache lifecycle for a database maintenance operation."""
+        refresh_active = (
+            self._refresh_lock.locked()
+            or (self._refresh_task is not None and not self._refresh_task.done())
+            or bool(self._api_cache.get("refresh_in_progress"))
+        )
+        if self._maintenance_active or refresh_active:
+            return False
+        self._maintenance_active = True
+        return True
+
+    def end_maintenance(self) -> None:
+        self._maintenance_active = False
+
+    async def prune_sources_to_ids(self, source_ids: set[str]) -> None:
+        """Drop in-memory cache entries for sources removed from the database."""
+        async with self._cache_lock:
+            sources = self._api_cache.get("sources", {})
+            self._api_cache["sources"] = {
+                source_id: source_cache
+                for source_id, source_cache in sources.items()
+                if source_id in source_ids
+            }
+        await self.rebuild_stream_source_map()
+        await asyncio.to_thread(self._rebuild_stream_index)
 
     def clear_refresh_progress(self, status: str = "cancelled", last_error: str = "") -> None:
         progress = self.load_refresh_progress()
@@ -711,8 +746,15 @@ class CacheService:
             ]
 
             for source_id, src_cache in sources.items():
+                preserved_steps = set(src_cache.get("_preserved_steps", []))
                 cat_rows = []
                 for cat_key, ct in CAT_MAP:
+                    if cat_key not in src_cache or cat_key in preserved_steps:
+                        continue
+                    conn.execute(
+                        "DELETE FROM source_categories WHERE source_id=? AND content_type=?",
+                        (source_id, ct),
+                    )
                     for cat in src_cache.get(cat_key, []):
                         cat_rows.append(
                             (
@@ -725,7 +767,7 @@ class CacheService:
                         )
                 if cat_rows:
                     conn.executemany(
-                        "INSERT OR REPLACE INTO source_categories "
+                        "INSERT OR IGNORE INTO source_categories "
                         "(source_id, content_type, category_id, category_name, data) "
                         "VALUES (?,?,?,?,?)",
                         cat_rows,
@@ -733,6 +775,12 @@ class CacheService:
 
                 stream_rows = []
                 for list_key, ct, id_field in TYPE_MAP:
+                    if list_key not in src_cache or list_key in preserved_steps:
+                        continue
+                    conn.execute(
+                        "DELETE FROM streams WHERE source_id=? AND content_type=?",
+                        (source_id, ct),
+                    )
                     for stream in src_cache.get(list_key, []):
                         sid = str(stream.get(id_field, ""))
                         if not sid:
@@ -755,7 +803,7 @@ class CacheService:
                         )
                 if stream_rows:
                     conn.executemany(
-                        "INSERT OR REPLACE INTO streams "
+                        "INSERT OR IGNORE INTO streams "
                         "(source_id, content_type, stream_id, name, category_id, added, data) "
                         "VALUES (?,?,?,?,?,?,?)",
                         stream_rows,
@@ -823,8 +871,15 @@ class CacheService:
             ]
 
             for source_id, src_cache in sources.items():
+                preserved_steps = set(src_cache.get("_preserved_steps", []))
                 cat_rows = []
                 for cat_key, ct in CAT_MAP:
+                    if cat_key not in src_cache or cat_key in preserved_steps:
+                        continue
+                    await conn.execute(
+                        "DELETE FROM source_categories WHERE source_id=? AND content_type=?",
+                        (source_id, ct),
+                    )
                     for cat in src_cache.get(cat_key, []):
                         cat_rows.append(
                             (
@@ -837,7 +892,7 @@ class CacheService:
                         )
                 if cat_rows:
                     await conn.executemany(
-                        "INSERT OR REPLACE INTO source_categories "
+                        "INSERT OR IGNORE INTO source_categories "
                         "(source_id, content_type, category_id, category_name, data) "
                         "VALUES (?,?,?,?,?)",
                         cat_rows,
@@ -845,6 +900,12 @@ class CacheService:
 
                 stream_rows = []
                 for list_key, ct, id_field in TYPE_MAP:
+                    if list_key not in src_cache or list_key in preserved_steps:
+                        continue
+                    await conn.execute(
+                        "DELETE FROM streams WHERE source_id=? AND content_type=?",
+                        (source_id, ct),
+                    )
                     for stream in src_cache.get(list_key, []):
                         sid = str(stream.get(id_field, ""))
                         if not sid:
@@ -867,7 +928,7 @@ class CacheService:
                         )
                 if stream_rows:
                     await conn.executemany(
-                        "INSERT OR REPLACE INTO streams "
+                        "INSERT OR IGNORE INTO streams "
                         "(source_id, content_type, stream_id, name, category_id, added, data) "
                         "VALUES (?,?,?,?,?,?,?)",
                         stream_rows,
@@ -1626,6 +1687,7 @@ class CacheService:
             else:
                 # Selective rollback: shallow-copy only this step's existing list
                 source_cache[cache_key] = list(existing_source.get(cache_key, []))
+                source_cache.setdefault("_preserved_steps", []).append(cache_key)
                 error = dict(fetch_result.get("error") or {})
                 step_result["status"] = "failed"
                 step_result["error"] = error
@@ -1676,6 +1738,8 @@ class CacheService:
 
     def start_refresh(self, on_cache_refreshed=None) -> bool:
         """Start one background refresh task, returning whether it was started."""
+        if self._maintenance_active:
+            return False
         if self._refresh_lock.locked():
             return False
         if self._refresh_task is not None and not self._refresh_task.done():
@@ -1745,6 +1809,9 @@ class CacheService:
 
     async def refresh_cache(self, on_cache_refreshed=None) -> bool:
         """Run one cache refresh, never overlapping another refresh."""
+        if self._maintenance_active:
+            logger.info("Database maintenance is running, skipping cache refresh")
+            return False
         if self._refresh_lock.locked():
             logger.info("Refresh already running, skipping")
             return False
@@ -2103,6 +2170,8 @@ class CacheService:
     # ------------------------------------------------------------------
 
     async def clear_cache(self) -> None:
+        if self._maintenance_active:
+            raise RuntimeError("Database maintenance is in progress")
         await self.cancel_refresh("Cache cleared while refresh was active")
         async with self._cache_lock:
             self._api_cache = {"sources": {}, "last_refresh": None, "refresh_in_progress": False}

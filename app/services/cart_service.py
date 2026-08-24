@@ -769,6 +769,12 @@ class CartService:
                                 meta_title = _str_val(
                                     info.get("name") or info.get("title")
                                 ).strip()
+                                if _cur_sname and _cur_sname != meta_title:
+                                    logger.info(
+                                        f"[META] Preferring user-defined series name: "
+                                        f"'{_cur_sname}' instead of '{meta_title}'"
+                                    )
+                                    return
                                 if meta_title:
                                     year = _extract_year(info)
                                     if year and year not in meta_title:

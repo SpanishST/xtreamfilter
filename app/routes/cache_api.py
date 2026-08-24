@@ -1,4 +1,5 @@
 """Cache management API routes."""
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -92,10 +93,11 @@ async def trigger_cache_refresh(
 
 @router.post("/api/cache/cancel-refresh")
 async def cancel_cache_refresh(cache: CacheService = Depends(get_cache_service)):
-    cache.clear_refresh_progress()
-    async with cache._cache_lock:
-        cache._api_cache["refresh_in_progress"] = False
-    return {"status": "ok", "message": "Refresh state cleared"}
+    cancelled = await cache.cancel_refresh()
+    return {
+        "status": "ok",
+        "message": "Refresh cancelled" if cancelled else "Refresh state cleared",
+    }
 
 
 @router.post("/api/cache/clear")

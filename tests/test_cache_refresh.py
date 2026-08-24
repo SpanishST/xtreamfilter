@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 
-from app.database import DB_NAME, init_db
+from app.database import DB_NAME, db_connect, init_db
 from app.services.cache_service import CacheService
 from app.services.config_service import ConfigService
 from app.services.http_client import HttpClientService
@@ -263,3 +263,83 @@ def test_start_refresh_owns_one_background_task(tmp_path):
     asyncio.run(exercise())
 
     assert started == 2
+
+
+def test_cancel_refresh_stops_task_and_persists_terminal_state(tmp_path):
+    cache = _build_cache_service(tmp_path)
+    first_fetch_started = asyncio.Event()
+    calls = []
+
+    async def blocked_fetch(_host, _username, _password, action, retries=2):
+        calls.append(action)
+        first_fetch_started.set()
+        await asyncio.Event().wait()
+
+    cache.fetch_from_upstream = blocked_fetch
+
+    async def exercise():
+        assert cache.start_refresh() is True
+        await first_fetch_started.wait()
+
+        assert await cache.cancel_refresh() is True
+        await asyncio.sleep(0)
+
+    asyncio.run(exercise())
+
+    assert calls == ["get_live_categories"]
+    assert cache._refresh_task is None
+    assert cache._api_cache["refresh_in_progress"] is False
+    assert cache.load_refresh_progress()["status"] == "cancelled"
+
+    conn = db_connect(os.path.join(tmp_path, DB_NAME))
+    try:
+        row = conn.execute(
+            "SELECT in_progress, status, current_step, last_error FROM refresh_progress WHERE id = 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row["in_progress"] == 0
+    assert row["status"] == "cancelled"
+    assert row["current_step"] == "Cancelled"
+    assert row["last_error"] == "Cancelled by user"
+
+
+def test_cancel_refresh_does_not_publish_partial_cache_or_run_callback(tmp_path):
+    cache = _build_cache_service(tmp_path)
+    old_vod_streams, _ = _seed_existing_source(cache)
+    second_fetch_started = asyncio.Event()
+    calls = []
+    callback_calls = []
+
+    async def fetch_with_block(_host, _username, _password, action, retries=2):
+        calls.append(action)
+        if action == "get_live_categories":
+            return {
+                "ok": True,
+                "action": action,
+                "data": [{"category_id": "10", "category_name": "Fresh Live"}],
+                "status_code": 200,
+                "duration_ms": 1,
+                "attempts": 1,
+                "error": None,
+            }
+        second_fetch_started.set()
+        await asyncio.Event().wait()
+
+    async def post_refresh_callback():
+        callback_calls.append(True)
+
+    cache.fetch_from_upstream = fetch_with_block
+
+    async def exercise():
+        assert cache.start_refresh(on_cache_refreshed=post_refresh_callback) is True
+        await second_fetch_started.wait()
+        assert await cache.cancel_refresh() is True
+
+    asyncio.run(exercise())
+
+    assert calls == ["get_live_categories", "get_vod_categories"]
+    assert callback_calls == []
+    assert cache._api_cache["sources"]["src-1"]["vod_streams"] == old_vod_streams
+    assert cache.load_refresh_progress()["status"] == "cancelled"

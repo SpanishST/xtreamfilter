@@ -186,6 +186,45 @@ def test_refresh_cache_dispatches_failure_notification(tmp_path):
     assert sent_statuses == ["partial"]
 
 
+def test_refresh_reports_browse_category_phase_before_completion(tmp_path):
+    cache = _build_cache_service(tmp_path)
+    responses = _partial_refresh_responses()
+    category_started = asyncio.Event()
+    release_categories = asyncio.Event()
+
+    async def fake_fetch(_host, _username, _password, action, retries=2):
+        return responses[action]
+
+    async def refresh_categories():
+        category_started.set()
+        await release_categories.wait()
+
+    cache.fetch_from_upstream = fake_fetch
+
+    async def exercise():
+        refresh_task = asyncio.create_task(cache.refresh_cache(on_cache_refreshed=refresh_categories))
+        await category_started.wait()
+
+        progress = cache.load_refresh_progress()
+        assert progress["in_progress"] is True
+        assert progress["phase"] == "categories"
+        assert progress["current_step"] == "Refreshing configured browse categories..."
+        assert progress["percent"] == 95
+        persisted_progress = await cache.load_refresh_progress_async()
+        assert persisted_progress["phase"] == "categories"
+        assert persisted_progress["percent"] == 95
+
+        release_categories.set()
+        assert await refresh_task is True
+
+    asyncio.run(exercise())
+
+    progress = cache.load_refresh_progress()
+    assert progress["in_progress"] is False
+    assert progress["phase"] == "complete"
+    assert progress["percent"] == 100
+
+
 def test_refresh_cache_slims_memory_cache_when_persistence_fails(tmp_path):
     cache = _build_cache_service(tmp_path)
     responses = _partial_refresh_responses()

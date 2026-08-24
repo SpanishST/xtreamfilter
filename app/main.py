@@ -75,26 +75,17 @@ async def background_refresh_loop(
             cache_was_refreshed = False
             if not cache.is_cache_valid():
                 logger.info("Cache expired, triggering refresh…")
-                if cache.start_refresh():
+                category_callback = cat.refresh_pattern_categories_async if cat else None
+                if cache.start_refresh(on_cache_refreshed=category_callback):
                     cache_was_refreshed = await cache.wait_for_refresh()
             else:
                 logger.info(f"Cache still valid. Last refresh: {cache._api_cache.get('last_refresh', 'Never')}")
 
             if cache_was_refreshed:
-
                 async def _run_post_refresh_tasks():
-                    coros = [
-                        monitor.check_monitored_series(),
-                        monitor.check_monitored_movies(),
-                    ]
-                    if cat:
-                        coros.insert(0, cat.refresh_pattern_categories_async())
+                    coros = [monitor.check_monitored_series(), monitor.check_monitored_movies()]
                     results = await asyncio.gather(*coros, return_exceptions=True)
-                    names = (
-                        ["category refresh", "series monitoring", "movie monitoring"]
-                        if cat
-                        else ["series monitoring", "movie monitoring"]
-                    )
+                    names = ["series monitoring", "movie monitoring"]
                     for i, res in enumerate(results):
                         if isinstance(res, Exception):
                             logger.error(f"{names[i]} error in background loop: {res}")

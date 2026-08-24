@@ -970,7 +970,7 @@
                     <div id="refresh-progress-bar" style="background: linear-gradient(90deg, #00d4ff, #2ed573); height: 100%; width: 0%; transition: width 0.3s ease;"></div>
                 </div>
                 <div style="margin-top: 5px; color: #888; font-size: 0.8em;">
-                    Source <span id="refresh-progress-source">0</span> of <span id="refresh-progress-total">0</span>
+                    <span id="refresh-progress-context">Source <span id="refresh-progress-source">0</span> of <span id="refresh-progress-total">0</span></span>
                 </div>
             </div>
 
@@ -2133,9 +2133,13 @@
             }[progress.status] || '';
 
             if (progress.in_progress) {
-                const totalSteps = summary.total_steps || (totalSources * 6);
-                parts.push(`${summary.processed_steps || 0}/${totalSteps || 0} steps finished`);
-                if (totalSources) {
+                if (progress.phase === 'categories') {
+                    parts.push('Updating configured browse categories');
+                } else {
+                    const totalSteps = summary.total_steps || (totalSources * 6);
+                    parts.push(`${summary.processed_steps || 0}/${totalSteps || 0} steps finished`);
+                }
+                if (totalSources && progress.phase !== 'categories') {
                     parts.push(`source ${Math.min(progress.current_source || 0, totalSources)} of ${totalSources}`);
                 }
             } else if (totalSources) {
@@ -2342,18 +2346,28 @@
                         
                         // Show and update progress bar
                         progressContainer.style.display = 'block';
+                        const progressContext = document.getElementById('refresh-progress-context');
+                        if (progress.phase === 'categories') {
+                            progressContext.textContent = 'Updating configured browse categories';
+                        } else if (progress.phase === 'waiting') {
+                            progressContext.textContent = 'Waiting for downloads to finish';
+                        } else {
+                            progressContext.innerHTML = 'Source <span id="refresh-progress-source">0</span> of <span id="refresh-progress-total">0</span>';
+                        }
                         if (progress.in_progress) {
                             const percent = Math.min(progress.percent || 0, 100);
                             document.getElementById('refresh-progress-bar').style.width = percent + '%';
                             document.getElementById('refresh-progress-percent').textContent = percent + '%';
                             document.getElementById('refresh-progress-step').textContent = progress.current_step || 'Processing...';
-                            document.getElementById('refresh-progress-source').textContent = progress.current_source || 0;
-                            document.getElementById('refresh-progress-total').textContent = progress.total_sources || 0;
+                            if (progress.phase !== 'categories' && progress.phase !== 'waiting') {
+                                document.getElementById('refresh-progress-source').textContent = progress.current_source || 0;
+                                document.getElementById('refresh-progress-total').textContent = progress.total_sources || 0;
+                            }
                         } else {
                             document.getElementById('refresh-progress-step').textContent = 'Starting...';
                         }
                         
-                        setRefreshPolling(4000);
+                        setRefreshPolling(2000);
                     } else if (refreshTriggered) {
                         // User just clicked Refresh but background task hasn't started yet — keep UI as-is
                         status = '⏳';
@@ -2420,7 +2434,7 @@
             document.getElementById('refresh-progress-source').textContent = '0';
             document.getElementById('refresh-progress-total').textContent = '0';
             refreshTriggered = true;
-            setRefreshPolling(4000);
+            setRefreshPolling(2000);
             
             fetch('/api/cache/refresh', { method: 'POST' })
                 .then(parseJsonResponse)

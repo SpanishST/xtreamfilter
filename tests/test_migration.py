@@ -310,11 +310,12 @@ class TestSchemaUpgrades:
             conn = db_connect(db_path)
             try:
                 columns = {row[1] for row in conn.execute("PRAGMA table_info(refresh_progress)")}
-                assert {"status", "source_results", "summary", "finished_at", "last_error"}.issubset(columns)
+                assert {"status", "phase", "source_results", "summary", "finished_at", "last_error"}.issubset(columns)
                 row = conn.execute(
-                    "SELECT status, source_results, summary, last_error FROM refresh_progress WHERE id = 1"
+                    "SELECT status, phase, source_results, summary, last_error FROM refresh_progress WHERE id = 1"
                 ).fetchone()
                 assert row["status"] == "idle"
+                assert row["phase"] == "sources"
                 assert row["source_results"] == "[]"
                 assert row["summary"] == "{}"
                 assert row["last_error"] == ""

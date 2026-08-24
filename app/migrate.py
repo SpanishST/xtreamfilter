@@ -422,8 +422,8 @@ def _migrate_refresh_progress(conn: sqlite3.Connection, data_dir: str) -> None:
         conn.execute(
             """INSERT OR REPLACE INTO refresh_progress
                (id, in_progress, current_source, total_sources,
-                current_source_name, current_step, percent, started_at)
-               VALUES (1, 0, ?, ?, ?, ?, ?, ?)""",
+                current_source_name, current_step, percent, started_at, phase)
+               VALUES (1, 0, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 p.get("current_source", 0),
                 p.get("total_sources", 0),
@@ -431,6 +431,7 @@ def _migrate_refresh_progress(conn: sqlite3.Connection, data_dir: str) -> None:
                 p.get("current_step", ""),
                 p.get("percent", 0),
                 p.get("started_at"),
+                p.get("phase", "sources"),
             ),
         )
         conn.commit()

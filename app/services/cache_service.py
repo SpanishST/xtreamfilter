@@ -125,6 +125,7 @@ class CacheService:
             "current_source_name": "",
             "current_step": "",
             "percent": 0,
+            "phase": "sources",
             "started_at": None,
             "heartbeat_at": None,
             "finished_at": None,
@@ -146,6 +147,7 @@ class CacheService:
         )
         progress["current_step"] = str(progress_data.get("current_step", progress["current_step"]) or "")
         progress["percent"] = int(progress_data.get("percent", progress["percent"]) or 0)
+        progress["phase"] = str(progress_data.get("phase", progress["phase"]) or "sources")
         progress["started_at"] = progress_data.get("started_at")
         progress["heartbeat_at"] = progress_data.get("heartbeat_at")
         progress["finished_at"] = progress_data.get("finished_at")
@@ -305,8 +307,8 @@ class CacheService:
                 """INSERT OR REPLACE INTO refresh_progress
                    (id, in_progress, current_source, total_sources,
                     current_source_name, current_step, percent, started_at,
-                    heartbeat_at, status, source_results, summary, finished_at, last_error)
-                   VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   heartbeat_at, status, phase, source_results, summary, finished_at, last_error)
+                   VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     int(progress_data.get("in_progress", False)),
                     progress_data.get("current_source", 0),
@@ -317,6 +319,7 @@ class CacheService:
                     progress_data.get("started_at"),
                     progress_data.get("heartbeat_at"),
                     progress_data.get("status", "idle"),
+                    progress_data.get("phase", "sources"),
                     json.dumps(progress_data.get("source_results", []), ensure_ascii=False),
                     json.dumps(progress_data.get("summary", {}), ensure_ascii=False),
                     progress_data.get("finished_at"),
@@ -339,7 +342,7 @@ class CacheService:
             row = conn.execute(
                 "SELECT in_progress, current_source, total_sources, "
                 "current_source_name, current_step, percent, started_at, "
-                "heartbeat_at, status, source_results, summary, finished_at, last_error "
+                "heartbeat_at, status, phase, source_results, summary, finished_at, last_error "
                 "FROM refresh_progress WHERE id = 1"
             ).fetchone()
             if row:
@@ -352,9 +355,10 @@ class CacheService:
                         "current_step": row["current_step"],
                         "percent": row["percent"],
                         "started_at": row["started_at"],
-                        "heartbeat_at": row["heartbeat_at"],
-                        "status": row["status"],
-                        "source_results": row["source_results"],
+                    "heartbeat_at": row["heartbeat_at"],
+                    "status": row["status"],
+                    "phase": row["phase"],
+                    "source_results": row["source_results"],
                         "summary": row["summary"],
                         "finished_at": row["finished_at"],
                         "last_error": row["last_error"],
@@ -372,6 +376,7 @@ class CacheService:
         progress = self.load_refresh_progress()
         progress["in_progress"] = False
         progress["status"] = status
+        progress["phase"] = "cancelled" if status == "cancelled" else "complete"
         progress["current_step"] = "Cancelled" if status == "cancelled" else ""
         progress["current_source_name"] = ""
         progress["percent"] = 0 if status == "cancelled" else progress.get("percent", 0)
@@ -393,8 +398,8 @@ class CacheService:
                             """INSERT OR REPLACE INTO refresh_progress
                                (id, in_progress, current_source, total_sources,
                                 current_source_name, current_step, percent, started_at,
-                                heartbeat_at, status, source_results, summary, finished_at, last_error)
-                               VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                heartbeat_at, status, phase, source_results, summary, finished_at, last_error)
+                               VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                             (
                                 int(progress_data.get("in_progress", False)),
                                 progress_data.get("current_source", 0),
@@ -405,6 +410,7 @@ class CacheService:
                                 progress_data.get("started_at"),
                                 progress_data.get("heartbeat_at"),
                                 progress_data.get("status", "idle"),
+                                progress_data.get("phase", "sources"),
                                 json.dumps(progress_data.get("source_results", []), ensure_ascii=False),
                                 json.dumps(progress_data.get("summary", {}), ensure_ascii=False),
                                 progress_data.get("finished_at"),
@@ -437,7 +443,7 @@ class CacheService:
                 async with conn.execute(
                     "SELECT in_progress, current_source, total_sources, "
                     "current_source_name, current_step, percent, started_at, "
-                    "heartbeat_at, status, source_results, summary, finished_at, last_error "
+                    "heartbeat_at, status, phase, source_results, summary, finished_at, last_error "
                     "FROM refresh_progress WHERE id = 1"
                 ) as cursor:
                     row = await cursor.fetchone()
@@ -454,6 +460,7 @@ class CacheService:
                                 "started_at": d["started_at"],
                                 "heartbeat_at": d.get("heartbeat_at"),
                                 "status": d["status"],
+                                "phase": d.get("phase", "sources"),
                                 "source_results": d["source_results"],
                                 "summary": d["summary"],
                                 "finished_at": d["finished_at"],
@@ -1585,9 +1592,12 @@ class CacheService:
             step_result["preserved_existing"] = False
             progress["current_step"] = f"{source_name}: {label}"
             progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
-            progress["percent"] = int(
-                (progress["summary"].get("processed_steps", 0) / max(progress["summary"].get("total_steps", 1), 1))
-                * 100
+            progress["percent"] = min(
+                95,
+                int(
+                    (progress["summary"].get("processed_steps", 0) / max(progress["summary"].get("total_steps", 1), 1))
+                    * 100
+                ),
             )
             self.save_refresh_progress(progress)
             logger.info(
@@ -1624,9 +1634,12 @@ class CacheService:
             source_result["counts"] = self._build_source_counts(source_cache)
             source_result["status"] = self._derive_source_status(source_result)
             progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
-            progress["percent"] = int(
-                (progress["summary"].get("processed_steps", 0) / max(progress["summary"].get("total_steps", 1), 1))
-                * 100
+            progress["percent"] = min(
+                95,
+                int(
+                    (progress["summary"].get("processed_steps", 0) / max(progress["summary"].get("total_steps", 1), 1))
+                    * 100
+                ),
             )
             self.save_refresh_progress(progress)
 
@@ -1681,6 +1694,7 @@ class CacheService:
         progress = self._normalise_refresh_progress(self._api_cache.get("refresh_progress"))
         progress["in_progress"] = False
         progress["status"] = "cancelled"
+        progress["phase"] = "cancelled"
         progress["current_step"] = "Cancelled"
         progress["current_source_name"] = ""
         progress["percent"] = 0
@@ -1764,6 +1778,7 @@ class CacheService:
                 {
                     "in_progress": True,
                     "status": "waiting",
+                    "phase": "waiting",
                     "current_source": 0,
                     "total_sources": 0,
                     "current_source_name": "",
@@ -1802,6 +1817,7 @@ class CacheService:
                             {
                                 "in_progress": False,
                                 "status": "failed",
+                                "phase": "complete",
                                 "current_source": 0,
                                 "total_sources": 0,
                                 "current_source_name": "",
@@ -1823,6 +1839,7 @@ class CacheService:
                             {
                                 "in_progress": True,
                                 "status": "waiting",
+                                "phase": "waiting",
                                 "current_source": 0,
                                 "total_sources": 0,
                                 "current_source_name": "",
@@ -1876,6 +1893,7 @@ class CacheService:
                 {
                     "in_progress": False,
                     "status": "failed",
+                    "phase": "complete",
                     "current_source": 0,
                     "total_sources": 0,
                     "current_source_name": "",
@@ -1916,6 +1934,7 @@ class CacheService:
             {
                 "in_progress": True,
                 "status": "running",
+                "phase": "sources",
                 "current_source": 0,
                 "total_sources": total_sources,
                 "current_source_name": "",
@@ -1995,12 +2014,13 @@ class CacheService:
 
                 if on_cache_refreshed and any_source_updated:
                     progress["in_progress"] = True
+                    progress["phase"] = "categories"
                     progress["current_source"] = total_sources
-                    progress["current_source_name"] = "Categories"
-                    progress["current_step"] = "Refreshing automatic categories..."
-                    progress["percent"] = min(progress.get("percent", 0), 95)
+                    progress["current_source_name"] = "Browse categories"
+                    progress["current_step"] = "Refreshing configured browse categories..."
+                    progress["percent"] = 95
                     progress["summary"] = summary
-                    self.save_refresh_progress(progress)
+                    await self.save_refresh_progress_async(progress, force=True)
                     await on_cache_refreshed()
 
                 if failed_sources or partial_sources:
@@ -2056,6 +2076,7 @@ class CacheService:
             progress["in_progress"] = False
             if cancelled:
                 progress["status"] = "cancelled"
+                progress["phase"] = "cancelled"
                 progress["current_step"] = "Cancelled"
                 progress["percent"] = 0
                 progress["last_error"] = (
@@ -2063,6 +2084,7 @@ class CacheService:
                 )
             else:
                 progress["status"] = final_status
+                progress["phase"] = "complete"
                 progress["current_step"] = {
                     "success": "Complete",
                     "partial": "Complete with warnings",

@@ -19,6 +19,8 @@ from app.database import DB_NAME, _row_to_dict, adb_transaction, db_connect
 if TYPE_CHECKING:
     from app.services.cart_service import CartService
     from app.services.config_service import ConfigService
+    from app.services.http_client import HttpClientService
+    from app.services.log_service import LogService
     from app.services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -47,7 +49,7 @@ class CacheService:
         self.http_client = http_client
         self.notification_service = notification_service
         self.cart_service: "CartService | None" = None
-        self.log_service = None  # set after init via attribute binding
+        self.log_service: "LogService | None" = None  # set after init via attribute binding
         self.data_dir = config_service.data_dir
         self.db_path = os.path.join(self.data_dir, DB_NAME)
 
@@ -81,6 +83,11 @@ class CacheService:
         self._last_progress_save = 0.0
         self._progress_save_interval = 2.0  # seconds
         self._pending_progress_saves: list[asyncio.Task] = []
+
+    async def _log_activity(self, level: str, message: str, details: dict | None = None) -> None:
+        log_service = self.log_service
+        if log_service is not None:
+            await log_service.log("cache", level, message, details)
 
     @staticmethod
     def _empty_source_cache() -> dict[str, Any]:
@@ -1434,7 +1441,10 @@ class CacheService:
         for attempt in range(retries + 1):
             start_time = time.time()
             try:
-                client = await self.http_client.get_client()
+                http_client = self.http_client
+                if http_client is None:
+                    raise RuntimeError("HTTP client is not configured")
+                client = await http_client.get_client()
                 response = await client.get(url, params=params)
                 elapsed_ms = int((time.time() - start_time) * 1000)
                 if response.status_code == 200:
@@ -1686,7 +1696,8 @@ class CacheService:
         except asyncio.CancelledError:
             # A user cancellation cancels the child refresh task. A shutdown
             # cancellation cancels this caller too and must still propagate.
-            if asyncio.current_task() is not None and asyncio.current_task().cancelling():
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
                 raise
             return False
 
@@ -1712,8 +1723,7 @@ class CacheService:
     async def cancel_refresh(self, reason: str = "Cancelled by user") -> bool:
         """Cancel the active refresh and wait until no refresh work remains."""
         task = self._refresh_task
-        active = task is not None and not task.done()
-        if active:
+        if task is not None and not task.done():
             self._refresh_cancel_requested = True
             self._refresh_cancel_reason = reason
             task.cancel()
@@ -1767,10 +1777,7 @@ class CacheService:
         # refresh triggers coalesce into a single waiter.
         if self.cart_service is not None and self.cart_service.is_download_active():
             logger.info("Cache refresh delayed: download in progress in cart")
-            if getattr(self, "log_service", None):
-                await getattr(self, "log_service", None).log(
-                    "cache", "warning", "Cache refresh delayed — download in progress"
-                )
+            await self._log_activity("warning", "Cache refresh delayed — download in progress")
             wait_started_at = datetime.now(timezone.utc).isoformat()
             async with self._cache_lock:
                 self._api_cache["refresh_in_progress"] = True
@@ -1807,10 +1814,9 @@ class CacheService:
                             "Cache refresh waited %ss for downloads to finish; aborting",
                             waited,
                         )
-                        if getattr(self, "log_service", None):
-                            await getattr(self, "log_service", None).log(
-                                "cache", "error", f"Cache refresh aborted — waited {waited}s for downloads to finish"
-                            )
+                        await self._log_activity(
+                            "error", f"Cache refresh aborted — waited {waited}s for downloads to finish"
+                        )
                         async with self._cache_lock:
                             self._api_cache["refresh_in_progress"] = False
                         self.save_refresh_progress(
@@ -1883,10 +1889,7 @@ class CacheService:
 
         if not enabled_sources:
             logger.info("Cannot refresh - no valid sources configured")
-            if getattr(self, "log_service", None):
-                await getattr(self, "log_service", None).log(
-                    "cache", "warning", "Cache refresh skipped — no valid sources configured"
-                )
+            await self._log_activity("warning", "Cache refresh skipped — no valid sources configured")
             async with self._cache_lock:
                 self._api_cache["refresh_in_progress"] = False
             self.save_refresh_progress(
@@ -1950,10 +1953,7 @@ class CacheService:
         self.save_refresh_progress(progress)
 
         logger.info(f"Starting full refresh at {datetime.now(timezone.utc).isoformat()} for {total_sources} source(s)")
-        if getattr(self, "log_service", None):
-            await getattr(self, "log_service", None).log(
-                "cache", "info", f"Cache refresh started ({total_sources} source(s))"
-            )
+        await self._log_activity("info", f"Cache refresh started ({total_sources} source(s))")
 
         new_sources_cache: dict[str, dict] = {}
         any_source_updated = False
@@ -2032,36 +2032,29 @@ class CacheService:
                     f"Refresh complete with status={final_status}. Total: {summary['live_streams']} live, "
                     f"{summary['vod_streams']} vod, {summary['series']} series"
                 )
-                if getattr(self, "log_service", None):
-                    level = "info" if final_status == "success" else "warning"
-                    msg = f"Cache refresh completed ({final_status}): {summary['live_streams']} live, {summary['vod_streams']} vod, {summary['series']} series"
-                    details = {"status": final_status, **summary}
-                    # Add per-source error details if any
-                    failed_steps = []
-                    for sr in progress.get("source_results", []):
-                        for err in sr.get("errors", []):
-                            failed_steps.append(
-                                f"{sr.get('source_name', sr.get('source_id', '?'))}: {err.get('label', '?')}"
-                            )
-                    if failed_steps:
-                        details["failed_steps"] = failed_steps
-                    await getattr(self, "log_service", None).log("cache", level, msg, details)
+                level = "info" if final_status == "success" else "warning"
+                msg = f"Cache refresh completed ({final_status}): {summary['live_streams']} live, {summary['vod_streams']} vod, {summary['series']} series"
+                details = {"status": final_status, **summary}
+                # Add per-source error details if any
+                failed_steps = []
+                for sr in progress.get("source_results", []):
+                    for err in sr.get("errors", []):
+                        failed_steps.append(
+                            f"{sr.get('source_name', sr.get('source_id', '?'))}: {err.get('label', '?')}"
+                        )
+                if failed_steps:
+                    details["failed_steps"] = failed_steps
+                await self._log_activity(level, msg, details)
             else:
                 logger.warning("Refresh completed but no data was fetched from any source")
-                if getattr(self, "log_service", None):
-                    await getattr(self, "log_service", None).log(
-                        "cache", "error", "Cache refresh failed — no data fetched from any source"
-                    )
+                await self._log_activity("error", "Cache refresh failed — no data fetched from any source")
                 async with self._cache_lock:
                     self._api_cache["refresh_in_progress"] = False
                     self._api_cache["last_refresh"] = datetime.now(timezone.utc).isoformat()
                 final_status = "failed"
         except Exception as exc:
             logger.error(f"Cache refresh failed unexpectedly: {exc}")
-            if getattr(self, "log_service", None):
-                await getattr(self, "log_service", None).log(
-                    "cache", "error", f"Cache refresh failed unexpectedly: {exc}"
-                )
+            await self._log_activity("error", f"Cache refresh failed unexpectedly: {exc}")
             progress["last_error"] = progress.get("last_error") or str(exc)
             final_status = "failed" if persistence_failed else ("partial" if any_source_updated else "failed")
             async with self._cache_lock:

@@ -412,6 +412,9 @@ class CategoryService:
                 self._upsert_category(conn, cat, idx)
 
             conn.commit()
+            # Membership changes alter browse totals/facets for category scopes.
+            if self.cache_service is not None:
+                self.cache_service.invalidate_group_counts_cache()
         except Exception as e:
             logger.error(f"Error saving categories to DB: {e}")
             raise
@@ -436,6 +439,40 @@ class CategoryService:
             return self._row_to_category(conn, row)
         except Exception as e:
             logger.error(f"Error fetching category {category_id}: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def get_category_definition_by_id(self, category_id: str) -> dict | None:
+        """Return category metadata without loading its potentially large item set."""
+        conn = db_connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT id, name, icon, mode, content_types, pattern_logic, "
+                "use_source_filters, notify_telegram, recently_added_days, last_refresh "
+                "FROM custom_categories WHERE id = ?",
+                (category_id,),
+            ).fetchone()
+            if not row:
+                return None
+            try:
+                content_types = json.loads(row["content_types"])
+            except (json.JSONDecodeError, TypeError):
+                content_types = ["live", "vod", "series"]
+            return {
+                "id": row["id"],
+                "name": row["name"],
+                "icon": row["icon"],
+                "mode": row["mode"],
+                "content_types": content_types,
+                "pattern_logic": row["pattern_logic"],
+                "use_source_filters": bool(row["use_source_filters"]),
+                "notify_telegram": bool(row["notify_telegram"]),
+                "recently_added_days": row["recently_added_days"],
+                "last_refresh": row["last_refresh"],
+            }
+        except Exception as e:
+            logger.error(f"Error fetching category definition {category_id}: {e}")
             return None
         finally:
             conn.close()
@@ -800,4 +837,3 @@ class CategoryService:
 
     def refresh_single_pattern_category(self, category_id: str) -> None:
         self._refresh_single_pattern_category_by_id(category_id)
-

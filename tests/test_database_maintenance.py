@@ -107,8 +107,12 @@ async def _wait_for_maintenance_async(maintenance: DatabaseMaintenanceService) -
 
 
 def test_database_maintenance_rebuilds_fts_and_removes_deconfigured_sources(tmp_path):
-    db_path, _cache, maintenance = _build_services(tmp_path)
+    db_path, cache, maintenance = _build_services(tmp_path)
     _seed_database(db_path)
+
+    # Warm the group metadata cache so we can prove maintenance invalidates it.
+    warmed = {g["name"]: g["count"] for g in cache.browse_group_counts_db("live")}
+    assert warmed == {"Current": 1, "Removed": 1}
 
     result, status = _start_and_wait(maintenance)
     assert result["started"] is True
@@ -165,6 +169,9 @@ def test_database_maintenance_rebuilds_fts_and_removes_deconfigured_sources(tmp_
     assert current_matches == 1
     assert removed_matches == 0
     assert orphan_matches == 0
+
+    invalidated = {g["name"]: g["count"] for g in cache.browse_group_counts_db("live")}
+    assert invalidated == {"Current": 1}
 
 
 def test_database_maintenance_is_rejected_while_refresh_is_active(tmp_path):

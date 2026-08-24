@@ -149,7 +149,9 @@ CREATE TABLE IF NOT EXISTS source_last_refresh (
 );
 
 -- One row per stream/series from the upstream API.
--- 'name' and 'category_id' are denormalised columns for fast SQL filtering.
+-- 'name', 'category_id', 'added' are denormalised columns for fast SQL filtering.
+-- 'group_name'/'rating' are denormalised from source_categories/data JSON so that
+-- browse sorting/filtering can use plain indexes instead of joins and json_extract.
 -- 'data' holds the full upstream JSON blob so no API signature changes.
 CREATE TABLE IF NOT EXISTS streams (
     source_id    TEXT NOT NULL,
@@ -159,6 +161,8 @@ CREATE TABLE IF NOT EXISTS streams (
     category_id  TEXT,
     added        INTEGER,
     data         TEXT NOT NULL DEFAULT '{}',
+    group_name   TEXT,
+    rating       REAL,
     PRIMARY KEY (source_id, content_type, stream_id)
 );
 
@@ -172,6 +176,10 @@ CREATE INDEX IF NOT EXISTS idx_streams_ct
     ON streams (content_type);
 CREATE INDEX IF NOT EXISTS idx_streams_ct_added
     ON streams (content_type, added);
+CREATE INDEX IF NOT EXISTS idx_streams_ct_name
+    ON streams (content_type, lower(name));
+-- Created after column upgrades in init_db() because older databases gain
+-- group_name/rating through _apply_column_upgrades(), which runs post-schema.
 
 CREATE TABLE IF NOT EXISTS source_categories (
     source_id     TEXT NOT NULL,
@@ -472,10 +480,70 @@ def init_db(db_path: str) -> None:
         conn.executescript(_SCHEMA)
         # Idempotent column additions for databases that pre-date the column.
         _apply_column_upgrades(conn)
+        _create_denormalized_browse_indexes(conn)
+        _backfill_streams_denormalized(conn)
         conn.commit()
         logger.info(f"Database initialised at {db_path}")
     finally:
         conn.close()
+
+
+_BROWSE_DENORMALIZED_INDEXES: list[tuple[str, str]] = [
+    (
+        "idx_streams_ct_group_name",
+        "CREATE INDEX IF NOT EXISTS idx_streams_ct_group_name "
+        "ON streams (content_type, lower(group_name), lower(name))",
+    ),
+    (
+        "idx_streams_ct_rating",
+        "CREATE INDEX IF NOT EXISTS idx_streams_ct_rating "
+        "ON streams (content_type, rating, source_id, stream_id)",
+    ),
+]
+
+
+def _create_denormalized_browse_indexes(conn: sqlite3.Connection) -> None:
+    """Create browse-sort indexes that depend on upgraded columns."""
+    for name, statement in _BROWSE_DENORMALIZED_INDEXES:
+        existing = {row[1] for row in conn.execute("PRAGMA index_list(streams)")}
+        if name not in existing:
+            conn.execute(statement)
+            logger.info(f"Schema upgrade: created index {name}")
+
+
+def backfill_streams_denormalized_sql() -> str:
+    """SQL that fills group_name/rating from the authoritative sources.
+
+    group_name resolves through source_categories exactly like the old
+    LEFT JOIN ... COALESCE(category_name, 'Unknown') behaviour; rating is
+    parsed once from the stored JSON blob. Only rows written before
+    denormalization (group_name IS NULL) are touched, so the probe-and-update
+    is a no-op on healthy databases.
+    """
+    return """
+        UPDATE streams SET
+            group_name = COALESCE((
+                SELECT sc.category_name FROM source_categories sc
+                WHERE sc.source_id = streams.source_id
+                  AND sc.content_type = streams.content_type
+                  AND sc.category_id = streams.category_id
+            ), 'Unknown'),
+            rating = CASE WHEN json_valid(streams.data)
+                THEN COALESCE(CAST(json_extract(streams.data, '$.rating') AS REAL), 0)
+                ELSE 0 END
+        WHERE group_name IS NULL
+    """
+
+
+def _backfill_streams_denormalized(conn: sqlite3.Connection) -> None:
+    """Populate denormalized columns for rows predating the migration."""
+    missing = conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM streams WHERE group_name IS NULL)"
+    ).fetchone()[0]
+    if not missing:
+        return
+    conn.execute(backfill_streams_denormalized_sql())
+    logger.info("Schema upgrade: backfilled streams.group_name/rating")
 
 
 _COLUMN_UPGRADES: list[tuple[str, str, str]] = [
@@ -495,6 +563,10 @@ _COLUMN_UPGRADES: list[tuple[str, str, str]] = [
     ("cart_items", "monitor_canonical", "TEXT"),
     ("cart_items", "expected_size", "INTEGER"),
     ("cart_items", "retried_once", "INTEGER NOT NULL DEFAULT 0"),
+    # Browse denormalization: lets sorting/filtering use plain indexes
+    # instead of joining source_categories and parsing JSON per row.
+    ("streams", "group_name", "TEXT"),
+    ("streams", "rating", "REAL"),
 ]
 
 

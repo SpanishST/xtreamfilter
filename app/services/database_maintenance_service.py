@@ -384,6 +384,7 @@ class DatabaseMaintenanceService:
             current_phase = "cleanup"
             self._set_status(phase=current_phase, percent=20)
             cleanup = self._remove_deconfigured_sources(source_ids)
+            self.cache_service.invalidate_group_counts_cache()
             self._set_status(
                 phase=current_phase,
                 percent=30,

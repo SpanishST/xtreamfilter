@@ -8,13 +8,20 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from app.database import DB_NAME, _row_to_dict, adb_transaction, db_connect
+from app.database import (
+    DB_NAME,
+    _row_to_dict,
+    adb_transaction,
+    backfill_streams_denormalized_sql,
+    db_connect,
+)
 
 if TYPE_CHECKING:
     from app.services.cart_service import CartService
@@ -65,6 +72,13 @@ class CacheService:
         self._refresh_cancel_requested = False
         self._refresh_cancel_reason = ""
         self._maintenance_active = False
+
+        # Browse group metadata cache: (content_type, source) -> aggregates.
+        # Only changes when catalog data changes, so it is invalidated
+        # explicitly on refresh save, clear, prune, and maintenance cleanup.
+        self._group_counts_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._group_counts_lock = threading.Lock()
+        self._group_counts_generation = 0
 
         self._stream_source_map: dict[str, dict[str, str]] = {
             "live": {},
@@ -411,6 +425,7 @@ class CacheService:
                 for source_id, source_cache in sources.items()
                 if source_id in source_ids
             }
+        self.invalidate_group_counts_cache()
         await self.rebuild_stream_source_map()
         await asyncio.to_thread(self._rebuild_stream_index)
 
@@ -747,8 +762,13 @@ class CacheService:
 
             for source_id, src_cache in sources.items():
                 preserved_steps = set(src_cache.get("_preserved_steps", []))
+                cat_names: dict[tuple[str, str], str] = {}
                 cat_rows = []
                 for cat_key, ct in CAT_MAP:
+                    for cat in src_cache.get(cat_key, []):
+                        cid = str(cat.get("category_id", ""))
+                        if (ct, cid) not in cat_names:
+                            cat_names[(ct, cid)] = cat.get("category_name", "")
                     if cat_key not in src_cache or cat_key in preserved_steps:
                         continue
                     conn.execute(
@@ -790,6 +810,13 @@ class CacheService:
                             added = int(added_raw) if added_raw else 0
                         except (ValueError, TypeError):
                             added = 0
+                        try:
+                            rating = float(stream.get("rating") or 0)
+                        except (ValueError, TypeError):
+                            rating = 0.0
+                        group_name = cat_names.get(
+                            (ct, str(stream.get("category_id", ""))), "Unknown"
+                        )
                         stream_rows.append(
                             (
                                 source_id,
@@ -799,13 +826,16 @@ class CacheService:
                                 str(stream.get("category_id", "")),
                                 added,
                                 json.dumps(stream, ensure_ascii=False),
+                                group_name,
+                                rating,
                             )
                         )
                 if stream_rows:
                     conn.executemany(
                         "INSERT OR IGNORE INTO streams "
-                        "(source_id, content_type, stream_id, name, category_id, added, data) "
-                        "VALUES (?,?,?,?,?,?,?)",
+                        "(source_id, content_type, stream_id, name, category_id, added, data, "
+                        "group_name, rating) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
                         stream_rows,
                     )
 
@@ -824,6 +854,7 @@ class CacheService:
                 )
 
             conn.commit()
+            self.invalidate_group_counts_cache()
             logger.info(f"Cache saved to DB at {datetime.now(timezone.utc).isoformat()}")
         except Exception as e:
             logger.error(f"Failed to save cache to DB: {e}")
@@ -872,8 +903,13 @@ class CacheService:
 
             for source_id, src_cache in sources.items():
                 preserved_steps = set(src_cache.get("_preserved_steps", []))
+                cat_names: dict[tuple[str, str], str] = {}
                 cat_rows = []
                 for cat_key, ct in CAT_MAP:
+                    for cat in src_cache.get(cat_key, []):
+                        cid = str(cat.get("category_id", ""))
+                        if (ct, cid) not in cat_names:
+                            cat_names[(ct, cid)] = cat.get("category_name", "")
                     if cat_key not in src_cache or cat_key in preserved_steps:
                         continue
                     await conn.execute(
@@ -915,6 +951,13 @@ class CacheService:
                             added = int(added_raw) if added_raw else 0
                         except (ValueError, TypeError):
                             added = 0
+                        try:
+                            rating = float(stream.get("rating") or 0)
+                        except (ValueError, TypeError):
+                            rating = 0.0
+                        group_name = cat_names.get(
+                            (ct, str(stream.get("category_id", ""))), "Unknown"
+                        )
                         stream_rows.append(
                             (
                                 source_id,
@@ -924,13 +967,16 @@ class CacheService:
                                 str(stream.get("category_id", "")),
                                 added,
                                 json.dumps(stream, ensure_ascii=False),
+                                group_name,
+                                rating,
                             )
                         )
                 if stream_rows:
                     await conn.executemany(
                         "INSERT OR IGNORE INTO streams "
-                        "(source_id, content_type, stream_id, name, category_id, added, data) "
-                        "VALUES (?,?,?,?,?,?,?)",
+                        "(source_id, content_type, stream_id, name, category_id, added, data, "
+                        "group_name, rating) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
                         stream_rows,
                     )
 
@@ -948,6 +994,7 @@ class CacheService:
                     (global_refresh,),
                 )
 
+        self.invalidate_group_counts_cache()
         logger.info(f"Cache saved to DB at {datetime.now(timezone.utc).isoformat()}")
 
     def save_cache_to_disk(self) -> None:
@@ -1126,9 +1173,259 @@ class CacheService:
     # SQLite-backed browse
     # ------------------------------------------------------------------
 
-    def browse_streams_db(
+    def _ensure_denormalized(self, conn) -> None:
+        """Heal rows written before group_name/rating denormalization.
+
+        The EXISTS probe is an indexed no-op on healthy databases; the update
+        only runs when legacy rows (group_name IS NULL) are detected.
+        """
+        missing = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM streams WHERE group_name IS NULL)"
+        ).fetchone()[0]
+        if not missing:
+            return
+        conn.execute(backfill_streams_denormalized_sql())
+        conn.commit()
+
+    def browse_channels_db(
         self,
         content_type: str,
+        source: str = "",
+        search: str = "",
+        group: str = "",
+        page: int = 1,
+        per_page: int = 100,
+    ) -> dict:
+        """Return a bounded page of lightweight channel names and groups."""
+        conn = db_connect(self.db_path)
+        try:
+            self._ensure_denormalized(conn)
+            conditions = ["s.content_type = ?"]
+            params: list = [content_type]
+            if source:
+                conditions.append("s.source_id = ?")
+                params.append(source)
+            if search:
+                conditions.append("lower(s.name) LIKE lower(?)")
+                params.append(f"%{search}%")
+            if group:
+                conditions.append("s.group_name = ?")
+                params.append(group)
+            where_clause = " AND ".join(conditions)
+
+            total = conn.execute(
+                f"SELECT COUNT(*) AS cnt FROM streams s WHERE {where_clause}",
+                params,
+            ).fetchone()["cnt"]
+            offset = max(0, page - 1) * per_page
+            rows = conn.execute(
+                f"""
+                SELECT s.name, s.group_name AS group_name
+                FROM streams s
+                WHERE {where_clause}
+                ORDER BY lower(s.name), s.source_id, s.stream_id
+                LIMIT ? OFFSET ?
+                """,
+                params + [per_page, offset],
+            ).fetchall()
+            items = [
+                {"name": row["name"] or "", "group": row["group_name"] or "Unknown"}
+                for row in rows
+            ]
+            return {
+                "items": items,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": (total + per_page - 1) // per_page if total else 0,
+            }
+        finally:
+            conn.close()
+
+    def invalidate_group_counts_cache(self) -> None:
+        """Drop cached browse group metadata after catalog data changes."""
+        with self._group_counts_lock:
+            self._group_counts_generation += 1
+            self._group_counts_cache.clear()
+
+    def _query_group_counts(
+        self,
+        conn,
+        content_types: list[str],
+        source: str = "",
+        news_days: int = 0,
+        max_added_days: int = 0,
+        tmdb_search_id: str | None = None,
+        category_id: str = "",
+        category_mode: str = "manual",
+    ) -> tuple[dict[str, int], dict[str, str]]:
+        """Aggregate browse group/source metadata for the given scope."""
+        self._ensure_denormalized(conn)
+        current_time = int(time.time())
+        news_cutoff = current_time - (news_days * 86400) if news_days > 0 else 0
+        added_cutoff = current_time - (max_added_days * 86400) if max_added_days > 0 else 0
+
+        if category_id:
+            category_table = (
+                "category_cached_items" if category_mode == "automatic" else "category_manual_items"
+            )
+            from_clause = (
+                f"{category_table} ci JOIN streams s "
+                "ON s.source_id = ci.source_id "
+                "AND s.content_type = ci.content_type "
+                "AND s.stream_id = ci.stream_id"
+            )
+            conditions: list[str] = ["ci.category_id = ?"]
+            params: list = [category_id]
+        else:
+            from_clause = "streams s"
+            if len(content_types) == 1:
+                conditions = ["s.content_type = ?"]
+                params = [content_types[0]]
+            else:
+                placeholders = ",".join("?" * len(content_types))
+                conditions = [f"s.content_type IN ({placeholders})"]
+                params = list(content_types)
+        if source:
+            conditions.append("s.source_id = ?")
+            params.append(source)
+        if news_days > 0:
+            conditions.append("s.added >= ?")
+            params.append(news_cutoff)
+        if max_added_days > 0:
+            conditions.append("s.added >= ?")
+            params.append(added_cutoff)
+        if tmdb_search_id is not None:
+            conditions.append(
+                "(json_extract(s.data, '$.tmdb_id') = ? OR "
+                "json_extract(s.data, '$.tmdb') = ? OR "
+                "json_extract(s.data, '$.tmdb_id') = ? OR "
+                "json_extract(s.data, '$.tmdb') = ?)"
+            )
+            tmdb_prefixed = f"tmdb:{tmdb_search_id}"
+            params.extend([tmdb_search_id, tmdb_search_id, tmdb_prefixed, tmdb_prefixed])
+
+        where_clause = " AND ".join(conditions)
+        rows = conn.execute(
+            f"""
+            SELECT COALESCE(NULLIF(s.group_name, ''), 'Unknown') as grp, COUNT(*) as cnt,
+                   s.source_id
+            FROM {from_clause}
+            WHERE {where_clause}
+            GROUP BY grp, s.source_id
+            """,
+            params,
+        ).fetchall()
+
+        source_names = self._source_names
+        group_counts: dict[str, int] = {}
+        source_set: dict[str, str] = {}
+        for row in rows:
+            grp = row["grp"]
+            group_counts[grp] = group_counts.get(grp, 0) + row["cnt"]
+            src_id = row["source_id"]
+            if src_id:
+                source_set[src_id] = source_names.get(src_id, "Unknown")
+        return group_counts, source_set
+
+    def _scope_count(
+        self,
+        conn,
+        content_types: list[str],
+        source: str = "",
+        group: str = "",
+        category_id: str = "",
+        category_mode: str = "manual",
+    ) -> int:
+        """Count rows for a baseline scope without touching wide columns."""
+        params: list = []
+        if category_id:
+            category_table = (
+                "category_cached_items" if category_mode == "automatic" else "category_manual_items"
+            )
+            sql = (
+                f"SELECT COUNT(*) AS cnt FROM {category_table} ci "
+                "JOIN streams s ON s.source_id = ci.source_id "
+                "AND s.content_type = ci.content_type AND s.stream_id = ci.stream_id "
+                "WHERE ci.category_id = ?"
+            )
+            params.append(category_id)
+        else:
+            if len(content_types) == 1:
+                sql = "SELECT COUNT(*) AS cnt FROM streams s WHERE s.content_type = ?"
+                params.append(content_types[0])
+            else:
+                placeholders = ",".join("?" * len(content_types))
+                sql = f"SELECT COUNT(*) AS cnt FROM streams s WHERE s.content_type IN ({placeholders})"
+                params.extend(content_types)
+        if source:
+            sql += " AND s.source_id = ?"
+            params.append(source)
+        if group:
+            sql += " AND s.group_name = ?"
+            params.append(group)
+        return conn.execute(sql, params).fetchone()["cnt"]
+
+    def _get_scope_metadata(
+        self,
+        content_types: list[str],
+        source: str = "",
+        group: str = "",
+        category_id: str = "",
+        category_mode: str = "manual",
+    ) -> tuple[int, dict[str, int], dict[str, str]]:
+        """Return baseline totals/facets via the metadata cache.
+
+        The generation counter guards against writing aggregates that were
+        computed before a concurrent invalidation (e.g. a refresh finishing).
+        Group filters are part of the key: totals must respect them, while
+        facets intentionally keep their unfiltered-by-group semantics.
+        """
+        types_key = tuple(sorted(content_types))
+        category_key = f"{category_mode}:{category_id}" if category_id else ""
+        key = (types_key, source, group, category_key)
+        with self._group_counts_lock:
+            entry = self._group_counts_cache.get(key)
+            generation = self._group_counts_generation
+        if entry is not None:
+            return entry["total"], entry["group_counts"], entry["source_set"]
+
+        conn = db_connect(self.db_path)
+        try:
+            total = self._scope_count(
+                conn, content_types,
+                source=source, group=group,
+                category_id=category_id, category_mode=category_mode,
+            )
+            group_counts, source_set = self._query_group_counts(
+                conn, content_types,
+                source=source, category_id=category_id, category_mode=category_mode,
+            )
+        finally:
+            conn.close()
+
+        with self._group_counts_lock:
+            if self._group_counts_generation == generation:
+                self._group_counts_cache[key] = {
+                    "total": total,
+                    "group_counts": group_counts,
+                    "source_set": source_set,
+                }
+        return total, group_counts, source_set
+
+    def _get_group_counts(self, content_type: str, source: str = "") -> tuple[dict[str, int], dict[str, str]]:
+        """Return baseline group/source metadata via the metadata cache."""
+        _total, group_counts, source_set = self._get_scope_metadata([content_type], source=source)
+        return group_counts, source_set
+
+    def browse_group_counts_db(self, content_type: str, source: str = "") -> list[dict]:
+        """Aggregate browse groups in SQLite without loading stream rows."""
+        group_counts, _source_set = self._get_group_counts(content_type, source)
+        return [{"name": name, "count": count} for name, count in sorted(group_counts.items())]
+
+    def browse_streams_db(
+        self,
+        content_type: str | list[str],
         search: str = "",
         group: str = "",
         source: str = "",
@@ -1140,6 +1437,8 @@ class CacheService:
         page: int = 1,
         per_page: int = 50,
         tmdb_search_id: str | None = None,
+        category_id: str = "",
+        category_mode: str = "manual",
     ) -> dict:
         """Query streams directly from SQLite with filters, sort and pagination.
 
@@ -1150,79 +1449,39 @@ class CacheService:
         current_time = int(time.time())
         news_cutoff = current_time - (news_days * 86400) if news_days > 0 else 0
         added_cutoff = current_time - (max_added_days * 86400) if max_added_days > 0 else 0
+        content_types = [content_type] if isinstance(content_type, str) else list(content_type)
+        if not content_types:
+            return {
+                "items": [],
+                "total": 0,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": 0,
+                "group_counts": {},
+                "source_set": {},
+            }
 
         conn = db_connect(self.db_path)
         try:
-            # Build WHERE clauses
-            conditions: list[str] = ["s.content_type = ?"]
-            params: list = [content_type]
-
-            if source:
-                conditions.append("s.source_id = ?")
-                params.append(source)
-
-            if news_days > 0:
-                conditions.append("s.added >= ?")
-                params.append(news_cutoff)
-
-            if max_added_days > 0:
-                conditions.append("s.added >= ?")
-                params.append(added_cutoff)
-
-            # Search: LIKE on name and group name
-            if tmdb_search_id is not None:
-                # TMDB search: match against json_extract on data column
-                conditions.append(
-                    "(json_extract(s.data, '$.tmdb_id') = ? OR "
-                    "json_extract(s.data, '$.tmdb') = ? OR "
-                    "json_extract(s.data, '$.tmdb_id') = ? OR "
-                    "json_extract(s.data, '$.tmdb') = ?)"
-                )
-                tmdb_prefixed = f"tmdb:{tmdb_search_id}"
-                params.extend([tmdb_search_id, tmdb_search_id, tmdb_prefixed, tmdb_prefixed])
-            elif search:
-                # Use FTS5 for fast name search, fall back to LIKE for group name
-                fts_query = search.replace('"', '""')
-                conditions.append(
-                    "(s.rowid IN (SELECT rowid FROM streams_fts WHERE streams_fts MATCH ?) "
-                    "OR lower(sc.category_name) LIKE lower(?))"
-                )
-                params.extend([fts_query, f"%{search}%"])
-
-            if group:
-                conditions.append("sc.category_name = ?")
-                params.append(group)
-
-            where_clause = " AND ".join(conditions) if conditions else "1=1"
-
-            # Sorting
+            self._ensure_denormalized(conn)
+            # Sorting — group_name/rating are denormalized columns so the
+            # default and rating orders walk indexes instead of temp B-trees.
+            # rating is never NULL after the backfill, so a bare column
+            # reference keeps the (content_type, rating, ...) index usable.
             order_map = {
                 "added": "s.added",
                 "name": "lower(s.name)",
-                "rating": "CAST(json_extract(s.data, '$.rating') AS REAL)",
+                "rating": "s.rating",
             }
             order_col = order_map.get(sort_by, "")
             if order_col:
                 direction = "DESC" if sort_order == "desc" else "ASC"
-                order_clause = f"{order_col} {direction}"
+                order_clause = f"{order_col} {direction}, s.source_id {direction}, s.stream_id {direction}"
             elif news_days > 0:
-                order_clause = "s.added DESC"
+                order_clause = "s.added DESC, s.source_id ASC, s.stream_id ASC"
             else:
-                order_clause = "lower(sc.category_name), lower(s.name)"
+                order_clause = "lower(s.group_name), lower(s.name), s.source_id, s.stream_id"
 
-            # Count total matching rows
-            count_sql = f"""
-                SELECT COUNT(*) as cnt
-                FROM streams s
-                LEFT JOIN source_categories sc
-                    ON s.source_id = sc.source_id
-                    AND s.content_type = sc.content_type
-                    AND s.category_id = sc.category_id
-                WHERE {where_clause}
-            """
-            total = conn.execute(count_sql, params).fetchone()["cnt"]
-
-            # Fetch the page of results
             if per_page > 0:
                 offset = (page - 1) * per_page
                 limit_clause = "LIMIT ? OFFSET ?"
@@ -1230,20 +1489,132 @@ class CacheService:
             else:
                 limit_clause = ""
                 limit_params = []
-            data_sql = f"""
-                SELECT s.source_id, s.content_type, s.stream_id, s.name,
-                       s.category_id, s.added, s.data,
-                       COALESCE(sc.category_name, 'Unknown') as group_name
-                FROM streams s
-                LEFT JOIN source_categories sc
-                    ON s.source_id = sc.source_id
-                    AND s.content_type = sc.content_type
-                    AND s.category_id = sc.category_id
-                WHERE {where_clause}
-                ORDER BY {order_clause}
-                {limit_clause}
-            """
-            rows = conn.execute(data_sql, params + limit_params).fetchall()
+
+            category_table = (
+                "category_cached_items" if category_mode == "automatic" else "category_manual_items"
+            )
+
+            def build_scope_queries(search_mode: str):
+                """Build count/page SQL for this scope.
+
+                Category scopes are driven by the membership table joined to
+                streams by primary key, so their cost scales with category
+                size rather than catalog size. search_mode selects the
+                two-phase strategy: 'fts' matches stream names via the FTS5
+                index, 'group' falls back to a group-name LIKE scan, ''
+                applies no search predicate.
+                """
+                params: list = []
+                if category_id:
+                    from_clause = (
+                        f"{category_table} ci JOIN streams s "
+                        "ON s.source_id = ci.source_id "
+                        "AND s.content_type = ci.content_type "
+                        "AND s.stream_id = ci.stream_id"
+                    )
+                    conditions: list[str] = ["ci.category_id = ?"]
+                    params.append(category_id)
+                else:
+                    from_clause = "streams s"
+                    if len(content_types) == 1:
+                        conditions = ["s.content_type = ?"]
+                        params.append(content_types[0])
+                    else:
+                        placeholders = ",".join("?" * len(content_types))
+                        conditions = [f"s.content_type IN ({placeholders})"]
+                        params.extend(content_types)
+
+                if source:
+                    conditions.append("s.source_id = ?")
+                    params.append(source)
+                if news_days > 0:
+                    conditions.append("s.added >= ?")
+                    params.append(news_cutoff)
+                if max_added_days > 0:
+                    conditions.append("s.added >= ?")
+                    params.append(added_cutoff)
+                if tmdb_search_id is not None:
+                    conditions.append(
+                        "(json_extract(s.data, '$.tmdb_id') = ? OR "
+                        "json_extract(s.data, '$.tmdb') = ? OR "
+                        "json_extract(s.data, '$.tmdb_id') = ? OR "
+                        "json_extract(s.data, '$.tmdb') = ?)"
+                    )
+                    tmdb_prefixed = f"tmdb:{tmdb_search_id}"
+                    params.extend([tmdb_search_id, tmdb_search_id, tmdb_prefixed, tmdb_prefixed])
+                elif search:
+                    if search_mode == "fts":
+                        conditions.append(
+                            "s.rowid IN (SELECT rowid FROM streams_fts WHERE streams_fts MATCH ?)"
+                        )
+                        params.append(search.replace('"', '""'))
+                    elif search_mode == "group":
+                        conditions.append("lower(s.group_name) LIKE lower(?)")
+                        params.append(f"%{search}%")
+                if group:
+                    conditions.append("s.group_name = ?")
+                    params.append(group)
+                if min_rating > 0:
+                    conditions.append("s.rating >= ?")
+                    params.append(min_rating)
+
+                where_clause = " AND ".join(conditions) if conditions else "1=1"
+                count_sql = f"""
+                    SELECT COUNT(*) as cnt
+                    FROM {from_clause}
+                    WHERE {where_clause}
+                """
+                data_sql = f"""
+                    SELECT s.source_id, s.content_type, s.stream_id, s.name,
+                           s.category_id, s.added, s.data,
+                           COALESCE(NULLIF(s.group_name, ''), 'Unknown') as group_name
+                    FROM {from_clause}
+                    WHERE {where_clause}
+                    ORDER BY {order_clause}
+                    {limit_clause}
+                """
+                return count_sql, data_sql, params
+
+            # Baseline scopes (no narrowing filters; group filters are part of
+            # the cache key) serve total + facets from the metadata cache;
+            # anything else computes fresh.
+            cacheable_scope = (
+                not search
+                and news_days <= 0
+                and max_added_days <= 0
+                and tmdb_search_id is None
+                and min_rating <= 0
+            )
+            if cacheable_scope:
+                total, group_counts, source_set = self._get_scope_metadata(
+                    content_types,
+                    source=source,
+                    group=group,
+                    category_id=category_id,
+                    category_mode=category_mode,
+                )
+                _, data_sql, qparams = build_scope_queries("")
+                rows = conn.execute(data_sql, qparams + limit_params).fetchall()
+            else:
+                initial_mode = "fts" if (search and tmdb_search_id is None) else ""
+                count_sql, data_sql, qparams = build_scope_queries(initial_mode)
+                total = conn.execute(count_sql, qparams).fetchone()["cnt"]
+                # Two-phase search: group-name matches only surface when no
+                # stream name matched the FTS query.
+                if initial_mode == "fts" and total == 0:
+                    count_sql, data_sql, qparams = build_scope_queries("group")
+                    total = conn.execute(count_sql, qparams).fetchone()["cnt"]
+                rows = conn.execute(data_sql, qparams + limit_params).fetchall()
+                group_counts, source_set = self._query_group_counts(
+                    conn,
+                    content_types,
+                    source=source,
+                    news_days=news_days,
+                    max_added_days=max_added_days,
+                    tmdb_search_id=tmdb_search_id,
+                    category_id=category_id,
+                    category_mode=category_mode,
+                )
 
             # Resolve source names from in-memory config
             source_names = self._source_names
@@ -1270,10 +1641,6 @@ class CacheService:
                 except (ValueError, TypeError):
                     rating_val = 0.0
 
-                # Apply rating filter in Python (json_extract in WHERE is slower)
-                if min_rating > 0 and rating_val < min_rating:
-                    continue
-
                 item_data = {
                     "name": name,
                     "group": grp,
@@ -1285,58 +1652,12 @@ class CacheService:
                     "rating": rating_val,
                     "content_type": row["content_type"],
                 }
-                if content_type in ("vod", "series"):
+                if row["content_type"] in ("vod", "series"):
                     raw_tmdb = data.get("tmdb_id") or data.get("tmdb")
                     item_data["tmdb_id"] = raw_tmdb if raw_tmdb else None
-                if content_type == "vod":
+                if row["content_type"] == "vod":
                     item_data["container_extension"] = data.get("container_extension", "mp4")
                 items.append(item_data)
-
-            # Collect group counts and source set for the response metadata.
-            # We need these for the full (unfiltered) result set, so run a
-            # separate lightweight query.
-            gc_conditions: list[str] = ["s.content_type = ?"]
-            gc_params: list = [content_type]
-            if source:
-                gc_conditions.append("s.source_id = ?")
-                gc_params.append(source)
-            if news_days > 0:
-                gc_conditions.append("s.added >= ?")
-                gc_params.append(news_cutoff)
-            if max_added_days > 0:
-                gc_conditions.append("s.added >= ?")
-                gc_params.append(added_cutoff)
-            # For tmdb search, include the tmdb filter in group counts too
-            if tmdb_search_id is not None:
-                gc_conditions.append(
-                    "(json_extract(s.data, '$.tmdb_id') = ? OR "
-                    "json_extract(s.data, '$.tmdb') = ? OR "
-                    "json_extract(s.data, '$.tmdb_id') = ? OR "
-                    "json_extract(s.data, '$.tmdb') = ?)"
-                )
-                tmdb_prefixed = f"tmdb:{tmdb_search_id}"
-                gc_params.extend([tmdb_search_id, tmdb_search_id, tmdb_prefixed, tmdb_prefixed])
-
-            gc_where = " AND ".join(gc_conditions)
-            gc_sql = f"""
-                SELECT COALESCE(sc.category_name, 'Unknown') as grp, COUNT(*) as cnt,
-                       s.source_id
-                FROM streams s
-                LEFT JOIN source_categories sc
-                    ON s.source_id = sc.source_id
-                    AND s.content_type = sc.content_type
-                    AND s.category_id = sc.category_id
-                WHERE {gc_where}
-                GROUP BY grp, s.source_id
-            """
-            group_counts: dict[str, int] = {}
-            source_set: dict[str, str] = {}
-            for row in conn.execute(gc_sql, gc_params).fetchall():
-                grp = row["grp"]
-                group_counts[grp] = group_counts.get(grp, 0) + row["cnt"]
-                src_id = row["source_id"]
-                if src_id:
-                    source_set[src_id] = source_names.get(src_id, "Unknown")
 
             total_pages = (total + per_page - 1) // per_page if total > 0 and per_page > 0 else 0
 
@@ -2179,6 +2500,7 @@ class CacheService:
             self._stream_source_map = {"live": {}, "vod": {}, "series": {}}
         self._stream_index = {}
         self._source_names = {}
+        self.invalidate_group_counts_cache()
         conn = db_connect(self.db_path)
         try:
             conn.execute("DELETE FROM streams")

@@ -306,6 +306,145 @@ def test_browse_pagination(client, data_dir):
     assert len(data["items"]) == 5
 
 
+def test_browse_uses_sql_pagination_for_large_live_catalog(client, data_dir, monkeypatch):
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "News"}], "live")
+    _seed_streams(data_dir, [
+        {"stream_id": str(i), "name": f"Channel {i:04d}", "category_id": "10", "added": i}
+        for i in range(1, 601)
+    ], "live")
+
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+    original = cache.browse_streams_db
+    calls = []
+
+    def record_call(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cache, "browse_streams_db", record_call)
+    r = client.get("/api/browse?type=live&page=4&per_page=25")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total"] == 600
+    assert len(data["items"]) == 25
+    assert data["items"][0]["name"] == "Channel 0076"
+    assert any(call["page"] == 4 and call["per_page"] == 25 for call in calls)
+    assert all(call["per_page"] != 0 for call in calls)
+
+
+def test_browse_rating_filter_is_applied_before_sql_pagination(client, data_dir):
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "Movies"}], "vod")
+    _seed_streams(data_dir, [
+        {"stream_id": "1", "name": "High", "category_id": "10", "rating": 9.0},
+        {"stream_id": "2", "name": "Low", "category_id": "10", "rating": 1.0},
+        {"stream_id": "3", "name": "Medium", "category_id": "10", "rating": 8.0},
+    ], "vod")
+
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+
+    r = client.get(
+        "/api/browse?type=vod&sort_by=rating&sort_order=desc&min_rating=8&"
+        "page=2&per_page=1"
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total"] == 2
+    assert len(data["items"]) == 1
+    assert data["items"][0]["name"] == "Medium"
+
+
+def test_channels_endpoint_paginates_in_sql(client, data_dir):
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "News"}], "live")
+    _seed_streams(data_dir, [
+        {"stream_id": str(i), "name": f"Channel {i:04d}", "category_id": "10"}
+        for i in range(1, 601)
+    ], "live")
+
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+    result = client.get("/channels?type=live&page=3&per_page=20")
+
+    assert result.status_code == 200
+    data = result.json()
+    assert data["total"] == 600
+    assert len(data["items"]) == 20
+    assert data["items"][0] == {"name": "Channel 0041", "group": "News"}
+
+
+def test_browse_source_filters_keep_large_results_bounded(client, data_dir, monkeypatch):
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "News"}], "live")
+    _seed_streams(data_dir, [
+        {"stream_id": str(i), "name": f"Keep {i:04d}", "category_id": "10"}
+        for i in range(1, 601)
+    ], "live")
+
+    client.app.state.config_service.config["sources"][0]["filters"] = {
+        "live": {
+            "channels": [
+                {"type": "include", "match": "starts_with", "value": "Keep", "case_sensitive": False}
+            ]
+        }
+    }
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+    original = cache.browse_streams_db
+    calls = []
+
+    def record_call(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cache, "browse_streams_db", record_call)
+    result = client.get("/api/browse?type=live&use_source_filters=true&page=4&per_page=25")
+
+    assert result.status_code == 200
+    data = result.json()
+    assert data["total"] == 600
+    assert len(data["items"]) == 25
+    assert data["items"][0]["name"] == "Keep 0076"
+    assert all(call["per_page"] <= 1000 for call in calls)
+    assert all(call["per_page"] != 0 for call in calls)
+
+
+def test_browse_custom_category_uses_sql_pagination(client, data_dir, monkeypatch):
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "News"}], "live")
+    streams = [
+        {"stream_id": str(i), "name": f"Category Channel {i:04d}", "category_id": "10"}
+        for i in range(1, 601)
+    ]
+    _seed_streams(data_dir, streams, "live")
+    client.app.state.category_service.save_categories({
+        "categories": [{
+            "id": "large-category",
+            "name": "Large category",
+            "mode": "manual",
+            "content_types": ["live"],
+            "items": [
+                {"id": s["stream_id"], "source_id": "src1", "content_type": "live"}
+                for s in streams
+            ],
+        }]
+    })
+
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+
+    def fail_if_cache_index_is_used(*args, **kwargs):
+        raise AssertionError("custom category browse should use SQLite pagination")
+
+    monkeypatch.setattr(cache, "get_streams_by_ids", fail_if_cache_index_is_used)
+    result = client.get("/api/browse?category_id=large-category&page=3&per_page=25")
+
+    assert result.status_code == 200
+    data = result.json()
+    assert data["total"] == 600
+    assert len(data["items"]) == 25
+    assert data["items"][0]["name"] == "Category Channel 0051"
+
+
 def test_browse_sort_by_name(client, data_dir):
     _seed_categories(data_dir, [
         {"category_id": "10", "category_name": "News"},
@@ -416,6 +555,356 @@ def test_browse_groups(client, data_dir):
     groups = {g["name"]: g["count"] for g in data["groups"]}
     assert groups["News"] == 2
     assert groups["Sports"] == 1
+
+
+def test_browse_groups_are_cached_until_invalidated(client, data_dir):
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "News"}], "live")
+    _seed_streams(data_dir, [
+        {"stream_id": "1", "name": "CNN", "category_id": "10"},
+        {"stream_id": "2", "name": "BBC", "category_id": "10"},
+    ], "live")
+
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+
+    first = {g["name"]: g["count"] for g in client.get("/api/browse/groups?type=live").json()["groups"]}
+    assert first == {"News": 2}
+
+    # Mutate the database directly, bypassing the service layer.
+    conn = db_connect(os.path.join(data_dir, DB_NAME))
+    try:
+        conn.execute(
+            "INSERT INTO streams "
+            "(source_id, content_type, stream_id, name, category_id, added, data) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("src1", "live", "3", "Extra", "10", 0, json.dumps({"stream_id": "3", "name": "Extra"})),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cached = {g["name"]: g["count"] for g in client.get("/api/browse/groups?type=live").json()["groups"]}
+    assert cached == {"News": 2}
+
+    cache.invalidate_group_counts_cache()
+    refreshed = {g["name"]: g["count"] for g in client.get("/api/browse/groups?type=live").json()["groups"]}
+    assert refreshed == {"News": 3}
+
+
+def test_browse_streams_db_uses_cache_only_for_baseline_scope(client, data_dir):
+    import time as _time
+
+    now = int(_time.time())
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "News"}], "live")
+    _seed_streams(data_dir, [
+        {"stream_id": "1", "name": "CNN", "category_id": "10", "added": now},
+        {"stream_id": "2", "name": "BBC", "category_id": "10", "added": now},
+    ], "live")
+
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+
+    baseline = cache.browse_streams_db(content_type="live", per_page=1)
+    assert baseline["group_counts"] == {"News": 2}
+
+    conn = db_connect(os.path.join(data_dir, DB_NAME))
+    try:
+        conn.execute(
+            "INSERT INTO streams "
+            "(source_id, content_type, stream_id, name, category_id, added, data) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("src1", "live", "3", "Extra", "10", now, json.dumps({"stream_id": "3", "name": "Extra"})),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cached = cache.browse_streams_db(content_type="live", per_page=1)
+    assert cached["group_counts"] == {"News": 2}
+
+    filtered = cache.browse_streams_db(content_type="live", per_page=1, news_days=7)
+    assert filtered["group_counts"] == {"News": 3}
+
+
+def test_prune_sources_invalidates_group_counts(client, data_dir):
+    import asyncio
+
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "News"}], "live", source_id="src1")
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "News"}], "live", source_id="src2")
+    _seed_streams(data_dir, [
+        {"stream_id": "1", "name": "A One", "category_id": "10"},
+        {"stream_id": "2", "name": "A Two", "category_id": "10"},
+    ], "live", source_id="src1")
+    _seed_streams(data_dir, [
+        {"stream_id": "1", "name": "B One", "category_id": "10"},
+        {"stream_id": "2", "name": "B Two", "category_id": "10"},
+    ], "live", source_id="src2")
+
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+
+    warmed = {g["name"]: g["count"] for g in client.get("/api/browse/groups?type=live").json()["groups"]}
+    assert warmed == {"News": 4}
+
+    # Simulate an external catalog change (e.g. maintenance deleting rows)
+    # that bypasses the service layer entirely.
+    conn = db_connect(os.path.join(data_dir, DB_NAME))
+    try:
+        conn.execute("DELETE FROM streams WHERE source_id = ?", ("src2",))
+        conn.execute("DELETE FROM source_categories WHERE source_id = ?", ("src2",))
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Without invalidation the cached aggregate would still report 4.
+    stale = {g["name"]: g["count"] for g in client.get("/api/browse/groups?type=live").json()["groups"]}
+    assert stale == {"News": 4}
+
+    asyncio.run(cache.prune_sources_to_ids({"src1"}))
+
+    pruned = {g["name"]: g["count"] for g in client.get("/api/browse/groups?type=live").json()["groups"]}
+    assert pruned == {"News": 2}
+
+
+def test_browse_default_sort_uses_denormalized_index(client, data_dir):
+    """The default group/name order must be an index walk, not a temp B-tree."""
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "News"}], "vod")
+    _seed_streams(data_dir, [
+        {"stream_id": "1", "name": "Movie A", "category_id": "10"},
+        {"stream_id": "2", "name": "Movie B", "category_id": "10"},
+    ], "vod")
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+    assert client.get("/api/browse?type=vod").status_code == 200
+
+    conn = db_connect(os.path.join(data_dir, DB_NAME))
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(streams)")}
+        plan_rows = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT s.stream_id FROM streams s "
+            "WHERE s.content_type = 'vod' "
+            "ORDER BY lower(s.group_name), lower(s.name), s.source_id, s.stream_id "
+            "LIMIT 50 OFFSET 0"
+        ).fetchall()
+        rating_plan = " ".join(
+            row[3]
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT s.stream_id FROM streams s "
+                "WHERE s.content_type = 'vod' AND s.rating >= 5 "
+                "ORDER BY s.rating DESC, s.source_id DESC, s.stream_id DESC LIMIT 50"
+            ).fetchall()
+        )
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(streams)")}
+    finally:
+        conn.close()
+
+    assert {"group_name", "rating"} <= cols
+    assert {"idx_streams_ct_group_name", "idx_streams_ct_rating"} <= indexes
+    default_plan = " ".join(row[3] for row in plan_rows)
+    assert "TEMP B-TREE FOR ORDER BY" not in default_plan
+    assert "idx_streams_ct_group_name" in default_plan
+    assert "TEMP B-TREE FOR ORDER BY" not in rating_plan
+    assert "idx_streams_ct_rating" in rating_plan
+
+
+def test_browse_heals_legacy_rows_missing_group_name(client, data_dir):
+    """Rows written before denormalization must self-heal on first browse."""
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "News"}], "live")
+    _seed_streams(data_dir, [
+        {"stream_id": "1", "name": "CNN", "category_id": "10", "rating": 7.5},
+    ], "live")
+
+    conn = db_connect(os.path.join(data_dir, DB_NAME))
+    try:
+        before = conn.execute(
+            "SELECT group_name FROM streams WHERE stream_id = '1'"
+        ).fetchone()["group_name"]
+    finally:
+        conn.close()
+    assert before is None
+
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+
+    groups = {g["name"]: g["count"] for g in client.get("/api/browse/groups?type=live").json()["groups"]}
+    assert groups == {"News": 1}
+
+    items = client.get("/api/browse?type=live").json()["items"]
+    assert items[0]["group"] == "News"
+
+    conn = db_connect(os.path.join(data_dir, DB_NAME))
+    try:
+        row = conn.execute(
+            "SELECT group_name, rating FROM streams WHERE stream_id = '1'"
+        ).fetchone()
+        nulls = conn.execute("SELECT COUNT(*) FROM streams WHERE group_name IS NULL").fetchone()[0]
+    finally:
+        conn.close()
+    assert row["group_name"] == "News"
+    assert row["rating"] == 7.5
+    assert nulls == 0
+
+
+def _seed_manual_category(client, data_dir, category_id: str, members: list[dict]):
+    """Create a manual custom category whose members exist in streams."""
+    client.app.state.category_service.save_categories({
+        "categories": [{
+            "id": category_id,
+            "name": f"Category {category_id}",
+            "mode": "manual",
+            "content_types": ["live"],
+            "items": members,
+        }]
+    })
+
+
+def test_category_count_plan_drives_from_membership_table(client, data_dir):
+    """Category queries must be driven by the membership table, not a scan."""
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "News"}], "live")
+    _seed_streams(data_dir, [
+        {"stream_id": "1", "name": "CNN", "category_id": "10"},
+        {"stream_id": "2", "name": "BBC", "category_id": "10"},
+    ], "live")
+    _seed_manual_category(client, data_dir, "plan-check", [
+        {"id": "1", "source_id": "src1", "content_type": "live"},
+        {"id": "2", "source_id": "src1", "content_type": "live"},
+    ])
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+    result = client.get("/api/browse?category_id=plan-check")
+    assert result.status_code == 200
+    assert result.json()["total"] == 2
+
+    conn = db_connect(os.path.join(data_dir, DB_NAME))
+    try:
+        plan_rows = conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT COUNT(*) AS cnt FROM category_manual_items ci "
+            "JOIN streams s ON s.source_id = ci.source_id "
+            "AND s.content_type = ci.content_type AND s.stream_id = ci.stream_id "
+            "WHERE ci.category_id = ?",
+            ("plan-check",),
+        ).fetchall()
+    finally:
+        conn.close()
+    plan = " ".join(row[3] for row in plan_rows)
+    assert "SCAN s" not in plan
+    assert "ci" in plan
+
+
+def test_category_totals_cached_until_invalidated(client, data_dir):
+    """Repeat category views reuse cached totals until the cache is dropped.
+
+    Note: for small grouped sets the API's top-level ``total`` reports the
+    grouped card count computed from freshly fetched items, so staleness is
+    asserted against the metadata cache itself.
+    """
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "News"}], "live")
+    _seed_streams(data_dir, [
+        {"stream_id": str(i), "name": f"Channel {i}", "category_id": "10"}
+        for i in range(1, 4)
+    ], "live")
+    _seed_manual_category(client, data_dir, "cached-cat", [
+        {"id": "1", "source_id": "src1", "content_type": "live"},
+        {"id": "2", "source_id": "src1", "content_type": "live"},
+    ])
+
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+
+    first = client.get("/api/browse?category_id=cached-cat").json()
+    assert first["total"] == 2
+
+    scope_key = next(
+        key for key in cache._group_counts_cache if key[-1] == "manual:cached-cat"
+    )
+    assert cache._group_counts_cache[scope_key]["total"] == 2
+
+    # External mutation bypassing the service layer.
+    conn = db_connect(os.path.join(data_dir, DB_NAME))
+    try:
+        conn.execute(
+            "INSERT INTO category_manual_items (category_id, stream_id, source_id, content_type) "
+            "VALUES ('cached-cat', '3', 'src1', 'live')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # A repeat view must be served from the cache: the stored entry survives
+    # untouched because nothing invalidated it.
+    client.get("/api/browse?category_id=cached-cat")
+    generation_after_get = cache._group_counts_generation
+    assert cache._group_counts_cache[scope_key]["total"] == 2
+    assert cache._group_counts_cache[scope_key]["group_counts"] == {"News": 2}
+
+    cache.invalidate_group_counts_cache()
+    assert cache._group_counts_generation == generation_after_get + 1
+    client.get("/api/browse?category_id=cached-cat")
+    refreshed_entry = cache._group_counts_cache[scope_key]
+    assert refreshed_entry["total"] == 3
+    assert refreshed_entry["group_counts"] == {"News": 3}
+
+
+def test_save_categories_invalidates_scope_metadata(client, data_dir):
+    """Editing category membership must refresh cached totals automatically."""
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "News"}], "live")
+    _seed_streams(data_dir, [
+        {"stream_id": str(i), "name": f"Channel {i}", "category_id": "10"}
+        for i in range(1, 4)
+    ], "live")
+    _seed_manual_category(client, data_dir, "edit-cat", [
+        {"id": "1", "source_id": "src1", "content_type": "live"},
+        {"id": "2", "source_id": "src1", "content_type": "live"},
+        {"id": "3", "source_id": "src1", "content_type": "live"},
+    ])
+
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+    warmed = client.get("/api/browse?category_id=edit-cat").json()
+    assert warmed["total"] == 3
+
+    # Removing a member via save_categories triggers the invalidation hook.
+    _seed_manual_category(client, data_dir, "edit-cat", [
+        {"id": "1", "source_id": "src1", "content_type": "live"},
+    ])
+    after = client.get("/api/browse?category_id=edit-cat").json()
+    assert after["total"] == 1
+
+
+def test_search_prefers_name_matches_over_group_matches(client, data_dir):
+    """Name matches take priority; group-only matches need an empty name pass."""
+    _seed_categories(data_dir, [
+        {"category_id": "10", "category_name": "News"},
+        {"category_id": "20", "category_name": "Alpha Group"},
+    ], "live")
+    _seed_streams(data_dir, [
+        {"stream_id": "1", "name": "Alpha One", "category_id": "10"},
+        {"stream_id": "2", "name": "Zeta", "category_id": "20"},
+    ], "live")
+
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+
+    data = client.get("/api/browse?type=live&search=alpha").json()
+    names = [item["name"] for item in data["items"]]
+    assert names == ["Alpha One"]
+
+
+def test_search_falls_back_to_group_matches_when_no_names_match(client, data_dir):
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "Documentary"}], "live")
+    _seed_streams(data_dir, [
+        {"stream_id": "1", "name": "Whales", "category_id": "10"},
+        {"stream_id": "2", "name": "Desert Life", "category_id": "10"},
+    ], "live")
+
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+
+    data = client.get("/api/browse?type=live&search=documenta").json()
+    names = {item["name"] for item in data["items"]}
+    assert names == {"Whales", "Desert Life"}
+    assert data["total"] == 2
 
 
 # -------------------------------------------------------------------

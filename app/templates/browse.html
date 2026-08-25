@@ -1309,6 +1309,7 @@
         let _pendingSourceId = '';
         let _pendingGroupName = '';
         let _pendingCategoryId = null;
+        let _lastBrowseUrl = '';
 
         const iconMap = {
             'folder': '📁', 'heart': '❤️', 'star': '⭐', 'fire': '🔥', 'clock': '🕐',
@@ -1559,6 +1560,12 @@
                 if (minRating !== '0') url += '&min_rating=' + minRating;
                 if (maxAddedDays !== '0') url += '&max_added_days=' + maxAddedDays;
 
+                if (url === _lastBrowseUrl) {
+                    // Identical request already in flight — skip duplicate.
+                    loadingState.style.display = 'none';
+                    return;
+                }
+                _lastBrowseUrl = url;
                 const response = await fetch(url, { signal });
                 const data = await response.json();
 
@@ -1597,6 +1604,8 @@
                 console.error('Error fetching content:', error);
                 loadingState.style.display = 'none';
                 emptyState.style.display = 'block';
+            } finally {
+                _lastBrowseUrl = '';
             }
         }
 
@@ -1637,7 +1646,7 @@
             const placeholderIcon = itemType === 'live' ? '📡' : '🎬';
             const imgClass = 'card-poster' + (itemType === 'live' ? ' card-poster-live' : '');
             const posterHtml = poster
-                ? '<img class="' + imgClass + '" src="' + poster + '" loading="lazy" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'"><div class="' + posterClass + '" style="display:none">' + placeholderIcon + '</div>'
+                ? '<img class="' + imgClass + '" src="' + poster + '" loading="lazy" decoding="async" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'"><div class="' + posterClass + '" style="display:none">' + placeholderIcon + '</div>'
                 : '<div class="' + posterClass + '">' + placeholderIcon + '</div>';
             const sourceIndex = sources.findIndex(s => s.id === item.source_id) + 1;
             const sourceName = item.source_name || 'Unknown';
@@ -1700,7 +1709,7 @@
             const placeholderIcon = groupType === 'live' ? '📡' : '🎬';
             const imgClass = 'card-poster' + (groupType === 'live' ? ' card-poster-live' : '');
             const posterHtml = poster
-                ? '<img class="' + imgClass + '" src="' + poster + '" loading="lazy" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'"><div class="' + posterClass + '" style="display:none">' + placeholderIcon + '</div>'
+                ? '<img class="' + imgClass + '" src="' + poster + '" loading="lazy" decoding="async" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'"><div class="' + posterClass + '" style="display:none">' + placeholderIcon + '</div>'
                 : '<div class="' + posterClass + '">' + placeholderIcon + '</div>';
 
             // Collect categories from all sub-items (deduplicated)

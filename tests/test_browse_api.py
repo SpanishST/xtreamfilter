@@ -1055,3 +1055,95 @@ def test_browse_response_structure(client, data_dir):
     assert "rating" in item
     assert "content_type" in item
     assert "categories" in item
+
+
+# -------------------------------------------------------------------
+# Denormalized item columns (icon/tmdb_id/container_ext)
+# -------------------------------------------------------------------
+
+
+def test_browse_heals_legacy_item_columns(client, data_dir):
+    """Legacy rows missing icon/tmdb_id/ext must heal and surface correctly."""
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "Movies"}], "vod")
+    _seed_streams(data_dir, [{
+        "stream_id": "50",
+        "name": "Legacy Movie",
+        "category_id": "10",
+        "rating": 6.5,
+        "stream_icon": "http://img/legacy.png",
+        "tmdb_id": "999",
+        "container_extension": "mkv",
+    }], "vod")
+
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+
+    payload = client.get("/api/browse?type=vod&per_page=5").json()
+    # Single vod row is wrapped into a grouped card; inspect its sub-item.
+    sub = payload["items"][0]["items"][0]
+    assert sub["icon"] == "http://img/legacy.png"
+    assert sub["tmdb_id"] == "999"
+    assert sub["container_extension"] == "mkv"
+
+    conn = db_connect(os.path.join(data_dir, DB_NAME))
+    try:
+        row = conn.execute(
+            "SELECT icon, tmdb_id, container_ext FROM streams WHERE stream_id = '50'"
+        ).fetchone()
+        nulls = conn.execute(
+            "SELECT COUNT(*) FROM streams WHERE group_name IS NULL"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert row["icon"] == "http://img/legacy.png"
+    assert row["tmdb_id"] == "999"
+    assert row["container_ext"] == "mkv"
+    assert nulls == 0
+
+
+def test_tmdb_search_uses_denormalized_column(client, data_dir):
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "Movies"}], "vod")
+    _seed_streams(data_dir, [
+        {"stream_id": "1", "name": "Inception", "category_id": "10", "tmdb_id": "27205"},
+        {"stream_id": "2", "name": "Other Film", "category_id": "10"},
+    ], "vod")
+
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+
+    data = client.get("/api/browse?type=vod&search=tmdb:27205").json()
+    assert data["total"] == 1
+    assert data["items"][0]["name"] == "Inception"
+
+
+def test_membership_annotation_covers_multi_category_items(client, data_dir):
+    _seed_categories(data_dir, [
+        {"category_id": "10", "category_name": "News"},
+        {"category_id": "20", "category_name": "Sports"},
+    ], "live")
+    _seed_streams(data_dir, [
+        {"stream_id": "1", "name": "ESPN News", "category_id": "10"},
+    ], "live")
+    client.app.state.category_service.save_categories({
+        "categories": [
+            {"id": "cat-a", "name": "A", "mode": "manual", "content_types": ["live"],
+             "items": [{"id": "1", "source_id": "src1", "content_type": "live"}]},
+            {"id": "cat-b", "name": "B", "mode": "manual", "content_types": ["live"],
+             "items": [{"id": "1", "source_id": "src1", "content_type": "live"}]},
+        ]
+    })
+    client.app.state.cache_service.load_cache_from_disk()
+
+    item = client.get("/api/browse?type=live").json()["items"][0]
+    assert sorted(item["categories"]) == ["cat-a", "cat-b"]
+
+
+def test_browse_responses_are_gzipped():
+    """The production app must wire GZip compression for large payloads."""
+    from app.main import app as prod_app
+
+    middleware_names = [
+        getattr(mw, "cls", mw).__name__ if not isinstance(mw, type) else mw.__name__
+        for mw in prod_app.user_middleware
+    ]
+    assert "GZipMiddleware" in middleware_names

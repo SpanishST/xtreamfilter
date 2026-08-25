@@ -465,19 +465,23 @@ async def api_browse(
     if _page_keys:
         _cm_conn = db_connect(cat_svc.db_path)
         try:
-            conditions = " OR ".join(
-                "(stream_id=? AND source_id=? AND content_type=?)" for _ in _page_keys
-            )
-            params: list[str] = []
-            for sid, src, ct in _page_keys:
-                params.extend([sid, src, ct])
-            for _row in _cm_conn.execute(
-                f"SELECT stream_id, source_id, content_type, category_id "
-                f"FROM category_manual_items WHERE {conditions}",
-                params,
-            ).fetchall():
-                _key = (_row["stream_id"], _row["source_id"], _row["content_type"])
-                category_membership.setdefault(_key, []).append(_row["category_id"])
+            # Row-value IN over a VALUES list keeps one indexed lookup per key
+            # without the OR-chain growing with page size.
+            for _start in range(0, len(_page_keys), 300):
+                _chunk = _page_keys[_start : _start + 300]
+                values_sql = ",".join("(?, ?, ?)" for _ in _chunk)
+                params: list[str] = []
+                for sid, src, ct in _chunk:
+                    params.extend([sid, src, ct])
+                for _row in _cm_conn.execute(
+                    f"SELECT m.stream_id, m.source_id, m.content_type, m.category_id "
+                    f"FROM category_manual_items m "
+                    f"WHERE (m.stream_id, m.source_id, m.content_type) "
+                    f"IN (VALUES {values_sql})",
+                    params,
+                ).fetchall():
+                    _key = (_row["stream_id"], _row["source_id"], _row["content_type"])
+                    category_membership.setdefault(_key, []).append(_row["category_id"])
         finally:
             _cm_conn.close()
 

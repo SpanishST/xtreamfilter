@@ -207,3 +207,16 @@ def test_database_cleanup_api_reports_status_and_conflicts(tmp_path):
 
     assert start_response.status_code == 409
     assert start_response.json()["status"] == "busy"
+
+
+def test_db_connect_enables_memory_mapped_io(tmp_path):
+    """mmap keeps reads fast without hoarding process memory."""
+    import os as _os
+
+    from app.database import db_connect as _connect
+
+    conn = _connect(str(tmp_path / DB_NAME))
+    try:
+        assert conn.execute("PRAGMA mmap_size").fetchone()[0] > 0
+    finally:
+        conn.close()

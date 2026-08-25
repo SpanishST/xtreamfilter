@@ -52,6 +52,10 @@ def db_connect(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA cache_size=-32768")   # 32 MB page cache
+    # Memory-mapped I/O: pages are served from evictable OS file cache,
+    # avoiding read() syscalls and copies. The cap bounds address space only;
+    # RSS grows solely with pages actually touched.
+    conn.execute("PRAGMA mmap_size=1073741824")
     conn.execute("PRAGMA recursive_triggers=ON")
     conn.create_function("regexp", 2, _regexp)
     return conn
@@ -63,6 +67,7 @@ async def _pragma_setup_async(conn) -> None:
     await conn.execute("PRAGMA foreign_keys=ON")
     await conn.execute("PRAGMA synchronous=NORMAL")
     await conn.execute("PRAGMA cache_size=-32768")
+    await conn.execute("PRAGMA mmap_size=1073741824")
     await conn.execute("PRAGMA recursive_triggers=ON")
     await conn.create_function("regexp", 2, _regexp)
 
@@ -163,6 +168,9 @@ CREATE TABLE IF NOT EXISTS streams (
     data         TEXT NOT NULL DEFAULT '{}',
     group_name   TEXT,
     rating       REAL,
+    icon         TEXT,
+    tmdb_id      TEXT,
+    container_ext TEXT,
     PRIMARY KEY (source_id, content_type, stream_id)
 );
 
@@ -530,20 +538,36 @@ def backfill_streams_denormalized_sql() -> str:
             ), 'Unknown'),
             rating = CASE WHEN json_valid(streams.data)
                 THEN COALESCE(CAST(json_extract(streams.data, '$.rating') AS REAL), 0)
-                ELSE 0 END
-        WHERE group_name IS NULL
+                ELSE 0 END,
+            icon = COALESCE(
+                NULLIF(json_extract(streams.data, '$.stream_icon'), ''),
+                json_extract(streams.data, '$.cover'), ''),
+            tmdb_id = COALESCE(
+                NULLIF(json_extract(streams.data, '$.tmdb_id'), ''),
+                json_extract(streams.data, '$.tmdb')),
+            container_ext = CASE WHEN streams.content_type = 'vod'
+                THEN COALESCE(NULLIF(json_extract(streams.data, '$.container_extension'), ''), 'mp4')
+                ELSE '' END
+        WHERE group_name IS NULL OR icon IS NULL OR container_ext IS NULL
     """
 
 
 def _backfill_streams_denormalized(conn: sqlite3.Connection) -> None:
-    """Populate denormalized columns for rows predating the migration."""
+    """Populate denormalized columns for rows predating the migrations.
+
+    The probe treats NULL as the not-yet-backfilled marker. tmdb_id and
+    rating are excluded because they are legitimately NULL/absent upstream;
+    icon/container_ext/group_name are always written as non-NULL strings by
+    both the refresh path and this backfill.
+    """
     missing = conn.execute(
-        "SELECT EXISTS(SELECT 1 FROM streams WHERE group_name IS NULL)"
+        "SELECT EXISTS(SELECT 1 FROM streams "
+        "WHERE group_name IS NULL OR icon IS NULL OR container_ext IS NULL)"
     ).fetchone()[0]
     if not missing:
         return
     conn.execute(backfill_streams_denormalized_sql())
-    logger.info("Schema upgrade: backfilled streams.group_name/rating")
+    logger.info("Schema upgrade: backfilled streams denormalized columns")
 
 
 _COLUMN_UPGRADES: list[tuple[str, str, str]] = [
@@ -567,6 +591,10 @@ _COLUMN_UPGRADES: list[tuple[str, str, str]] = [
     # instead of joining source_categories and parsing JSON per row.
     ("streams", "group_name", "TEXT"),
     ("streams", "rating", "REAL"),
+    # Item-card fields so browse pages never touch the wide JSON blob.
+    ("streams", "icon", "TEXT"),
+    ("streams", "tmdb_id", "TEXT"),
+    ("streams", "container_ext", "TEXT"),
 ]
 
 

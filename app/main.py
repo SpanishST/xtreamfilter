@@ -12,6 +12,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.gzip import GZipMiddleware
 
 from app.database import DB_NAME, init_db
 from app.migrate import run_migration_if_needed
@@ -261,6 +262,9 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="XtreamFilter", lifespan=lifespan)
+
+# Compress API/HTML responses (browse payloads shrink ~4x over the network).
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 # Middleware — ensure UTF-8 charset on JSON responses

@@ -821,6 +821,12 @@ class CacheService:
                         group_name = cat_names.get(
                             (ct, str(stream.get("category_id", ""))), "Unknown"
                         )
+                        icon = stream.get("stream_icon") or stream.get("cover") or ""
+                        raw_tmdb = stream.get("tmdb_id") or stream.get("tmdb")
+                        tmdb_value = str(raw_tmdb) if raw_tmdb else None
+                        container_ext = (
+                            str(stream.get("container_extension") or "mp4") if ct == "vod" else ""
+                        )
                         stream_rows.append(
                             (
                                 source_id,
@@ -832,14 +838,17 @@ class CacheService:
                                 json.dumps(stream, ensure_ascii=False),
                                 group_name,
                                 rating,
+                                icon,
+                                tmdb_value,
+                                container_ext,
                             )
                         )
                 if stream_rows:
                     conn.executemany(
                         "INSERT OR IGNORE INTO streams "
                         "(source_id, content_type, stream_id, name, category_id, added, data, "
-                        "group_name, rating) "
-                        "VALUES (?,?,?,?,?,?,?,?,?)",
+                        "group_name, rating, icon, tmdb_id, container_ext) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                         stream_rows,
                     )
 
@@ -962,6 +971,12 @@ class CacheService:
                         group_name = cat_names.get(
                             (ct, str(stream.get("category_id", ""))), "Unknown"
                         )
+                        icon = stream.get("stream_icon") or stream.get("cover") or ""
+                        raw_tmdb = stream.get("tmdb_id") or stream.get("tmdb")
+                        tmdb_value = str(raw_tmdb) if raw_tmdb else None
+                        container_ext = (
+                            str(stream.get("container_extension") or "mp4") if ct == "vod" else ""
+                        )
                         stream_rows.append(
                             (
                                 source_id,
@@ -973,14 +988,17 @@ class CacheService:
                                 json.dumps(stream, ensure_ascii=False),
                                 group_name,
                                 rating,
+                                icon,
+                                tmdb_value,
+                                container_ext,
                             )
                         )
                 if stream_rows:
                     await conn.executemany(
                         "INSERT OR IGNORE INTO streams "
                         "(source_id, content_type, stream_id, name, category_id, added, data, "
-                        "group_name, rating) "
-                        "VALUES (?,?,?,?,?,?,?,?,?)",
+                        "group_name, rating, icon, tmdb_id, container_ext) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                         stream_rows,
                     )
 
@@ -1431,23 +1449,13 @@ class CacheService:
     def _browse_item_from_row(self, row, source_names: dict[str, str]) -> dict:
         """Shape a full (non-slim) streams row into the browse item contract."""
         src_id = row["source_id"]
-        try:
-            data = json.loads(row["data"])
-        except (json.JSONDecodeError, TypeError):
-            data = {}
-
-        icon = data.get("stream_icon", "") or data.get("cover", "")
-        raw_rating = data.get("rating", 0)
-        try:
-            rating_val = float(raw_rating) if raw_rating else 0.0
-        except (ValueError, TypeError):
-            rating_val = 0.0
+        rating_val = float(row["rating"]) if row["rating"] else 0.0
 
         item_data = {
             "name": row["name"],
             "group": row["group_name"],
-            "icon": icon,
-            "id": str(data.get("stream_id") or data.get("series_id") or row["stream_id"]),
+            "icon": row["icon"] or "",
+            "id": str(row["stream_id"]),
             "source_id": src_id,
             "source_name": source_names.get(src_id, "Unknown"),
             "added": row["added"] or 0,
@@ -1455,10 +1463,9 @@ class CacheService:
             "content_type": row["content_type"],
         }
         if row["content_type"] in ("vod", "series"):
-            raw_tmdb = data.get("tmdb_id") or data.get("tmdb")
-            item_data["tmdb_id"] = raw_tmdb if raw_tmdb else None
+            item_data["tmdb_id"] = row["tmdb_id"] if row["tmdb_id"] else None
         if row["content_type"] == "vod":
-            item_data["container_extension"] = data.get("container_extension", "mp4")
+            item_data["container_extension"] = row["container_ext"] or "mp4"
         return item_data
 
     def hydrate_browse_items(self, keys: list[tuple[str, str, str]]) -> list[dict]:
@@ -1487,7 +1494,8 @@ class CacheService:
                 rows = conn.execute(
                     f"""
                     SELECT s.source_id, s.content_type, s.stream_id, s.name,
-                           s.category_id, s.added, s.data,
+                           s.category_id, s.added, s.rating, s.icon, s.tmdb_id,
+                           s.container_ext,
                            COALESCE(NULLIF(s.group_name, ''), 'Unknown') as group_name
                     FROM streams s
                     WHERE {conditions}
@@ -1623,14 +1631,11 @@ class CacheService:
                     conditions.append("s.added >= ?")
                     params.append(added_cutoff)
                 if tmdb_search_id is not None:
-                    conditions.append(
-                        "(json_extract(s.data, '$.tmdb_id') = ? OR "
-                        "json_extract(s.data, '$.tmdb') = ? OR "
-                        "json_extract(s.data, '$.tmdb_id') = ? OR "
-                        "json_extract(s.data, '$.tmdb') = ?)"
-                    )
-                    tmdb_prefixed = f"tmdb:{tmdb_search_id}"
-                    params.extend([tmdb_search_id, tmdb_search_id, tmdb_prefixed, tmdb_prefixed])
+                    # Denormalized column stores first-nonempty(tmdb_id, tmdb),
+                    # matching the legacy json_extract precedence; both plain
+                    # and tmdb:-prefixed stored forms are matched.
+                    conditions.append("(s.tmdb_id = ? OR s.tmdb_id = ?)")
+                    params.extend([tmdb_search_id, f"tmdb:{tmdb_search_id}"])
                 elif search:
                     if search_mode == "fts":
                         conditions.append(
@@ -1660,7 +1665,8 @@ class CacheService:
                 else:
                     data_columns = (
                         "s.source_id, s.content_type, s.stream_id, s.name, "
-                        "s.category_id, s.added, s.data, "
+                        "s.category_id, s.added, s.rating, s.icon, s.tmdb_id, "
+                        "s.container_ext, "
                         "COALESCE(NULLIF(s.group_name, ''), 'Unknown') as group_name"
                     )
                 count_sql = f"""

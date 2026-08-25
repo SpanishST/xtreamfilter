@@ -298,3 +298,157 @@ def safe_copy_category(cat) -> dict:
     elif isinstance(cat, str):
         return {"category_id": cat, "category_name": cat}
     return {"category_id": "", "category_name": ""}
+
+
+# ---------------------------------------------------------------------------
+# SQL pushdown for source-filter rules
+# ---------------------------------------------------------------------------
+#
+# Source include/exclude rules are normally applied in Python after fetching
+# rows, which forces full-catalog scans.  When every active rule is a
+# translatable type (exact/contains/not_contains/starts_with/ends_with/all,
+# case-insensitive), the route can instead embed an equivalent SQL predicate.
+# The XF_NORM() scalar function mirrors the Python-side normalization
+# (lowercase + accent-strip + whitespace-collapse) so results match
+# should_include()/matches_filter() exactly, including accented values.
+
+XF_NORM = "xf_filter_norm"
+
+_TRANSLATABLE_MATCH_TYPES = {
+    "exact", "contains", "not_contains", "starts_with", "ends_with", "all",
+}
+
+_NORM_MEMO_CAP = 20000
+# Shared across connections/requests: real catalogs repeat group names
+# heavily between rows and between queries, so the memo hit rate is high.
+_NORM_MEMO: dict[str, str] = {}
+
+
+def make_xf_norm() -> callable:
+    """Build the deterministic normalization function used by XF_NORM()."""
+
+    def xf_norm(raw) -> str:
+        text = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+        cached = _NORM_MEMO.get(text)
+        if cached is not None:
+            return cached
+        if text.isascii() and "  " not in text and "\t" not in text and "\n" not in text:
+            # Hot path: already normalized apart from case.
+            value = text.lower()
+        else:
+            value = _strip_accents(text.lower())
+            value = re.sub(r"\s+", " ", value).strip()
+        if len(_NORM_MEMO) >= _NORM_MEMO_CAP:
+            _NORM_MEMO.clear()
+        _NORM_MEMO[text] = value
+        return value
+
+    return xf_norm
+
+
+def register_xf_norm(conn) -> None:
+    """Attach XF_NORM() to a SQLite connection (idempotent, cheap)."""
+    conn.create_function(XF_NORM, 1, make_xf_norm(), deterministic=True)
+
+
+def _norm_atom(field_expr: str, rule: dict) -> tuple[str, list] | None:
+    """Translate one rule into (sql_fragment, params) or None if untranslatable."""
+    match_type = rule.get("match", "contains")
+    if match_type not in _TRANSLATABLE_MATCH_TYPES or rule.get("case_sensitive"):
+        return None
+    raw_value = str(rule.get("value", ""))
+    if match_type == "all":
+        # matches_filter('all') always matches → an exclude-all veto excludes
+        # everything; as part of an include list it can never be satisfied.
+        return ("0", [])
+    if not raw_value:
+        # Empty patterns never match in matches_filter().
+        return ("0", [])
+
+    norm_expr = f"{XF_NORM}({field_expr})"
+    norm_param = f"{XF_NORM}(?)"
+    params: list = [raw_value]
+
+    if match_type == "exact":
+        return (f"{norm_expr} = {norm_param}", params)
+    if match_type == "contains":
+        return (f"instr({norm_expr}, {norm_param}) > 0", params)
+    if match_type == "not_contains":
+        return (f"instr({norm_expr}, {norm_param}) = 0", params)
+    if match_type == "starts_with":
+        sql = f"substr({norm_expr}, 1, length({norm_param})) = {norm_param}"
+        return (sql, [raw_value, raw_value])
+    if match_type == "ends_with":
+        sql = f"substr({norm_expr}, -length({norm_param})) = {norm_param}"
+        return (sql, [raw_value, raw_value])
+    return None
+
+
+def _field_predicate(field_expr: str, rules: list[dict] | None) -> tuple[str, list] | None:
+    """Translate one field's rule list; ('1', []) when no rules apply."""
+    if not rules:
+        return ("1", [])
+    includes = [r for r in rules if r.get("type") == "include"]
+    excludes = [r for r in rules if r.get("type") == "exclude"]
+
+    parts: list[str] = []
+    params: list = []
+    for rule in includes:
+        atom = _norm_atom(field_expr, rule)
+        if atom is None:
+            return None
+        parts.append(atom[0])
+        params.extend(atom[1])
+    if includes:
+        parts = ["(" + " OR ".join(parts) + ")"]
+        for rule in excludes:
+            atom = _norm_atom(field_expr, rule)
+            if atom is None:
+                return None
+            parts.append(f"NOT ({atom[0]})")
+            params.extend(atom[1])
+        return (" AND ".join(parts), params)
+
+    for rule in excludes:
+        atom = _norm_atom(field_expr, rule)
+        if atom is None:
+            return None
+        parts.append(f"NOT ({atom[0]})")
+        params.extend(atom[1])
+    return (" AND ".join(parts) if parts else "1", params)
+
+
+def source_rules_predicate(
+    sources_config: dict,
+    content_types: list[str],
+) -> tuple[str, list] | None:
+    """Build a WHERE fragment applying every source's rules across types.
+
+    Returns None when any active rule cannot be translated to SQL (regex,
+    case-sensitive, …); callers then fall back to bounded Python scanning.
+    """
+    if not sources_config or not content_types:
+        return None
+    terms: list[str] = []
+    params: list = []
+    for source_id, source_cfg in sources_config.items():
+        all_filters = source_cfg.get("filters") or {}
+        for content_type in content_types:
+            content_filters = all_filters.get(content_type) or {}
+            group_pred = _field_predicate("s.group_name", content_filters.get("groups"))
+            name_pred = _field_predicate("s.name", content_filters.get("channels"))
+            if group_pred is None or name_pred is None:
+                return None
+            term = "(s.source_id = ? AND s.content_type = ?"
+            term_params: list = [source_id, content_type]
+            if group_pred[0] != "1":
+                term += f" AND {group_pred[0]}"
+                term_params.extend(group_pred[1])
+            if name_pred[0] != "1":
+                term += f" AND {name_pred[0]}"
+                term_params.extend(name_pred[1])
+            terms.append(term + ")")
+            params.extend(term_params)
+    if not terms:
+        return None
+    return ("(" + " OR ".join(terms) + ")", params)

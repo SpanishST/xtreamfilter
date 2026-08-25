@@ -22,6 +22,7 @@ from app.services.filter_service import (
     group_similar_items,
     safe_get_category_name,
     should_include,
+    source_rules_predicate,
 )
 from app.services.http_client import HttpClientService
 from app.services.m3u_service import M3uService
@@ -260,61 +261,117 @@ async def api_browse(
         if category_fast_path:
             browse_kwargs["category_id"] = category_id
             browse_kwargs["category_mode"] = cat_data.get("mode", "manual")
-        filtered_page: list[dict] = []
-        filtered_items: list[dict] = []
-        filtered_total = 0
-        raw_page = 1
-        raw_total = None
-        batch_size = 1000
-        requested_start = (page - 1) * per_page
 
-        def passes_source_filters(item: dict) -> bool:
-            src_id = item.get("source_id", "")
-            if src_id not in sources_config:
-                return True
-            source_cfg = sources_config[src_id]
-            content_filters = source_cfg.get("filters", {}).get(item.get("content_type", ""), {})
-            if content_filters.get("groups") and not should_include(
-                item.get("group", ""), content_filters["groups"]
-            ):
-                return False
-            if content_filters.get("channels") and not should_include(
-                item.get("name", ""), content_filters["channels"]
-            ):
-                return False
-            return True
-
-        while raw_total is None or (raw_page - 1) * batch_size < raw_total:
-            result = await asyncio.to_thread(
-                cache.browse_streams_db,
-                **browse_kwargs,
-                page=raw_page,
-                per_page=batch_size,
-            )
-            if raw_total is None:
-                raw_total = result["total"]
-                group_counts.update(result["group_counts"])
-                source_set.update(result["source_set"])
-            if not result["items"]:
-                break
-            for item in result["items"]:
-                if not passes_source_filters(item):
-                    continue
-                if filtered_total <= 500:
-                    filtered_items.append(item)
-                if requested_start <= filtered_total < requested_start + per_page:
-                    filtered_page.append(item)
-                filtered_total += 1
-            raw_page += 1
-
-        if filtered_total <= _GROUP_THRESHOLD:
-            items = filtered_items
-            items_are_paginated = False
+        predicate = source_rules_predicate(sources_config, content_types_to_query)
+        if predicate is not None:
+            # Fast path: every active rule translated to SQL — paginate in the
+            # database exactly like the unfiltered flow.
+            rules_sql, rules_params = predicate
+            # Fast path: every active rule translated to SQL — paginate in the
+            # database exactly like the unfiltered flow.
+            if should_group:
+                probe = await asyncio.to_thread(
+                    cache.browse_streams_db,
+                    **browse_kwargs,
+                    extra_where_sql=rules_sql,
+                    extra_where_params=rules_params,
+                    page=1,
+                    per_page=1,
+                )
+                raw_total = probe["total"]
+                if raw_total <= _GROUP_THRESHOLD:
+                    result = await asyncio.to_thread(
+                        cache.browse_streams_db,
+                        **browse_kwargs,
+                        extra_where_sql=rules_sql,
+                        extra_where_params=rules_params,
+                        page=1,
+                        per_page=0,
+                    )
+                else:
+                    result = await asyncio.to_thread(
+                        cache.browse_streams_db,
+                        **browse_kwargs,
+                        extra_where_sql=rules_sql,
+                        extra_where_params=rules_params,
+                        page=page,
+                        per_page=per_page,
+                    )
+                    items_are_paginated = True
+            else:
+                result = await asyncio.to_thread(
+                    cache.browse_streams_db,
+                    **browse_kwargs,
+                    extra_where_sql=rules_sql,
+                    extra_where_params=rules_params,
+                    page=page,
+                    per_page=per_page,
+                )
+                items_are_paginated = True
+            items.extend(result["items"])
+            total_from_db = result["total"]
+            group_counts.update(result["group_counts"])
+            source_set.update(result["source_set"])
+            source_filters_applied = True
         else:
-            items = filtered_page
-            items_are_paginated = True
-        total_from_db = filtered_total
-        source_filters_applied = True
+            # Fallback for untranslatable rules (regex / case-sensitive):
+            # scan in bounded batches WITHOUT loading wide JSON blobs, keep
+            # only matching keys, then hydrate just the needed rows.
+            def passes_source_filters(item: dict) -> bool:
+                src_id = item.get("source_id", "")
+                if src_id not in sources_config:
+                    return True
+                source_cfg = sources_config[src_id]
+                content_filters = source_cfg.get("filters", {}).get(item.get("content_type", ""), {})
+                if content_filters.get("groups") and not should_include(
+                    item.get("group", ""), content_filters["groups"]
+                ):
+                    return False
+                if content_filters.get("channels") and not should_include(
+                    item.get("name", ""), content_filters["channels"]
+                ):
+                    return False
+                return True
+
+            matched_keys: list[tuple[str, str, str]] = []
+            window_keys: list[tuple[str, str, str]] = []
+            smallset_keys: list[tuple[str, str, str]] = []
+            filtered_total = 0
+            raw_page = 1
+            raw_total = None
+            batch_size = 1000
+            requested_start = (page - 1) * per_page
+
+            while raw_total is None or (raw_page - 1) * batch_size < raw_total:
+                result = await asyncio.to_thread(
+                    cache.browse_streams_db,
+                    **browse_kwargs,
+                    page=raw_page,
+                    per_page=batch_size,
+                    _slim=True,
+                )
+                if raw_total is None:
+                    raw_total = result["total"]
+                    group_counts.update(result["group_counts"])
+                    source_set.update(result["source_set"])
+                if not result["items"]:
+                    break
+                for item in result["items"]:
+                    if not passes_source_filters(item):
+                        continue
+                    key = (str(item.get("id", "")), item.get("source_id", ""), item.get("content_type", ""))
+                    if filtered_total <= _GROUP_THRESHOLD:
+                        smallset_keys.append(key)
+                    if requested_start <= filtered_total < requested_start + per_page:
+                        window_keys.append(key)
+                    filtered_total += 1
+                raw_page += 1
+
+            matched_keys = smallset_keys if filtered_total <= _GROUP_THRESHOLD else window_keys
+            items = await asyncio.to_thread(cache.hydrate_browse_items, matched_keys)
+            items_are_paginated = filtered_total > _GROUP_THRESHOLD
+            total_from_db = filtered_total
+            source_filters_applied = True
     # Apply source filters in Python (can't express in SQL)
     if sources_config and not source_filters_applied:
         filtered = []

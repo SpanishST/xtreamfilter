@@ -907,6 +907,113 @@ def test_search_falls_back_to_group_matches_when_no_names_match(client, data_dir
     assert data["total"] == 2
 
 
+def test_source_filter_rules_pushdown_matches_python_semantics(client, data_dir):
+    """Simple rules run as SQL and must match should_include() exactly."""
+    from app.services.filter_service import should_include
+
+    _seed_categories(data_dir, [
+        {"category_id": "10", "category_name": "FR| News"},
+        {"category_id": "20", "category_name": "AFR Sports"},
+        {"category_id": "30", "category_name": "UK| Cinema"},
+    ], "live")
+    _seed_streams(data_dir, [
+        {"stream_id": str(i), "name": f"Channel {i}", "category_id": cid}
+        for i, cid in enumerate(["10", "20", "30"], start=1)
+    ], "live")
+
+    client.app.state.config_service.config["sources"][0]["filters"] = {
+        "live": {
+            "groups": [
+                {"type": "include", "match": "starts_with", "value": "fr|", "case_sensitive": False},
+                {"type": "exclude", "match": "starts_with", "value": "afr", "case_sensitive": False},
+            ]
+        }
+    }
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+
+    rules = client.app.state.config_service.config["sources"][0]["filters"]["live"]["groups"]
+    expected = {
+        name
+        for name, group in [("Channel 1", "FR| News"), ("Channel 2", "AFR Sports"), ("Channel 3", "UK| Cinema")]
+        if should_include(group, rules)
+    }
+
+    data = client.get("/api/browse?type=live&use_source_filters=true&page=1&per_page=50").json()
+    assert {item["name"] for item in data["items"]} == expected
+    assert data["total"] == len(expected)
+
+
+def test_source_filter_rules_paginate_large_results_in_sql(client, data_dir, monkeypatch):
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "Keep Group"}], "live")
+    _seed_streams(data_dir, [
+        {"stream_id": str(i), "name": f"Keep {i:04d}", "category_id": "10"}
+        for i in range(1, 601)
+    ], "live")
+
+    client.app.state.config_service.config["sources"][0]["filters"] = {
+        "live": {
+            "channels": [
+                {"type": "include", "match": "starts_with", "value": "keep", "case_sensitive": False}
+            ]
+        }
+    }
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+    calls = []
+    original = cache.browse_streams_db
+
+    def record_call(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cache, "browse_streams_db", record_call)
+    result = client.get(
+        "/api/browse?type=live&use_source_filters=true&page=4&per_page=25"
+    ).json()
+
+    assert result["total"] == 600
+    assert len(result["items"]) == 25
+    # Pushdown path: single bounded page fetch carrying the SQL predicate.
+    assert any("extra_where_sql" in call for call in calls)
+    assert all(call.get("_slim") is not True for call in calls)
+
+
+def test_source_filter_regex_rules_use_bounded_slim_fallback(client, data_dir, monkeypatch):
+    _seed_categories(data_dir, [{"category_id": "10", "category_name": "News"}], "live")
+    _seed_streams(data_dir, [
+        {"stream_id": str(i), "name": f"Match-{i} x" if i % 2 else f"Other {i}", "category_id": "10"}
+        for i in range(1, 121)
+    ], "live")
+
+    client.app.state.config_service.config["sources"][0]["filters"] = {
+        "live": {
+            "channels": [
+                    {"type": "include", "match": "regex", "value": r"^Match-\d+", "case_sensitive": False}
+            ]
+        }
+    }
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+    calls = []
+    original = cache.browse_streams_db
+
+    def record_call(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cache, "browse_streams_db", record_call)
+    result = client.get(
+        "/api/browse?type=live&use_source_filters=true&page=2&per_page=25"
+    ).json()
+
+    assert result["total"] == 60
+    assert len(result["items"]) == 25
+    slim_calls = [call for call in calls if call.get("_slim")]
+    assert slim_calls, "fallback must scan with the slim projection"
+    assert all(call["per_page"] <= 1000 for call in slim_calls)
+
+
 # -------------------------------------------------------------------
 # Response structure
 # -------------------------------------------------------------------

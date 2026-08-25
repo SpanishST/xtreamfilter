@@ -22,6 +22,7 @@ from app.database import (
     backfill_streams_denormalized_sql,
     db_connect,
 )
+from app.services.filter_service import register_xf_norm
 
 if TYPE_CHECKING:
     from app.services.cart_service import CartService
@@ -79,6 +80,9 @@ class CacheService:
         self._group_counts_cache: dict[tuple[str, str], dict[str, Any]] = {}
         self._group_counts_lock = threading.Lock()
         self._group_counts_generation = 0
+        # Pushed-down source-rule predicates make COUNT expensive; cache the
+        # resulting totals keyed by predicate hash under the same generation.
+        self._rule_total_cache: dict[tuple, int] = {}
 
         self._stream_source_map: dict[str, dict[str, str]] = {
             "live": {},
@@ -1247,6 +1251,7 @@ class CacheService:
         with self._group_counts_lock:
             self._group_counts_generation += 1
             self._group_counts_cache.clear()
+            self._rule_total_cache.clear()
 
     def _query_group_counts(
         self,
@@ -1420,8 +1425,82 @@ class CacheService:
 
     def browse_group_counts_db(self, content_type: str, source: str = "") -> list[dict]:
         """Aggregate browse groups in SQLite without loading stream rows."""
-        group_counts, _source_set = self._get_group_counts(content_type, source)
+        _total, group_counts, _source_set = self._get_scope_metadata([content_type], source=source)
         return [{"name": name, "count": count} for name, count in sorted(group_counts.items())]
+
+    def _browse_item_from_row(self, row, source_names: dict[str, str]) -> dict:
+        """Shape a full (non-slim) streams row into the browse item contract."""
+        src_id = row["source_id"]
+        try:
+            data = json.loads(row["data"])
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+
+        icon = data.get("stream_icon", "") or data.get("cover", "")
+        raw_rating = data.get("rating", 0)
+        try:
+            rating_val = float(raw_rating) if raw_rating else 0.0
+        except (ValueError, TypeError):
+            rating_val = 0.0
+
+        item_data = {
+            "name": row["name"],
+            "group": row["group_name"],
+            "icon": icon,
+            "id": str(data.get("stream_id") or data.get("series_id") or row["stream_id"]),
+            "source_id": src_id,
+            "source_name": source_names.get(src_id, "Unknown"),
+            "added": row["added"] or 0,
+            "rating": rating_val,
+            "content_type": row["content_type"],
+        }
+        if row["content_type"] in ("vod", "series"):
+            raw_tmdb = data.get("tmdb_id") or data.get("tmdb")
+            item_data["tmdb_id"] = raw_tmdb if raw_tmdb else None
+        if row["content_type"] == "vod":
+            item_data["container_extension"] = data.get("container_extension", "mp4")
+        return item_data
+
+    def hydrate_browse_items(self, keys: list[tuple[str, str, str]]) -> list[dict]:
+        """Fetch full browse items for (stream_id, source_id, content_type) keys.
+
+        Preserves the caller's key order; used to rebuild final pages after
+        slim catalog scans without ever materializing the whole catalog.
+        """
+        if not keys:
+            return []
+        conn = db_connect(self.db_path)
+        source_names = self._source_names
+        found: dict[tuple[str, str, str], dict] = {}
+        try:
+            self._ensure_denormalized(conn)
+            chunk_size = 300
+            for start in range(0, len(keys), chunk_size):
+                chunk = keys[start : start + chunk_size]
+                conditions = " OR ".join(
+                    "(s.stream_id=? AND s.source_id=? AND s.content_type=?)"
+                    for _ in chunk
+                )
+                params: list = []
+                for stream_id, source_id, content_type in chunk:
+                    params.extend([stream_id, source_id, content_type])
+                rows = conn.execute(
+                    f"""
+                    SELECT s.source_id, s.content_type, s.stream_id, s.name,
+                           s.category_id, s.added, s.data,
+                           COALESCE(NULLIF(s.group_name, ''), 'Unknown') as group_name
+                    FROM streams s
+                    WHERE {conditions}
+                    """,
+                    params,
+                ).fetchall()
+                for row in rows:
+                    found[(row["stream_id"], row["source_id"], row["content_type"])] = (
+                        self._browse_item_from_row(row, source_names)
+                    )
+        finally:
+            conn.close()
+        return [found[key] for key in keys if key in found]
 
     def browse_streams_db(
         self,
@@ -1439,12 +1518,20 @@ class CacheService:
         tmdb_search_id: str | None = None,
         category_id: str = "",
         category_mode: str = "manual",
+        extra_where_sql: str = "",
+        extra_where_params: list | None = None,
+        _slim: bool = False,
     ) -> dict:
         """Query streams directly from SQLite with filters, sort and pagination.
 
         Returns a dict with: {items, total, page, per_page, total_pages,
         group_counts, source_counts} where items are lightweight dicts
         containing only the fields needed by the browse UI.
+
+        extra_where_sql/params inject caller-built predicates (e.g. source
+        filter rules) into count and page queries; facets intentionally stay
+        rule-agnostic. _slim skips the wide JSON column entirely for cheap
+        catalog scans; hydrated rows must then be rebuilt by the caller.
         """
         current_time = int(time.time())
         news_cutoff = current_time - (news_days * 86400) if news_days > 0 else 0
@@ -1464,6 +1551,8 @@ class CacheService:
         conn = db_connect(self.db_path)
         try:
             self._ensure_denormalized(conn)
+            if extra_where_sql:
+                register_xf_norm(conn)
             # Sorting — group_name/rating are denormalized columns so the
             # default and rating orders walk indexes instead of temp B-trees.
             # rating is never NULL after the backfill, so a bare column
@@ -1557,17 +1646,30 @@ class CacheService:
                 if min_rating > 0:
                     conditions.append("s.rating >= ?")
                     params.append(min_rating)
+                if extra_where_sql:
+                    conditions.append(f"({extra_where_sql})")
+                    params.extend(extra_where_params or [])
 
                 where_clause = " AND ".join(conditions) if conditions else "1=1"
+                if _slim:
+                    data_columns = (
+                        "s.source_id, s.content_type, s.stream_id, s.name, "
+                        "s.category_id, s.added, s.rating, "
+                        "COALESCE(NULLIF(s.group_name, ''), 'Unknown') as group_name"
+                    )
+                else:
+                    data_columns = (
+                        "s.source_id, s.content_type, s.stream_id, s.name, "
+                        "s.category_id, s.added, s.data, "
+                        "COALESCE(NULLIF(s.group_name, ''), 'Unknown') as group_name"
+                    )
                 count_sql = f"""
                     SELECT COUNT(*) as cnt
                     FROM {from_clause}
                     WHERE {where_clause}
                 """
                 data_sql = f"""
-                    SELECT s.source_id, s.content_type, s.stream_id, s.name,
-                           s.category_id, s.added, s.data,
-                           COALESCE(NULLIF(s.group_name, ''), 'Unknown') as group_name
+                    SELECT {data_columns}
                     FROM {from_clause}
                     WHERE {where_clause}
                     ORDER BY {order_clause}
@@ -1575,15 +1677,16 @@ class CacheService:
                 """
                 return count_sql, data_sql, params
 
-            # Baseline scopes (no narrowing filters; group filters are part of
-            # the cache key) serve total + facets from the metadata cache;
-            # anything else computes fresh.
+            # Baseline scopes (no narrowing filters, no injected predicates)
+            # serve total + facets from the metadata cache; anything else
+            # computes fresh.
             cacheable_scope = (
                 not search
                 and news_days <= 0
                 and max_added_days <= 0
                 and tmdb_search_id is None
                 and min_rating <= 0
+                and not extra_where_sql
             )
             if cacheable_scope:
                 total, group_counts, source_set = self._get_scope_metadata(
@@ -1598,66 +1701,85 @@ class CacheService:
             else:
                 initial_mode = "fts" if (search and tmdb_search_id is None) else ""
                 count_sql, data_sql, qparams = build_scope_queries(initial_mode)
-                total = conn.execute(count_sql, qparams).fetchone()["cnt"]
-                # Two-phase search: group-name matches only surface when no
-                # stream name matched the FTS query.
-                if initial_mode == "fts" and total == 0:
-                    count_sql, data_sql, qparams = build_scope_queries("group")
+                rule_key = None
+                if extra_where_sql and initial_mode == "" and not category_id:
+                    import hashlib
+
+                    rule_key = (
+                        tuple(sorted(content_types)),
+                        source,
+                        group,
+                        hashlib.md5(
+                            (extra_where_sql + "\x00" + repr(sorted(map(str, extra_where_params or [])))).encode()
+                        ).hexdigest(),
+                    )
+                    with self._group_counts_lock:
+                        cached_rule_total = self._rule_total_cache.get(rule_key)
+                        generation_at_read = self._group_counts_generation
+                else:
+                    cached_rule_total = None
+                    generation_at_read = None
+                if cached_rule_total is not None and generation_at_read == self._group_counts_generation:
+                    total = cached_rule_total
+                    _, data_sql, qparams = build_scope_queries("")
+                else:
                     total = conn.execute(count_sql, qparams).fetchone()["cnt"]
+                    # Two-phase search: group-name matches only surface when no
+                    # stream name matched the FTS query.
+                    if initial_mode == "fts" and total == 0:
+                        count_sql, data_sql, qparams = build_scope_queries("group")
+                        total = conn.execute(count_sql, qparams).fetchone()["cnt"]
+                    if rule_key is not None:
+                        with self._group_counts_lock:
+                            if self._group_counts_generation == generation_at_read:
+                                self._rule_total_cache[rule_key] = total
                 rows = conn.execute(data_sql, qparams + limit_params).fetchall()
-                group_counts, source_set = self._query_group_counts(
-                    conn,
-                    content_types,
-                    source=source,
-                    news_days=news_days,
-                    max_added_days=max_added_days,
-                    tmdb_search_id=tmdb_search_id,
-                    category_id=category_id,
-                    category_mode=category_mode,
+                # Facets never include source-rule predicates by design, so
+                # baseline scopes can reuse the shared metadata cache even
+                # when the item queries carry pushed-down rules.
+                facet_cacheable = (
+                    not search
+                    and news_days <= 0
+                    and max_added_days <= 0
+                    and tmdb_search_id is None
+                    and min_rating <= 0
                 )
+                if facet_cacheable:
+                    _fc_total, group_counts, source_set = self._get_scope_metadata(
+                        content_types,
+                        source=source,
+                        group=group,
+                        category_id=category_id,
+                        category_mode=category_mode,
+                    )
+                else:
+                    group_counts, source_set = self._query_group_counts(
+                        conn,
+                        content_types,
+                        source=source,
+                        news_days=news_days,
+                        max_added_days=max_added_days,
+                        tmdb_search_id=tmdb_search_id,
+                        category_id=category_id,
+                        category_mode=category_mode,
+                    )
 
             # Resolve source names from in-memory config
             source_names = self._source_names
 
             items = []
             for row in rows:
-                src_id = row["source_id"]
-                src_name = source_names.get(src_id, "Unknown")
-                grp = row["group_name"]
-                name = row["name"]
-
-                try:
-                    data = json.loads(row["data"])
-                except (json.JSONDecodeError, TypeError):
-                    data = {}
-
-                icon = data.get("stream_icon", "") or data.get("cover", "")
-                item_id = str(data.get("stream_id") or data.get("series_id") or row["stream_id"])
-                added_ts = row["added"] or 0
-
-                raw_rating = data.get("rating", 0)
-                try:
-                    rating_val = float(raw_rating) if raw_rating else 0.0
-                except (ValueError, TypeError):
-                    rating_val = 0.0
-
-                item_data = {
-                    "name": name,
-                    "group": grp,
-                    "icon": icon,
-                    "id": item_id,
-                    "source_id": src_id,
-                    "source_name": src_name,
-                    "added": added_ts,
-                    "rating": rating_val,
-                    "content_type": row["content_type"],
-                }
-                if row["content_type"] in ("vod", "series"):
-                    raw_tmdb = data.get("tmdb_id") or data.get("tmdb")
-                    item_data["tmdb_id"] = raw_tmdb if raw_tmdb else None
-                if row["content_type"] == "vod":
-                    item_data["container_extension"] = data.get("container_extension", "mp4")
-                items.append(item_data)
+                if _slim:
+                    items.append({
+                        "id": str(row["stream_id"]),
+                        "name": row["name"] or "",
+                        "group": row["group_name"],
+                        "source_id": row["source_id"],
+                        "content_type": row["content_type"],
+                        "added": row["added"] or 0,
+                    })
+                    continue
+                items.append(self._browse_item_from_row(row, source_names))
 
             total_pages = (total + per_page - 1) // per_page if total > 0 and per_page > 0 else 0
 

@@ -662,3 +662,242 @@ def test_cart_page(client):
 def test_monitor_page(client):
     r = client.get("/monitor")
     assert r.status_code == 200
+
+# -------------------------------------------------------------------
+# Xtream filtering performance / malformed category regression tests
+# -------------------------------------------------------------------
+
+
+def _configure_xtream_source(client, *, filters=None):
+    """Install a single cached source without making upstream HTTP requests."""
+    source = {
+        "id": "source-1",
+        "name": "Test source",
+        "host": "http://upstream.invalid",
+        "username": "user",
+        "password": "pass",
+        "enabled": True,
+        "route": "test-source",
+        "prefix": "",
+        "filters": filters or {
+            "live": {"groups": [], "channels": []},
+            "vod": {"groups": [], "channels": []},
+            "series": {"groups": [], "channels": []},
+        },
+    }
+    cfg = client.app.state.config_service
+    cfg.config["sources"] = [source]
+    cfg.save()
+
+    cache = client.app.state.cache_service
+    cache._api_cache["sources"] = {
+        source["id"]: cache._empty_source_cache(),
+    }
+    return source, cache._api_cache["sources"][source["id"]]
+
+
+def test_source_vod_group_filters_are_evaluated_per_category(client, monkeypatch):
+    """Group rules should not be re-evaluated for every VOD item."""
+    from app.routes import xtream_source
+    from app.services.filter_service import should_include as real_should_include
+
+    filters = {
+        "live": {"groups": [], "channels": []},
+        "vod": {
+            "groups": [
+                {
+                    "type": "include",
+                    "match": "exact",
+                    "value": "Allowed",
+                    "case_sensitive": False,
+                }
+            ],
+            "channels": [],
+        },
+        "series": {"groups": [], "channels": []},
+    }
+    _, source_cache = _configure_xtream_source(client, filters=filters)
+    source_cache["vod_categories"] = [
+        {"category_id": "10", "category_name": "Allowed"},
+        {"category_id": "20", "category_name": "Blocked"},
+    ]
+    source_cache["vod_streams"] = [
+        {"stream_id": i, "name": f"Allowed {i}", "category_id": "10"}
+        for i in range(100)
+    ] + [
+        {"stream_id": 1000 + i, "name": f"Blocked {i}", "category_id": "20"}
+        for i in range(100)
+    ] + [
+        {"stream_id": 9999, "name": "Unknown category", "category_id": None},
+    ]
+
+    calls = []
+
+    def counting_should_include(value, rules):
+        calls.append((value, rules))
+        return real_should_include(value, rules)
+
+    monkeypatch.setattr(xtream_source, "should_include", counting_should_include)
+
+    response = client.get("/test-source/player_api.php?action=get_vod_streams")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 100
+    assert {item["category_id"] for item in data} == {"10"}
+
+    # Two known category names plus the unknown-category fallback.  Most
+    # importantly, this must not scale with the 201 VOD items above.
+    assert len(calls) == 3
+
+
+def test_source_series_filtering_preserves_group_and_channel_semantics(client):
+    filters = {
+        "live": {"groups": [], "channels": []},
+        "vod": {"groups": [], "channels": []},
+        "series": {
+            "groups": [
+                {
+                    "type": "include",
+                    "match": "exact",
+                    "value": "Allowed Series",
+                    "case_sensitive": False,
+                }
+            ],
+            "channels": [
+                {
+                    "type": "exclude",
+                    "match": "contains",
+                    "value": "Blocked",
+                    "case_sensitive": False,
+                }
+            ],
+        },
+    }
+    _, source_cache = _configure_xtream_source(client, filters=filters)
+    source_cache["series_categories"] = [
+        {"category_id": "10", "category_name": "Allowed Series"},
+        {"category_id": "20", "category_name": "Other Series"},
+    ]
+    source_cache["series"] = [
+        {"series_id": 1, "name": "Keep Me", "category_id": "10"},
+        {"series_id": 2, "name": "Blocked title", "category_id": "10"},
+        {"series_id": 3, "name": "Wrong category", "category_id": "20"},
+        {"series_id": 4, "name": "Unknown category", "category_id": None},
+    ]
+
+    response = client.get("/test-source/player_api.php?action=get_series")
+    assert response.status_code == 200
+    assert [item["series_id"] for item in response.json()] == [1]
+
+
+def test_merged_vod_handles_null_category_id(client):
+    """A provider item with category_id=null must not fail the whole catalog."""
+    _, source_cache = _configure_xtream_source(client)
+    source_cache["vod_categories"] = []
+    source_cache["vod_streams"] = [
+        {
+            "stream_id": 123,
+            "name": "Uncategorised movie",
+            "category_id": None,
+        }
+    ]
+
+    response = client.get("/merged/player_api.php?action=get_vod_streams")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["stream_id"] == 123
+    assert data[0]["category_id"] == "0"
+    assert data[0]["category_ids"] == [0]
+
+
+def test_merged_vod_preserves_category_and_channel_filters(client):
+    filters = {
+        "live": {"groups": [], "channels": []},
+        "vod": {
+            "groups": [
+                {
+                    "type": "include",
+                    "match": "exact",
+                    "value": "Allowed",
+                    "case_sensitive": False,
+                }
+            ],
+            "channels": [
+                {
+                    "type": "exclude",
+                    "match": "contains",
+                    "value": "Blocked",
+                    "case_sensitive": False,
+                }
+            ],
+        },
+        "series": {"groups": [], "channels": []},
+    }
+    _, source_cache = _configure_xtream_source(client, filters=filters)
+    source_cache["vod_categories"] = [
+        {"category_id": "10", "category_name": "Allowed"},
+        {"category_id": "20", "category_name": "Other"},
+    ]
+    source_cache["vod_streams"] = [
+        {"stream_id": 1, "name": "Keep", "category_id": "10"},
+        {"stream_id": 2, "name": "Blocked title", "category_id": "10"},
+        {"stream_id": 3, "name": "Wrong category", "category_id": "20"},
+        {"stream_id": 4, "name": "Unknown category", "category_id": None},
+    ]
+
+    response = client.get("/merged/player_api.php?action=get_vod_streams")
+    assert response.status_code == 200
+    data = response.json()
+    assert [item["stream_id"] for item in data] == [1]
+    assert data[0]["category_id"] == "10"
+    assert data[0]["category_ids"] == [10]
+
+
+def test_merged_vod_group_filters_are_evaluated_per_category(client, monkeypatch):
+    """Merged group rules should scale with categories, not stream count."""
+    from app.routes import xtream_merged
+    from app.services.filter_service import should_include as real_should_include
+
+    filters = {
+        "live": {"groups": [], "channels": []},
+        "vod": {
+            "groups": [
+                {
+                    "type": "include",
+                    "match": "exact",
+                    "value": "Allowed",
+                    "case_sensitive": False,
+                }
+            ],
+            "channels": [],
+        },
+        "series": {"groups": [], "channels": []},
+    }
+    _, source_cache = _configure_xtream_source(client, filters=filters)
+    source_cache["vod_categories"] = [
+        {"category_id": "10", "category_name": "Allowed"},
+        {"category_id": "20", "category_name": "Blocked"},
+    ]
+    source_cache["vod_streams"] = [
+        {"stream_id": i, "name": f"Allowed {i}", "category_id": "10"}
+        for i in range(100)
+    ] + [
+        {"stream_id": 1000 + i, "name": f"Blocked {i}", "category_id": "20"}
+        for i in range(100)
+    ] + [
+        {"stream_id": 9999, "name": "Unknown category", "category_id": None},
+    ]
+
+    calls = []
+
+    def counting_should_include(value, rules):
+        calls.append((value, rules))
+        return real_should_include(value, rules)
+
+    monkeypatch.setattr(xtream_merged, "should_include", counting_should_include)
+
+    response = client.get("/merged/player_api.php?action=get_vod_streams")
+    assert response.status_code == 200
+    assert len(response.json()) == 100
+    assert len(calls) == 3

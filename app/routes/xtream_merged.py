@@ -174,15 +174,30 @@ def _handle_get_streams(action: str, request: Request, enabled_sources, cache: C
         channel_filters = filters.get(ct, {}).get("channels", [])
         categories = cache.get_cached(cat_key, source_id)
         cat_map = build_category_map(categories)
+        allowed_category_ids = {
+            cat_id
+            for cat_id, group_name in cat_map.items()
+            if should_include(group_name, group_filters)
+        }
+        include_unknown_group = should_include("", group_filters)
 
         for stream in cache.get_cached(stream_key, source_id):
             cat_id = str(stream.get("category_id", ""))
-            group_name = cat_map.get(cat_id, "")
-            channel_name = stream.get("name", "")
             stream_id_raw = str(stream.get(id_field, ""))
+            group_allowed = (
+                cat_id in allowed_category_ids
+                if cat_id in cat_map
+                else include_unknown_group
+            )
 
-            if should_include(group_name, group_filters) and should_include(channel_name, channel_filters):
-                virtual_cat_id = str(encode_virtual_id(idx, stream.get("category_id", 0)))
+            if group_allowed:
+                channel_name = stream.get("name", "")
+                if channel_filters and not should_include(channel_name, channel_filters):
+                    group_allowed = False
+
+            if group_allowed:
+                raw_category_id = stream.get("category_id") or 0
+                virtual_cat_id = str(encode_virtual_id(idx, raw_category_id))
                 if requested_cat_id is None or requested_cat_id == virtual_cat_id:
                     stream_copy = stream.copy()
                     stream_copy[id_field] = encode_virtual_id(idx, stream.get(id_field, 0))

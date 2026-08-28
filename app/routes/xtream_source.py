@@ -98,18 +98,34 @@ async def player_api_source(
             streams = cache.get_cached(f"{ct}_streams", source_id)
             categories = cache.get_cached(f"{ct}_categories", source_id)
             cat_map = build_category_map(categories)
+            allowed_category_ids = {
+                cat_id
+                for cat_id, group_name in cat_map.items()
+                if should_include(group_name, group_filters)
+            }
+            include_unknown_group = should_include("", group_filters)
+
             result = []
             for stream in streams:
                 cat_id = str(stream.get("category_id", ""))
-                group_name = cat_map.get(cat_id, "")
+                group_allowed = (
+                    cat_id in allowed_category_ids
+                    if cat_id in cat_map
+                    else include_unknown_group
+                )
+                if not group_allowed:
+                    continue
+
                 channel_name = stream.get("name", "")
-                if should_include(group_name, group_filters) and should_include(channel_name, channel_filters):
-                    stream_copy = stream.copy()
-                    if ct == "live":
-                        epg_id = stream.get("epg_channel_id", "")
-                        if epg_id:
-                            stream_copy["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
-                    result.append(stream_copy)
+                if channel_filters and not should_include(channel_name, channel_filters):
+                    continue
+
+                stream_copy = stream.copy()
+                if ct == "live":
+                    epg_id = stream.get("epg_channel_id", "")
+                    if epg_id:
+                        stream_copy["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
+                result.append(stream_copy)
             return result
 
         elif action == "get_series":
@@ -118,11 +134,29 @@ async def player_api_source(
             series_list = cache.get_cached("series", source_id)
             categories = cache.get_cached("series_categories", source_id)
             cat_map = build_category_map(categories)
-            return [
-                s for s in series_list
-                if should_include(cat_map.get(str(s.get("category_id", "")), ""), group_filters)
-                and should_include(s.get("name", ""), channel_filters)
-            ]
+            allowed_category_ids = {
+                cat_id
+                for cat_id, group_name in cat_map.items()
+                if should_include(group_name, group_filters)
+            }
+            include_unknown_group = should_include("", group_filters)
+
+            result = []
+            for series in series_list:
+                cat_id = str(series.get("category_id", ""))
+                group_allowed = (
+                    cat_id in allowed_category_ids
+                    if cat_id in cat_map
+                    else include_unknown_group
+                )
+                if not group_allowed:
+                    continue
+
+                if channel_filters and not should_include(series.get("name", ""), channel_filters):
+                    continue
+
+                result.append(series)
+            return result
 
         elif action in ("get_series_info", "get_vod_info"):
             param_key = "series_id" if action == "get_series_info" else "vod_id"

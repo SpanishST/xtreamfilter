@@ -98,16 +98,31 @@ async def player_api_source(
             streams = cache.get_cached(f"{ct}_streams", source_id)
             categories = cache.get_cached(f"{ct}_categories", source_id)
             cat_map = build_category_map(categories)
+            allowed_category_ids = {
+                cat_id
+                for cat_id, group_name in cat_map.items()
+                if should_include(group_name, group_filters)
+            }
+            include_unknown_group = should_include("", group_filters)
+
             # Filter using slim dicts, then fetch full data for matches
             matching_ids: list[str] = []
             for stream in streams:
                 cat_id = str(stream.get("category_id", ""))
-                group_name = cat_map.get(cat_id, "")
-                channel_name = stream.get("name", "")
-                if should_include(group_name, group_filters) and should_include(channel_name, channel_filters):
-                    sid = str(stream.get("stream_id", ""))
-                    if sid:
-                        matching_ids.append(sid)
+                group_allowed = (
+                    cat_id in allowed_category_ids
+                    if cat_id in cat_map
+                    else include_unknown_group
+                )
+                if not group_allowed:
+                    continue
+
+                if channel_filters and not should_include(stream.get("name", ""), channel_filters):
+                    continue
+
+                sid = str(stream.get("stream_id", ""))
+                if sid:
+                    matching_ids.append(sid)
             # Fetch full data from SQLite in batch
             full_data = cache.get_streams_full_data_batch(ct, source_id, matching_ids)
             result = []
@@ -128,14 +143,29 @@ async def player_api_source(
             series_list = cache.get_cached("series", source_id)
             categories = cache.get_cached("series_categories", source_id)
             cat_map = build_category_map(categories)
+            allowed_category_ids = {
+                cat_id
+                for cat_id, group_name in cat_map.items()
+                if should_include(group_name, group_filters)
+            }
+            include_unknown_group = should_include("", group_filters)
+
             # Filter using slim dicts, then fetch full data for matches
-            matching_ids = [
-                str(s.get("series_id", ""))
-                for s in series_list
-                if should_include(cat_map.get(str(s.get("category_id", "")), ""), group_filters)
-                and should_include(s.get("name", ""), channel_filters)
-                and s.get("series_id")
-            ]
+            matching_ids: list[str] = []
+            for series in series_list:
+                cat_id = str(series.get("category_id", ""))
+                group_allowed = (
+                    cat_id in allowed_category_ids
+                    if cat_id in cat_map
+                    else include_unknown_group
+                )
+                if not group_allowed:
+                    continue
+                if channel_filters and not should_include(series.get("name", ""), channel_filters):
+                    continue
+                sid = str(series.get("series_id", ""))
+                if sid:
+                    matching_ids.append(sid)
             full_data = cache.get_streams_full_data_batch("series", source_id, matching_ids)
             return [full_data[sid] for sid in matching_ids if sid in full_data]
 

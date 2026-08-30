@@ -1,7 +1,6 @@
 """Download cart API routes."""
 from __future__ import annotations
 
-import asyncio
 import os
 import uuid
 from datetime import datetime
@@ -249,6 +248,8 @@ async def start_downloads(
     queued = [i for i in cart._download_cart if i.get("status") == "queued"]
     if not queued:
         return JSONResponse(status_code=400, content={"error": "No queued items to download"})
+    if cart.queue_paused:
+        return JSONResponse(status_code=409, content={"error": "Download queue is paused; resume it first"})
     if cart._download_task and not cart._download_task.done():
         return JSONResponse(status_code=409, content={"error": "Downloads already in progress"})
     download_path = cfg.download_path
@@ -257,7 +258,7 @@ async def start_downloads(
     except OSError as e:
         return JSONResponse(status_code=500, content={"error": f"Cannot create download directory: {e}"})
     cart._force_started = True
-    cart._download_task = asyncio.create_task(cart.download_worker())
+    cart._try_start_worker()
     await log_service.log("cart", "info", f"Download started manually: {len(queued)} item(s)", {"count": len(queued)})
     return {"status": "ok", "message": f"Started downloading {len(queued)} items"}
 
@@ -267,11 +268,35 @@ async def cancel_download(
     cart: CartService = Depends(get_cart_service),
     log_service: LogService = Depends(get_log_service),
 ):
-    if cart._download_cancel_event:
-        cart._download_cancel_event.set()
+    if cart.cancel_download():
         await log_service.log("cart", "warning", "Download cancellation requested")
         return {"status": "ok", "message": "Download cancellation requested"}
     return JSONResponse(status_code=400, content={"error": "No active download"})
+
+
+@router.post("/api/cart/pause")
+async def pause_downloads(
+    cart: CartService = Depends(get_cart_service),
+    log_service: LogService = Depends(get_log_service),
+):
+    has_work = any(item.get("status") in ("queued", "downloading") for item in cart._download_cart)
+    if not has_work:
+        return JSONResponse(status_code=400, content={"error": "No queued or active downloads"})
+    changed = cart.pause_downloads()
+    if changed:
+        await log_service.log("cart", "warning", "Download queue paused")
+    return {"status": "ok", "message": "Download queue paused"}
+
+
+@router.post("/api/cart/resume")
+async def resume_downloads(
+    cart: CartService = Depends(get_cart_service),
+    log_service: LogService = Depends(get_log_service),
+):
+    changed = cart.resume_downloads()
+    if changed:
+        await log_service.log("cart", "info", "Download queue resumed")
+    return {"status": "ok", "message": "Download queue resumed"}
 
 
 @router.get("/api/cart/status")
@@ -311,6 +336,7 @@ async def cart_status(cart: CartService = Depends(get_cart_service)):
         "failed": failed,
         "total": len(dl),
         "current": current,
+        "queue_paused": cart.queue_paused,
         "schedule_enabled": schedule_active,
         "in_download_window": in_window,
     }

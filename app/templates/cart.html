@@ -40,6 +40,8 @@
         .pause-indicator { display: none; align-items: center; gap: 8px; padding: 8px 16px; background: rgba(255, 165, 2, 0.15); border: 1px solid rgba(255, 165, 2, 0.3); border-radius: 8px; margin-top: 10px; font-size: 0.9em; color: #ffa502; }
         .pause-indicator.show { display: flex; }
         .pause-indicator .pulse { display: inline-block; width: 8px; height: 8px; background: #ffa502; border-radius: 50%; animation: pulse 1s infinite; }
+        .queue-pause-indicator { display: none; align-items: center; gap: 8px; padding: 8px 16px; background: rgba(0, 212, 255, 0.12); border: 1px solid rgba(0, 212, 255, 0.3); border-radius: 8px; margin-top: 10px; font-size: 0.9em; color: #00d4ff; }
+        .queue-pause-indicator.show { display: flex; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
         /* Summary bar */
@@ -281,6 +283,7 @@
             </div>
             <div class="summary-actions">
                 <button class="btn btn-success" id="start-btn" onclick="startDownloads()">▶ Start Downloads</button>
+                <button class="btn btn-secondary btn-small" id="queue-pause-btn" onclick="toggleQueuePause()" style="display:none;">⏸ Pause Queue</button>
                 <button class="btn btn-danger btn-small" id="cancel-btn" onclick="cancelDownload()" style="display:none;">⏹ Cancel</button>
                 <button class="btn btn-primary btn-small" id="retry-all-btn" onclick="retryAllFailed()" style="display:none;">🔄 Retry Failed</button>
                 <button class="btn btn-secondary btn-small" onclick="clearCart('finished')">Clear Finished</button>
@@ -306,6 +309,9 @@
             <div class="pause-indicator" id="pause-indicator">
                 <span class="pulse"></span>
                 <span>⏸ Paused — simulating player buffering (<span id="pause-remaining">0</span>s remaining)</span>
+            </div>
+            <div class="queue-pause-indicator" id="queue-pause-indicator">
+                <span>⏸ Queue paused — resume when you are ready</span>
             </div>
         </div>
 
@@ -337,6 +343,7 @@
         let cartItems = [];
         let pollInterval = null;
         let isRunning = false;
+        let queuePaused = false;
         let sourcesMap = {}; // source_id -> source name
 
         document.addEventListener('DOMContentLoaded', function() {
@@ -723,9 +730,15 @@
                 document.getElementById('stat-failed').textContent = data.failed;
 
                 isRunning = data.is_running;
-                document.getElementById('start-btn').style.display = isRunning ? 'none' : '';
+                queuePaused = !!data.queue_paused;
+                const hasWork = data.queued > 0 || data.downloading > 0;
+                document.getElementById('start-btn').style.display = isRunning || queuePaused ? 'none' : '';
                 document.getElementById('cancel-btn').style.display = isRunning ? '' : 'none';
-                document.getElementById('start-btn').disabled = data.queued === 0;
+                document.getElementById('start-btn').disabled = data.queued === 0 || queuePaused;
+                const pauseBtn = document.getElementById('queue-pause-btn');
+                pauseBtn.style.display = hasWork || queuePaused ? '' : 'none';
+                pauseBtn.textContent = queuePaused ? '▶ Resume Queue' : '⏸ Pause Queue';
+                pauseBtn.className = queuePaused ? 'btn btn-success btn-small' : 'btn btn-secondary btn-small';
                 document.getElementById('retry-all-btn').style.display = data.failed > 0 ? '' : 'none';
 
                 updateScheduleIndicator(data);
@@ -769,9 +782,11 @@
                     } else {
                         pauseEl.classList.remove('show');
                     }
+                    document.getElementById('queue-pause-indicator').classList.toggle('show', queuePaused);
                 } else {
                     currentEl.classList.remove('show');
                     document.getElementById('pause-indicator').classList.remove('show');
+                    document.getElementById('queue-pause-indicator').classList.remove('show');
                 }
             } catch (e) { console.error('Error updating status:', e); }
         }
@@ -803,6 +818,20 @@
                 showToast(data.message || 'Cancelled', 'info');
                 await loadCart();
             } catch (e) { showToast('Error cancelling', 'error'); }
+        }
+
+        async function toggleQueuePause() {
+            const action = queuePaused ? 'resume' : 'pause';
+            try {
+                const resp = await fetch('/api/cart/' + action, { method: 'POST' });
+                const data = await resp.json();
+                if (resp.ok) {
+                    showToast(data.message, 'info');
+                } else {
+                    showToast(data.error || 'Failed to update queue', 'error');
+                }
+                await loadCart();
+            } catch (e) { showToast('Error updating download queue', 'error'); }
         }
 
         async function removeItem(itemId) {

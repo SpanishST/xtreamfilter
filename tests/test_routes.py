@@ -577,6 +577,37 @@ def test_cart_status(client):
     data = r.json()
     assert data["total"] == 0
     assert data["is_running"] is False
+    assert data["queue_paused"] is False
+
+
+def test_cart_pause_and_resume(client):
+    r = client.post("/api/cart/pause")
+    assert r.status_code == 400
+
+    r = client.post(
+        "/api/cart",
+        json={
+            "content_type": "vod",
+            "stream_id": "movie-1",
+            "source_id": "source-1",
+            "name": "Test movie",
+        },
+    )
+    assert r.status_code == 200
+
+    r = client.post("/api/cart/pause")
+    assert r.status_code == 200
+    assert client.get("/api/cart/status").json()["queue_paused"] is True
+
+    r = client.post("/api/cart/start")
+    assert r.status_code == 409
+
+    r = client.post("/api/cart/pause")
+    assert r.status_code == 200
+
+    r = client.post("/api/cart/resume")
+    assert r.status_code == 200
+    assert client.get("/api/cart/status").json()["queue_paused"] is False
 
 
 # -------------------------------------------------------------------

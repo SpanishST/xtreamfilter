@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -22,6 +22,38 @@ VIRTUAL_ID_OFFSET = 10_000_000
 EPISODE_NUM_SANITY_THRESHOLD = 15
 
 _EPISODE_TITLE_RE = re.compile(r"S(\d{1,2})\s*E(\d{1,3})", re.IGNORECASE)
+
+# Only these scalar fields are needed by the NFO/container metadata writers.
+# Provider episode payloads may contain large nested objects that must not be
+# retained by every cart item for the lifetime of the process.
+_EPISODE_INFO_FIELDS = (
+    "plot",
+    "description",
+    "air_date",
+    "releasedate",
+    "releaseDate",
+    "rating",
+    "duration",
+    "runtime",
+    "movie_image",
+    "cover_big",
+    "cover",
+    "tmdb_id",
+    "tmdb",
+)
+
+
+def compact_episode_info(info) -> dict:
+    """Keep only small scalar episode metadata needed after API parsing."""
+    if not isinstance(info, dict):
+        return {}
+    return {
+        key: value
+        for key in _EPISODE_INFO_FIELDS
+        if (value := info.get(key)) is not None
+        and value != ""
+        and isinstance(value, (str, int, float, bool))
+    }
 
 
 def _normalize_episode_num(
@@ -221,7 +253,7 @@ class XtreamService:
                             "episode_num": norm_ep_num,
                             "title": raw_title,
                             "container_extension": ep.get("container_extension", "mp4"),
-                            "info": ep.get("info", {}),
+                            "info": compact_episode_info(ep.get("info", {})),
                             "series_name": series_name,
                         }
                     )

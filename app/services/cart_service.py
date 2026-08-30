@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import errno
 import hashlib
-import json
 import logging
 import os
 import re
@@ -15,15 +14,15 @@ import unicodedata
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
-from xml.etree.ElementTree import Element, SubElement, tostring
 from xml.dom import minidom
+from xml.etree.ElementTree import Element, SubElement, tostring
 
 import httpx
 
 from app.database import DB_NAME, db_connect
-from app.services.monitor_service import _normalize_imdb_id, _normalize_tmdb_id
-
 from app.models.xtream import PLAYER_PROFILES
+from app.services.monitor_service import _normalize_imdb_id, _normalize_tmdb_id
+from app.services.xtream_service import compact_episode_info
 
 if TYPE_CHECKING:
     from app.services.config_service import ConfigService
@@ -64,6 +63,34 @@ def _partial_file_hash(path: str, sample_size: int = 1024 * 1024) -> str:
     except OSError:
         return ""
     return h.hexdigest()
+
+
+def release_file_cache(path: str) -> None:
+    """Best-effort release of clean Linux page-cache pages for *path*.
+
+    This is advisory and intentionally ignored on filesystems that do not
+    support it, such as some CIFS/NFS configurations. It only affects this
+    file; it does not use the global ``drop_caches`` mechanism.
+    """
+    if not path or not hasattr(os, "posix_fadvise"):
+        return
+    try:
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except OSError:
+            fd = os.open(path, os.O_RDONLY)
+        try:
+            # A cross-filesystem copy may still have dirty destination pages.
+            # Flush them before asking the kernel to discard clean cache pages.
+            try:
+                os.fsync(fd)
+            except OSError:
+                pass
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
+    except (AttributeError, OSError) as exc:
+        logger.debug("Could not release file cache for %s: %s", path, exc)
 
 
 # ------------------------------------------------------------------
@@ -467,6 +494,9 @@ class CartService:
             "paused": False,
             "pause_remaining": 0,
         }
+        self._queue_paused = False
+        self._download_resume_event = asyncio.Event()
+        self._download_resume_event.set()
         self._force_started: bool = False
         self.log_service = None  # set after init via attribute binding
 
@@ -493,6 +523,60 @@ class CartService:
     @property
     def progress(self) -> dict:
         return self._download_progress
+
+    @property
+    def queue_paused(self) -> bool:
+        return self._queue_paused
+
+    def pause_downloads(self) -> bool:
+        """Pause the queue without cancelling the active item."""
+        already_paused = self._queue_paused
+        self._queue_paused = True
+        self._download_resume_event.clear()
+        return not already_paused
+
+    def resume_downloads(self) -> bool:
+        """Resume a paused queue and wake a worker waiting at a checkpoint."""
+        was_paused = self._queue_paused
+        self._queue_paused = False
+        self._download_resume_event.set()
+        return was_paused
+
+    async def _wait_for_queue_resume(self) -> bool:
+        """Wait for resume while still allowing cancellation to be observed."""
+        while self._queue_paused:
+            if self._download_cancel_event and self._download_cancel_event.is_set():
+                return False
+            try:
+                await asyncio.wait_for(self._download_resume_event.wait(), timeout=0.5)
+            except TimeoutError:
+                pass
+        return not (self._download_cancel_event and self._download_cancel_event.is_set())
+
+    @staticmethod
+    def _discard_transient_item_metadata(item: dict | None, include_episode_info: bool = True) -> None:
+        """Remove API payloads that are not part of the persisted cart model."""
+        if not item:
+            return
+        item.pop("_vod_info", None)
+        item.pop("_series_info", None)
+        if include_episode_info:
+            item.pop("episode_info", None)
+
+    def _download_task_done(self, task: asyncio.Task) -> None:
+        """Release worker-owned references when a worker exits or is cancelled."""
+        if self._download_task is not task:
+            return
+        self._download_task = None
+        self._discard_transient_item_metadata(self._download_current_item)
+        self._download_current_item = None
+        self._download_cancel_event = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.info("Download worker task cancelled")
+        except Exception:
+            logger.exception("Unhandled exception in download worker task")
 
     def is_download_active(self) -> bool:
         """Return True if a download worker is running or an item is mid-download.
@@ -942,7 +1026,7 @@ class CartService:
             "season": kwargs.get("season"),
             "episode_num": kwargs.get("episode_num"),
             "episode_title": kwargs.get("episode_title"),
-            "episode_info": kwargs.get("episode_info"),
+            "episode_info": compact_episode_info(kwargs.get("episode_info")),
             "icon": kwargs.get("icon", ""),
             "group": kwargs.get("group", ""),
             "container_extension": kwargs.get("container_extension", "mp4"),
@@ -991,6 +1075,7 @@ class CartService:
             "failed": failed,
             "total": len(self._download_cart),
             "current": current,
+            "queue_paused": self._queue_paused,
         }
 
     # ------------------------------------------------------------------
@@ -1007,7 +1092,11 @@ class CartService:
         if self._download_task is not None and not self._download_task.done():
             logger.debug("_try_start_worker: task already running, returning False")
             return False
+        if self._queue_paused:
+            logger.debug("_try_start_worker: queue is paused, returning False")
+            return False
         self._download_task = asyncio.create_task(self.download_worker())
+        self._download_task.add_done_callback(self._download_task_done)
         logger.info(f"_try_start_worker: created new download_worker task, task={self._download_task}")
         return True
 
@@ -1017,6 +1106,8 @@ class CartService:
         self._download_cancel_event = asyncio.Event()
 
         while True:
+            if self._queue_paused and not await self._wait_for_queue_resume():
+                break
             queued = [item for item in self._download_cart if item.get("status") == "queued"]
             if not queued:
                 logger.info("Download queue empty, worker stopping")
@@ -1093,6 +1184,7 @@ class CartService:
             temp_dir = self.config_service.get_download_temp_path()
             temp_filename = f"{item['id']}_{os.path.basename(file_path)}"
             temp_path = os.path.join(temp_dir, temp_filename)
+            item["temp_path"] = temp_path
 
             try:
                 safe_makedirs(os.path.dirname(file_path))
@@ -1147,9 +1239,10 @@ class CartService:
                             if self._download_cancel_event.is_set():
                                 item["status"] = "cancelled"
                                 item["error"] = "Cancelled by user"
+                                self._discard_transient_item_metadata(item)
                                 self.save_cart()
                                 if getattr(self, 'log_service', None):
-                                    asyncio.create_task(getattr(self, 'log_service', None).log("cart", "warning", f"Download cancelled: {item.get('name', 'Unknown')}"))
+                                    await getattr(self, 'log_service', None).log("cart", "warning", f"Download cancelled: {item.get('name', 'Unknown')}")
                                 self._download_current_item = None
                                 self._download_cancel_event.clear()
                                 return
@@ -1174,6 +1267,7 @@ class CartService:
                                         item["retried_once"] = True
                                         item["status"] = "queued"
                                         item["error"] = f"Retrying: HTTP {response.status_code}"
+                                        self._discard_transient_item_metadata(item, include_episode_info=False)
                                         self.save_cart()
                                         if getattr(self, 'log_service', None):
                                             await getattr(self, 'log_service', None).log("cart", "warning",
@@ -1184,6 +1278,7 @@ class CartService:
                                     else:
                                         item["status"] = "failed"
                                         item["error"] = f"HTTP {response.status_code}"
+                                        self._discard_transient_item_metadata(item)
                                         self.save_cart()
                                         if getattr(self, 'log_service', None):
                                             await getattr(self, 'log_service', None).log("cart", "error",
@@ -1233,14 +1328,16 @@ class CartService:
 
                                 segment_start_time = time.time()
                                 should_reconnect = False
+                                pause_requested = False
                                 with open(temp_path, "ab") as f:
                                     async for chunk in response.aiter_bytes(chunk_size=chunk_size):
                                         if self._download_cancel_event.is_set():
                                             item["status"] = "cancelled"
                                             item["error"] = "Cancelled by user"
+                                            self._discard_transient_item_metadata(item)
                                             self.save_cart()
                                             if getattr(self, 'log_service', None):
-                                                asyncio.create_task(getattr(self, 'log_service', None).log("cart", "warning", f"Download cancelled: {item.get('name', 'Unknown')}"))
+                                                await getattr(self, 'log_service', None).log("cart", "warning", f"Download cancelled: {item.get('name', 'Unknown')}")
                                             try:
                                                 os.remove(temp_path)
                                             except OSError:
@@ -1248,6 +1345,9 @@ class CartService:
                                             self._download_current_item = None
                                             self._download_cancel_event.clear()
                                             return
+                                        if self._queue_paused:
+                                            pause_requested = True
+                                            break
                                         f.write(chunk)
                                         downloaded += len(chunk)
                                         window_bytes += len(chunk)
@@ -1314,6 +1414,27 @@ class CartService:
                                             if total == 0 or downloaded < total:
                                                 should_reconnect = True
                                                 break
+                                if pause_requested:
+                                    self._download_progress["speed"] = 0
+                                    self._download_progress["eta_speed"] = 0
+                                    self.save_cart()
+                                    if not await self._wait_for_queue_resume():
+                                        item["status"] = "cancelled"
+                                        item["error"] = "Cancelled by user"
+                                        self._discard_transient_item_metadata(item)
+                                        self.save_cart()
+                                        try:
+                                            os.remove(temp_path)
+                                        except OSError:
+                                            pass
+                                        if getattr(self, "log_service", None):
+                                            await getattr(self, "log_service", None).log(
+                                                "cart", "warning", f"Download cancelled: {item.get('name', 'Unknown')}"
+                                            )
+                                        self._download_current_item = None
+                                        self._download_cancel_event.clear()
+                                        return
+                                    continue
                                 if should_reconnect:
                                     reconnect_count += 1
                                     speed_samples.clear()
@@ -1332,6 +1453,7 @@ class CartService:
                             item["status"] = "queued"
                             item["error"] = f"Retrying: incomplete {downloaded:,}/{total:,} bytes"
                             item["expected_size"] = total
+                            self._discard_transient_item_metadata(item, include_episode_info=False)
                             self.save_cart()
                             if getattr(self, 'log_service', None):
                                 await getattr(self, 'log_service', None).log("cart", "warning",
@@ -1351,6 +1473,7 @@ class CartService:
                                 f"({round(downloaded / total * 100, 1)}%)"
                             )
                             item["expected_size"] = total
+                            self._discard_transient_item_metadata(item)
                             self.save_cart()
                             if getattr(self, 'log_service', None):
                                 await getattr(self, 'log_service', None).log("cart", "error",
@@ -1381,6 +1504,7 @@ class CartService:
                                 item["retried_once"] = True
                                 item["status"] = "queued"
                                 item["error"] = f"Retrying: size mismatch (counter={downloaded:,}, disk={disk_size:,})"
+                                self._discard_transient_item_metadata(item, include_episode_info=False)
                                 self.save_cart()
                                 if getattr(self, 'log_service', None):
                                     await getattr(self, 'log_service', None).log("cart", "warning",
@@ -1394,6 +1518,7 @@ class CartService:
                             else:
                                 item["status"] = "failed"
                                 item["error"] = f"Size mismatch after retry (counter={downloaded:,}, disk={disk_size:,})"
+                                self._discard_transient_item_metadata(item)
                                 self.save_cart()
                                 if getattr(self, 'log_service', None):
                                     await getattr(self, 'log_service', None).log("cart", "error",
@@ -1416,6 +1541,8 @@ class CartService:
 
                     move_ok = await self._move_temp_to_destination(item, temp_path, file_path)
                     if not move_ok:
+                        self._discard_transient_item_metadata(item)
+                        self.save_cart()
                         if getattr(self, 'log_service', None):
                             await getattr(self, 'log_service', None).log("cart", "error", f"File move failed: {item.get('name', 'Unknown')}", {"error": item.get("error", "")})
                         continue
@@ -1469,6 +1596,7 @@ class CartService:
                     item["retried_once"] = True
                     item["status"] = "queued"
                     item["error"] = f"Retrying: {str(e)[:100]}"
+                    self._discard_transient_item_metadata(item, include_episode_info=False)
                     self.save_cart()
                     if getattr(self, 'log_service', None):
                         await getattr(self, 'log_service', None).log("cart", "warning",
@@ -1484,6 +1612,7 @@ class CartService:
                     # Already retried — mark as failed permanently
                     item["status"] = "failed"
                     item["error"] = str(e)
+                    self._discard_transient_item_metadata(item)
                     self.save_cart()
                     if getattr(self, 'log_service', None):
                         await getattr(self, 'log_service', None).log("cart", "error",
@@ -1682,12 +1811,20 @@ class CartService:
 
     async def _finalize_completed_download(self, item: dict) -> None:
         file_path = item.get("file_path")
-        if file_path:
-            # Write Jellyfin-compatible metadata before requesting a library scan.
-            await self._write_metadata(item, file_path)
-            await self._embed_container_metadata(item, file_path)
-        await self.notification_service.send_download_file_notification(item)
-        await self._trigger_jellyfin_refresh("file")
+        try:
+            if file_path:
+                # Write Jellyfin-compatible metadata before requesting a library scan.
+                await self._write_metadata(item, file_path)
+                await self._embed_container_metadata(item, file_path)
+                # Metadata embedding can read/rewrite the video, so release the
+                # file pages only after all video processing has completed.
+                await asyncio.to_thread(release_file_cache, file_path)
+            await self.notification_service.send_download_file_notification(item)
+            await self._trigger_jellyfin_refresh("file")
+        finally:
+            # These payloads are useful while processing the item, but are not
+            # part of the persisted cart model and must not survive completion.
+            self._discard_transient_item_metadata(item)
 
     async def _handle_download_queue_complete(self) -> None:
         await self.notification_service.send_download_queue_complete_notification(self._download_cart)
@@ -1942,10 +2079,10 @@ class CartService:
         for name, value in tag_map.items():
             # Escape XML special characters
             value = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            lines.append(f"    <Simple>")
+            lines.append("    <Simple>")
             lines.append(f"      <Name>{name}</Name>")
             lines.append(f"      <String>{value}</String>")
-            lines.append(f"    </Simple>")
+            lines.append("    </Simple>")
         lines += ["  </Tag>", "</Tags>"]
         return "\n".join(lines)
 

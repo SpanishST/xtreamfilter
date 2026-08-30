@@ -420,6 +420,7 @@ Item states include:
 - Retry failed or cancelled items
 - Retry all failed items
 - Resume move step when the temp-to-final move failed
+- Pause and resume the entire download queue without cancelling the active item
 - Track current speed, ETA-related speed, and pause state
 - Optional Telegram notifications when queueing or completing downloads
 - Optional Jellyfin full-library refresh after completed downloads
@@ -475,9 +476,15 @@ Example layout:
 | `/api/cart/clear` | `POST` | Clear items by mode |
 | `/api/cart/start` | `POST` | Start the worker manually |
 | `/api/cart/cancel` | `POST` | Request cancellation of the active download |
+| `/api/cart/pause` | `POST` | Pause the queue without cancelling the active download |
+| `/api/cart/resume` | `POST` | Resume a paused queue |
 | `/api/cart/status` | `GET` | Queue and active-download status |
 | `/api/cart/active-source-downloads` | `GET` | Count active downloads by source |
 | `/api/cart/series-episodes/{source_id}/{series_id}` | `GET` | Fetch season/episode structure for a series |
+
+Pausing is session-only. The active stream stops after its current chunk, its
+partial temporary file is preserved, and the worker resumes from that point
+when the queue is resumed. A process restart clears the pause state normally.
 
 ### Download Options APIs
 

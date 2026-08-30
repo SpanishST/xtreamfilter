@@ -7,12 +7,13 @@ import logging
 import os
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from rapidfuzz import fuzz
 
 from app.database import DB_NAME, db_connect
 from app.services.filter_service import normalize_name
+from app.services.xtream_service import compact_episode_info
 
 if TYPE_CHECKING:
     from app.services.cache_service import CacheService
@@ -847,7 +848,7 @@ class MonitorService:
                     "season": _season,
                     "episode_num": _ep_num,
                     "episode_title": ep.get("title", ""),
-                    "episode_info": ep.get("info", {}),
+                    "episode_info": compact_episode_info(ep.get("info", {})),
                     "icon": entry.get("cover", ""),
                     "group": "",
                     "container_extension": ep.get("container_extension", "mp4"),
@@ -1038,7 +1039,7 @@ class MonitorService:
                     "season": ep.get("season"),
                     "episode_num": ep.get("episode_num", 0),
                     "episode_title": ep.get("title", ""),
-                    "episode_info": ep.get("info", {}),
+                    "episode_info": compact_episode_info(ep.get("info", {})),
                     "icon": entry.get("cover", ""),
                     "group": "",
                     "container_extension": ep.get("container_extension", "mp4"),

@@ -120,6 +120,7 @@ def test_cart_page_loads(page: Page, base_url: str):
     """Cart page renders."""
     page.goto(base_url + "/cart")
     expect(page.locator("body")).to_be_visible()
+    expect(page.locator("#queue-pause-btn")).to_be_attached()
 
 
 def test_monitor_page_loads(page: Page, base_url: str):

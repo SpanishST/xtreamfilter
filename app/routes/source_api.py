@@ -7,7 +7,8 @@ import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
-from app.dependencies import get_config_service
+from app.dependencies import get_cache_service, get_config_service
+from app.services.cache_service import CacheService
 from app.services.config_service import ConfigService
 
 router = APIRouter(prefix="/api/sources", tags=["sources"])
@@ -253,12 +254,22 @@ async def update_source(source_id: str, request: Request, cfg: ConfigService = D
 
 
 @router.delete("/{source_id}")
-async def delete_source(source_id: str, cfg: ConfigService = Depends(get_config_service)):
+async def delete_source(
+    source_id: str,
+    cfg: ConfigService = Depends(get_config_service),
+    cache: CacheService = Depends(get_cache_service),
+):
     config = cfg.config
     sources = config.get("sources", [])
     config["sources"] = [s for s in sources if s.get("id") != source_id]
     if len(config["sources"]) < len(sources):
         cfg.save()
+        remaining_ids = {
+            str(source.get("id"))
+            for source in config["sources"]
+            if source.get("id")
+        }
+        await cache.prune_sources_to_ids(remaining_ids)
         return {"status": "ok", "sources": config["sources"]}
     return JSONResponse({"error": "Source not found"}, status_code=404)
 

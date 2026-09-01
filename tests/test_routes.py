@@ -7,18 +7,18 @@ import os
 import pytest
 from starlette.testclient import TestClient
 
+from app.database import DB_NAME, db_connect, init_db
+from app.services.cache_service import CacheService
+from app.services.cart_service import CartService
+from app.services.category_service import CategoryService
 from app.services.config_service import ConfigService
+from app.services.epg_service import EpgService
 from app.services.http_client import HttpClientService
 from app.services.jellyfin_service import JellyfinService
-from app.services.cache_service import CacheService
-from app.services.epg_service import EpgService
-from app.services.xtream_service import XtreamService
-from app.services.notification_service import NotificationService
-from app.services.category_service import CategoryService
-from app.services.cart_service import CartService
-from app.services.monitor_service import MonitorService
 from app.services.m3u_service import M3uService
-from app.database import DB_NAME, init_db
+from app.services.monitor_service import MonitorService
+from app.services.notification_service import NotificationService
+from app.services.xtream_service import XtreamService
 
 
 def _build_app(data_dir: str):
@@ -26,10 +26,22 @@ def _build_app(data_dir: str):
     from fastapi import FastAPI, Request
 
     from app.routes import (
-        ui, filter_api, source_api, playlist, browse_api,
-        category_api, xtream_merged, stream_proxy, xtream_source,
-        epg, config_api, cache_api, cart_api, monitor_api, health,
+        browse_api,
+        cache_api,
+        cart_api,
+        category_api,
+        config_api,
+        epg,
+        filter_api,
+        health,
         log_api,
+        monitor_api,
+        playlist,
+        source_api,
+        stream_proxy,
+        ui,
+        xtream_merged,
+        xtream_source,
     )
     from app.services.log_service import LogService
 
@@ -448,6 +460,84 @@ def test_sources_crud(client):
     assert r.status_code == 200
     r = client.get("/api/sources")
     assert r.json()["sources"] == []
+
+
+def test_source_replacement_prunes_cache_and_routes_new_source(client, monkeypatch):
+    from app.routes import stream_proxy
+
+    old_source = {
+        "name": "Old source",
+        "host": "http://old.example",
+        "username": "old-user",
+        "password": "old-pass",
+    }
+    old_id = client.post("/api/sources", json=old_source).json()["source"]["id"]
+
+    cache = client.app.state.cache_service
+    cache._api_cache["sources"] = {
+        old_id: {
+            "live_streams": [{"stream_id": "7"}],
+            "live_categories": [],
+            "vod_categories": [],
+            "series_categories": [],
+            "vod_streams": [],
+            "series": [],
+            "last_refresh": "2026-09-01T00:00:00+00:00",
+        }
+    }
+    conn = db_connect(os.path.join(client.app.state.config_service.data_dir, DB_NAME))
+    try:
+        conn.execute(
+            "INSERT INTO streams (source_id, content_type, stream_id, name) VALUES (?, ?, ?, ?)",
+            (old_id, "live", "7", "Old stream"),
+        )
+        conn.execute(
+            "INSERT INTO source_categories (source_id, content_type, category_id, category_name) VALUES (?, ?, ?, ?)",
+            (old_id, "live", "1", "Old category"),
+        )
+        conn.execute(
+            "INSERT INTO source_last_refresh (source_id, last_refresh) VALUES (?, ?)",
+            (old_id, "2026-09-01T00:00:00+00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    response = client.delete(f"/api/sources/{old_id}")
+    assert response.status_code == 200
+    assert cache._api_cache["sources"] == {}
+    assert cache.get_source_for_stream("7", "live") is None
+
+    conn = db_connect(os.path.join(client.app.state.config_service.data_dir, DB_NAME))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM streams").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM source_categories").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM source_last_refresh").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+    new_source = {
+        "name": "New source",
+        "host": "http://new.example",
+        "username": "new-user",
+        "password": "new-pass",
+    }
+    new_id = client.post("/api/sources", json=new_source).json()["source"]["id"]
+
+    captured = {}
+
+    async def fake_proxy(url, request, stream_type):
+        captured.update(url=url, stream_type=stream_type)
+        from fastapi.responses import Response
+
+        return Response(status_code=200)
+
+    monkeypatch.setattr(stream_proxy, "proxy_stream", fake_proxy)
+    response = client.get("/merged/live/user/pass/7.ts")
+
+    assert response.status_code == 200
+    assert captured == {"url": "http://new.example/new-user/new-pass/7.ts", "stream_type": "live"}
+    assert client.app.state.config_service.get_source_by_index(0)["id"] == new_id
 
 
 # -------------------------------------------------------------------

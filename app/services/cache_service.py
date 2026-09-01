@@ -421,7 +421,8 @@ class CacheService:
         self._maintenance_active = False
 
     async def prune_sources_to_ids(self, source_ids: set[str]) -> None:
-        """Drop in-memory cache entries for sources removed from the database."""
+        """Remove cache entries and persisted catalog rows for unknown sources."""
+        source_ids = {str(source_id) for source_id in source_ids}
         async with self._cache_lock:
             sources = self._api_cache.get("sources", {})
             self._api_cache["sources"] = {
@@ -429,6 +430,21 @@ class CacheService:
                 for source_id, source_cache in sources.items()
                 if source_id in source_ids
             }
+
+        async with self._db_write_lock:
+            async with adb_transaction(self.db_path) as conn:
+                if source_ids:
+                    placeholders = ",".join("?" * len(source_ids))
+                    params = tuple(source_ids)
+                    for table in ("streams", "source_categories", "source_last_refresh"):
+                        await conn.execute(
+                            f"DELETE FROM {table} WHERE source_id NOT IN ({placeholders})",
+                            params,
+                        )
+                else:
+                    for table in ("streams", "source_categories", "source_last_refresh"):
+                        await conn.execute(f"DELETE FROM {table}")
+
         self.invalidate_group_counts_cache()
         await self.rebuild_stream_source_map()
         await asyncio.to_thread(self._rebuild_stream_index)

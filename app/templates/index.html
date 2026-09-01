@@ -1597,7 +1597,7 @@
         // ============================================
         
         function loadSources() {
-            fetch('/api/sources')
+            return fetch('/api/sources')
                 .then(r => r.json())
                 .then(data => {
                     sourcesData = data.sources || [];
@@ -1794,9 +1794,12 @@
                 body: JSON.stringify({ name: name })
             })
             .then(r => r.json())
-            .then(data => {
+            .then(async data => {
                 if (data.source) {
+                    // Refresh the client-side list before opening the new source.
+                    await loadSources();
                     editSource(data.source.id);
+                    return;
                 }
                 loadSources();
             });

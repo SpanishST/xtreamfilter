@@ -133,6 +133,12 @@ def test_health(client):
     assert r.json()["status"] == "ok"
 
 
+def test_preview_without_sources(client):
+    r = client.get("/preview")
+    assert r.status_code == 200
+    assert r.json() == {"stats": "# Error: No sources configured", "sample_channels": []}
+
+
 def test_version(client):
     r = client.get("/api/version")
     assert r.status_code == 200

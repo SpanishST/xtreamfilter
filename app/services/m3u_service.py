@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from app.services.filter_service import build_category_map, should_include
+from app.services.filter_service import (
+    build_category_map,
+    compile_filter_rules,
+)
 from app.services.xtream_service import encode_virtual_id
 
 if TYPE_CHECKING:
@@ -14,7 +17,7 @@ if TYPE_CHECKING:
 class M3uService:
     """Generates M3U playlists (merged or per-source)."""
 
-    def __init__(self, config_service: "ConfigService", cache_service: "CacheService"):
+    def __init__(self, config_service: ConfigService, cache_service: CacheService):
         self.config_service = config_service
         self.cache_service = cache_service
 
@@ -22,10 +25,15 @@ class M3uService:
     # Merged M3U
     # ------------------------------------------------------------------
 
-    def generate_m3u(self, server_url: str, use_virtual_ids: bool = True) -> str:
+    def generate_m3u(
+        self,
+        server_url: str,
+        use_virtual_ids: bool = True,
+        sources_override: list[dict] | None = None,
+    ) -> str:
         """Generate filtered M3U playlist merging all enabled sources."""
         config = self.config_service.config
-        sources = config.get("sources", [])
+        sources = sources_override if sources_override is not None else config.get("sources", [])
         content_types = config.get("content_types", {"live": True, "vod": True, "series": True})
 
         if not sources and config.get("xtream", {}).get("host"):
@@ -85,6 +93,89 @@ class M3uService:
         lines.insert(1, stats_line)
         return "\n".join(lines)
 
+    def generate_preview(self, server_url: str, sample_limit: int = 10) -> dict:
+        """Return preview stats and a bounded sample without building an M3U."""
+        config = self.config_service.config
+        sources = config.get("sources", [])
+        content_types = config.get("content_types", {"live": True, "vod": True, "series": True})
+
+        if not sources and config.get("xtream", {}).get("host"):
+            sources = [{
+                "id": "default",
+                "name": "Default",
+                "host": config["xtream"]["host"],
+                "username": config["xtream"]["username"],
+                "password": config["xtream"]["password"],
+                "enabled": True,
+                "prefix": "",
+                "filters": config.get("filters", {}),
+            }]
+
+        enabled_sources = [
+            source for source in sources
+            if source.get("enabled", True)
+            and source.get("host")
+            and source.get("username")
+            and source.get("password")
+        ]
+        if not enabled_sources:
+            return {"stats": "# Error: No sources configured", "sample_channels": []}
+
+        type_map = {
+            "live": ("live_streams", "live_categories"),
+            "vod": ("vod_streams", "vod_categories"),
+            "series": ("series", "series_categories"),
+        }
+        stats = {"live": 0, "vod": 0, "series": 0, "excluded": 0}
+        sample: list[str] = []
+        for content_type in ("live", "vod", "series"):
+            if not content_types.get(content_type, True):
+                continue
+            streams_key, categories_key = type_map[content_type]
+            raw_count, accepted_count = self._preview_counts_from_memory(
+                enabled_sources, streams_key, categories_key, content_type, sample, sample_limit
+            )
+
+            stats[content_type] = accepted_count
+            stats["excluded"] += max(0, raw_count - accepted_count)
+
+        stats_line = (
+            f"# Content: {stats['live']} live, {stats['vod']} movies, {stats['series']} series "
+            f"| {stats['excluded']} excluded | {len(enabled_sources)} source(s)"
+        )
+        return {"stats": stats_line, "sample_channels": sample[:sample_limit]}
+
+    def _preview_counts_from_memory(
+        self,
+        sources: list[dict],
+        streams_key: str,
+        categories_key: str,
+        content_type: str,
+        sample: list[str],
+        sample_limit: int,
+    ) -> tuple[int, int]:
+        """Count matching entries and collect only the bounded sample."""
+        raw_count = 0
+        accepted_count = 0
+        for source in sources:
+            source_id = source.get("id", "default")
+            source_cache = self.cache_service.get_cached(streams_key, source_id)
+            categories = self.cache_service.get_cached(categories_key, source_id)
+            category_map = build_category_map(categories)
+            filters = source.get("filters", {}).get(content_type, {})
+            group_matcher = compile_filter_rules(filters.get("groups", []))
+            name_matcher = compile_filter_rules(filters.get("channels", []))
+            raw_count += len(source_cache)
+            for item in source_cache:
+                group = category_map.get(str(item.get("category_id", "")), "Unknown")
+                name = item.get("name", "Unknown")
+                if not group_matcher(group) or not name_matcher(name):
+                    continue
+                accepted_count += 1
+                if len(sample) < sample_limit:
+                    sample.append(name)
+        return raw_count, accepted_count
+
     # ------------------------------------------------------------------
     # Per-source M3U
     # ------------------------------------------------------------------
@@ -131,6 +222,8 @@ class M3uService:
         live_filters = filters.get("live", {"groups": [], "channels": []})
         live_group_filters = live_filters.get("groups", [])
         live_channel_filters = live_filters.get("channels", [])
+        group_matches = compile_filter_rules(live_group_filters)
+        channel_matches = compile_filter_rules(live_channel_filters)
 
         categories = self.cache_service.get_cached("live_categories", source_id)
         cat_map = build_category_map(categories)
@@ -146,10 +239,10 @@ class M3uService:
             if epg_id:
                 epg_id = f"{source_id}_{epg_id}".lower()
 
-            if not should_include(group, live_group_filters):
+            if not group_matches(group):
                 stats["excluded"] += 1
                 continue
-            if not should_include(name, live_channel_filters):
+            if not channel_matches(name):
                 stats["excluded"] += 1
                 continue
 
@@ -169,6 +262,8 @@ class M3uService:
         vod_filters = filters.get("vod", {"groups": [], "channels": []})
         vod_group_filters = vod_filters.get("groups", [])
         vod_channel_filters = vod_filters.get("channels", [])
+        group_matches = compile_filter_rules(vod_group_filters)
+        channel_matches = compile_filter_rules(vod_channel_filters)
 
         vod_categories = self.cache_service.get_cached("vod_categories", source_id)
         vod_cat_map = build_category_map(vod_categories)
@@ -182,10 +277,10 @@ class M3uService:
             group = vod_cat_map.get(cat_id, "Movies")
             extension = vod.get("container_extension", "mp4")
 
-            if not should_include(group, vod_group_filters):
+            if not group_matches(group):
                 stats["excluded"] += 1
                 continue
-            if not should_include(name, vod_channel_filters):
+            if not channel_matches(name):
                 stats["excluded"] += 1
                 continue
 
@@ -203,6 +298,8 @@ class M3uService:
         series_filters = filters.get("series", {"groups": [], "channels": []})
         series_group_filters = series_filters.get("groups", [])
         series_channel_filters = series_filters.get("channels", [])
+        group_matches = compile_filter_rules(series_group_filters)
+        channel_matches = compile_filter_rules(series_channel_filters)
 
         series_categories = self.cache_service.get_cached("series_categories", source_id)
         series_cat_map = build_category_map(series_categories)
@@ -214,10 +311,10 @@ class M3uService:
             cat_id = str(series.get("category_id", ""))
             group = series_cat_map.get(cat_id, "Series")
 
-            if not should_include(group, series_group_filters):
+            if not group_matches(group):
                 stats["excluded"] += 1
                 continue
-            if not should_include(series_name, series_channel_filters):
+            if not channel_matches(series_name):
                 stats["excluded"] += 1
                 continue
 

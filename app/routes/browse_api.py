@@ -7,7 +7,6 @@ import functools
 from fastapi import APIRouter, Depends, Query, Request
 
 from app.database import db_connect
-
 from app.dependencies import (
     get_cache_service,
     get_category_service,
@@ -553,12 +552,4 @@ async def preview(
     m3u: M3uService = Depends(get_m3u_service),
 ):
     server_url = str(request.base_url).rstrip("/")
-    m3u_content = m3u.generate_m3u(server_url)
-    lines = m3u_content.split("\n")
-    stats_line = lines[1] if len(lines) > 1 else ""
-    sample = []
-    for i in range(2, min(len(lines), 22), 2):
-        if lines[i].startswith("#EXTINF"):
-            name = lines[i].split(",", 1)[-1] if "," in lines[i] else lines[i]
-            sample.append(name)
-    return {"stats": stats_line, "sample_channels": sample}
+    return await asyncio.to_thread(m3u.generate_preview, server_url)

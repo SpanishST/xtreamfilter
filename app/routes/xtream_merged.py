@@ -1,6 +1,7 @@
 """Xtream Codes merged API — combines all sources with virtual IDs."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import httpx
@@ -90,10 +91,10 @@ async def player_api_merged(
             return Response(content=response.content, status_code=response.status_code)
 
         elif action in ("get_live_categories", "get_vod_categories", "get_series_categories"):
-            return _handle_get_categories(action, enabled_sources, cache, cat_svc)
+            return await asyncio.to_thread(_handle_get_categories, action, enabled_sources, cache, cat_svc)
 
         elif action in ("get_live_streams", "get_vod_streams", "get_series"):
-            return _handle_get_streams(action, request, enabled_sources, cache, cat_svc)
+            return await asyncio.to_thread(_handle_get_streams, action, request, enabled_sources, cache, cat_svc)
 
         elif action == "get_series_info":
             return await _handle_get_series_info(request, client, cfg)
@@ -193,9 +194,7 @@ def _handle_get_streams(action: str, request: Request, enabled_sources, cache: C
                 if cat_id in cat_map
                 else include_unknown_group
             )
-            if group_allowed and channel_filters and not should_include(
-                stream.get("name", ""), channel_filters
-            ):
+            if group_allowed and channel_filters and not should_include(stream.get("name", ""), channel_filters):
                 group_allowed = False
 
             if group_allowed:

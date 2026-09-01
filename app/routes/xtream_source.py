@@ -1,13 +1,14 @@
 """Per-source Xtream API, M3U, EPG, and stream proxy routes."""
 from __future__ import annotations
 
+import asyncio
 import logging
+from pathlib import Path
 
 import httpx
-from lxml import etree
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
-from pathlib import Path
+from lxml import etree
 
 from app.dependencies import (
     get_cache_service,
@@ -33,6 +34,109 @@ router = APIRouter(tags=["xtream-source"])
 _RESERVED = frozenset(("full", "live", "movie", "series", "api", "static", "merged"))
 
 
+def _get_filtered_source_categories(action: str, source: dict, cache: CacheService) -> list[dict]:
+    """Build a filtered source category response off the event loop."""
+    ct = action.split("_")[1]
+    group_filters = source.get("filters", {}).get(ct, {}).get("groups", [])
+    prefix = source.get("prefix", "")
+    result = []
+    for category in cache.get_cached(f"{ct}_categories", source.get("id")):
+        category_name = safe_get_category_name(category)
+        if should_include(category_name, group_filters):
+            category_copy = safe_copy_category(category)
+            if prefix:
+                category_copy["category_name"] = f"{prefix}{category_name}"
+            result.append(category_copy)
+    return result
+
+
+def _get_filtered_source_streams(action: str, source: dict, cache: CacheService) -> list[dict]:
+    """Filter a source catalog and hydrate matching rows off the event loop."""
+    if action == "get_live_streams":
+        ct = "live"
+    elif action == "get_vod_streams":
+        ct = "vod"
+    else:
+        ct = "series"
+    source_id = source.get("id")
+    content_filters = source.get("filters", {}).get(ct, {})
+    group_filters = content_filters.get("groups", [])
+    channel_filters = content_filters.get("channels", [])
+    stream_key = "series" if ct == "series" else f"{ct}_streams"
+    streams = cache.get_cached(stream_key, source_id)
+    categories = cache.get_cached(f"{ct}_categories", source_id)
+    category_map = build_category_map(categories)
+    allowed_category_ids = {
+        category_id for category_id, group_name in category_map.items()
+        if should_include(group_name, group_filters)
+    }
+    include_unknown_group = should_include("", group_filters)
+
+    id_field = "series_id" if ct == "series" else "stream_id"
+    matching_ids = []
+    for stream in streams:
+        category_id = str(stream.get("category_id", ""))
+        group_allowed = category_id in allowed_category_ids if category_id in category_map else include_unknown_group
+        if not group_allowed or (channel_filters and not should_include(stream.get("name", ""), channel_filters)):
+            continue
+        stream_id = str(stream.get(id_field, ""))
+        if stream_id:
+            matching_ids.append(stream_id)
+
+    full_data = cache.get_streams_full_data_batch(ct, source_id, matching_ids)
+    result = []
+    for stream_id in matching_ids:
+        stream = full_data.get(stream_id)
+        if not stream:
+            continue
+        if ct == "live":
+            epg_id = stream.get("epg_channel_id", "")
+            if epg_id:
+                stream["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
+        result.append(stream)
+    return result
+
+
+def _get_full_source_categories(action: str, source: dict, cache: CacheService) -> list[dict]:
+    """Build an unfiltered source category response off the event loop."""
+    ct = action.split("_")[1]
+    categories = cache.get_cached(f"{ct}_categories", source.get("id"))
+    prefix = source.get("prefix", "")
+    if not prefix:
+        return categories
+    result = []
+    for category in categories:
+        category_copy = safe_copy_category(category)
+        category_copy["category_name"] = f"{prefix}{safe_get_category_name(category)}"
+        result.append(category_copy)
+    return result
+
+
+def _get_full_source_streams(action: str, source: dict, cache: CacheService) -> list[dict]:
+    """Hydrate an unfiltered source catalog off the event loop."""
+    if action == "get_live_streams":
+        ct, key, id_field = "live", "live_streams", "stream_id"
+    elif action == "get_vod_streams":
+        ct, key, id_field = "vod", "vod_streams", "stream_id"
+    else:
+        ct, key, id_field = "series", "series", "series_id"
+    source_id = source.get("id")
+    streams = cache.get_cached(key, source_id)
+    stream_ids = [str(item.get(id_field, "")) for item in streams if item.get(id_field)]
+    full_data = cache.get_streams_full_data_batch(ct, source_id, stream_ids)
+    result = []
+    for stream_id in stream_ids:
+        stream = full_data.get(stream_id)
+        if not stream:
+            continue
+        if ct == "live":
+            epg_id = stream.get("epg_channel_id", "")
+            if epg_id:
+                stream["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
+        result.append(stream)
+    return result
+
+
 # ------------------------------------------------------------------
 # Filtered Xtream API
 # ------------------------------------------------------------------
@@ -52,9 +156,6 @@ async def player_api_source(
     if not source:
         return JSONResponse({"error": f"Source route '{source_route}' not found"}, status_code=404)
 
-    source_id = source.get("id")
-    source_filters = source.get("filters", {})
-    prefix = source.get("prefix", "")
     action = request.query_params.get("action", "")
     client = await http.get_client()
 
@@ -78,96 +179,13 @@ async def player_api_source(
             return Response(content=response.content, status_code=response.status_code)
 
         elif action in ("get_live_categories", "get_vod_categories", "get_series_categories"):
-            ct = action.split("_")[1]  # live / vod / series
-            group_filters = source_filters.get(ct, {}).get("groups", [])
-            categories = cache.get_cached(f"{ct}_categories", source_id)
-            result = []
-            for cat in categories:
-                cat_name = safe_get_category_name(cat)
-                if should_include(cat_name, group_filters):
-                    cat_copy = safe_copy_category(cat)
-                    if prefix:
-                        cat_copy["category_name"] = f"{prefix}{cat_name}"
-                    result.append(cat_copy)
-            return result
+            return await asyncio.to_thread(_get_filtered_source_categories, action, source, cache)
 
         elif action in ("get_live_streams", "get_vod_streams"):
-            ct = "live" if "live" in action else "vod"
-            group_filters = source_filters.get(ct, {}).get("groups", [])
-            channel_filters = source_filters.get(ct, {}).get("channels", [])
-            streams = cache.get_cached(f"{ct}_streams", source_id)
-            categories = cache.get_cached(f"{ct}_categories", source_id)
-            cat_map = build_category_map(categories)
-            allowed_category_ids = {
-                cat_id
-                for cat_id, group_name in cat_map.items()
-                if should_include(group_name, group_filters)
-            }
-            include_unknown_group = should_include("", group_filters)
-
-            # Filter using slim dicts, then fetch full data for matches
-            matching_ids: list[str] = []
-            for stream in streams:
-                cat_id = str(stream.get("category_id", ""))
-                group_allowed = (
-                    cat_id in allowed_category_ids
-                    if cat_id in cat_map
-                    else include_unknown_group
-                )
-                if not group_allowed:
-                    continue
-
-                if channel_filters and not should_include(stream.get("name", ""), channel_filters):
-                    continue
-
-                sid = str(stream.get("stream_id", ""))
-                if sid:
-                    matching_ids.append(sid)
-            # Fetch full data from SQLite in batch
-            full_data = cache.get_streams_full_data_batch(ct, source_id, matching_ids)
-            result = []
-            for sid in matching_ids:
-                stream = full_data.get(sid)
-                if not stream:
-                    continue
-                if ct == "live":
-                    epg_id = stream.get("epg_channel_id", "")
-                    if epg_id:
-                        stream["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
-                result.append(stream)
-            return result
+            return await asyncio.to_thread(_get_filtered_source_streams, action, source, cache)
 
         elif action == "get_series":
-            group_filters = source_filters.get("series", {}).get("groups", [])
-            channel_filters = source_filters.get("series", {}).get("channels", [])
-            series_list = cache.get_cached("series", source_id)
-            categories = cache.get_cached("series_categories", source_id)
-            cat_map = build_category_map(categories)
-            allowed_category_ids = {
-                cat_id
-                for cat_id, group_name in cat_map.items()
-                if should_include(group_name, group_filters)
-            }
-            include_unknown_group = should_include("", group_filters)
-
-            # Filter using slim dicts, then fetch full data for matches
-            matching_ids: list[str] = []
-            for series in series_list:
-                cat_id = str(series.get("category_id", ""))
-                group_allowed = (
-                    cat_id in allowed_category_ids
-                    if cat_id in cat_map
-                    else include_unknown_group
-                )
-                if not group_allowed:
-                    continue
-                if channel_filters and not should_include(series.get("name", ""), channel_filters):
-                    continue
-                sid = str(series.get("series_id", ""))
-                if sid:
-                    matching_ids.append(sid)
-            full_data = cache.get_streams_full_data_batch("series", source_id, matching_ids)
-            return [full_data[sid] for sid in matching_ids if sid in full_data]
+            return await asyncio.to_thread(_get_filtered_source_streams, "get_series", source, cache)
 
         elif action in ("get_series_info", "get_vod_info"):
             param_key = "series_id" if action == "get_series_info" else "vod_id"
@@ -208,8 +226,6 @@ async def player_api_source_full(
     if not source:
         return JSONResponse({"error": f"Source route '{source_route}' not found"}, status_code=404)
 
-    source_id = source.get("id")
-    prefix = source.get("prefix", "")
     action = request.query_params.get("action", "")
     client = await http.get_client()
 
@@ -233,43 +249,10 @@ async def player_api_source_full(
             return Response(content=response.content, status_code=response.status_code)
 
         elif action in ("get_live_categories", "get_vod_categories", "get_series_categories"):
-            ct = action.split("_")[1]
-            categories = cache.get_cached(f"{ct}_categories", source_id)
-            if prefix:
-                result = []
-                for cat in categories:
-                    cat_copy = safe_copy_category(cat)
-                    cat_copy["category_name"] = f"{prefix}{safe_get_category_name(cat)}"
-                    result.append(cat_copy)
-                return result
-            return categories
+            return await asyncio.to_thread(_get_full_source_categories, action, source, cache)
 
-        elif action == "get_live_streams":
-            streams = cache.get_cached("live_streams", source_id)
-            stream_ids = [str(s.get("stream_id", "")) for s in streams if s.get("stream_id")]
-            full_data = cache.get_streams_full_data_batch("live", source_id, stream_ids)
-            result = []
-            for sid in stream_ids:
-                stream = full_data.get(sid)
-                if not stream:
-                    continue
-                epg_id = stream.get("epg_channel_id", "")
-                if epg_id:
-                    stream["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
-                result.append(stream)
-            return result
-
-        elif action == "get_vod_streams":
-            streams = cache.get_cached("vod_streams", source_id)
-            stream_ids = [str(s.get("stream_id", "")) for s in streams if s.get("stream_id")]
-            full_data = cache.get_streams_full_data_batch("vod", source_id, stream_ids)
-            return [full_data[sid] for sid in stream_ids if sid in full_data]
-
-        elif action == "get_series":
-            series_list = cache.get_cached("series", source_id)
-            series_ids = [str(s.get("series_id", "")) for s in series_list if s.get("series_id")]
-            full_data = cache.get_streams_full_data_batch("series", source_id, series_ids)
-            return [full_data[sid] for sid in series_ids if sid in full_data]
+        elif action in ("get_live_streams", "get_vod_streams", "get_series"):
+            return await asyncio.to_thread(_get_full_source_streams, action, source, cache)
 
         elif action in ("get_series_info", "get_vod_info"):
             param_key = "series_id" if action == "get_series_info" else "vod_id"

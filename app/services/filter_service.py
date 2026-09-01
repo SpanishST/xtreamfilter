@@ -7,6 +7,8 @@ import unicodedata
 
 from rapidfuzz import fuzz
 
+_WHITESPACE_RE = re.compile(r"\s+")
+
 
 @functools.lru_cache(maxsize=4096)
 def _strip_accents(text: str) -> str:
@@ -26,6 +28,21 @@ def _compile_regex(pattern: str, flags: int) -> re.Pattern | None:
         return None
 
 
+@functools.lru_cache(maxsize=4096)
+def _normalise_filter_pattern(pattern: str, case_sensitive: bool) -> str:
+    """Normalize a reusable non-regex filter pattern once."""
+    if not case_sensitive:
+        pattern = _strip_accents(pattern.lower())
+    return _WHITESPACE_RE.sub(" ", pattern).strip()
+
+
+def _normalise_filter_value(value: str, case_sensitive: bool) -> str:
+    """Normalize a value using the same rules as filter matching."""
+    if not case_sensitive:
+        value = _strip_accents(value.lower())
+    return _WHITESPACE_RE.sub(" ", value).strip()
+
+
 def matches_filter(value: str, filter_rule: dict) -> bool:
     """Check if a value matches a filter rule."""
     match_type = filter_rule.get("match", "contains")
@@ -39,20 +56,19 @@ def matches_filter(value: str, filter_rule: dict) -> bool:
     if not pattern:
         return False
 
-    test_value = value if case_sensitive else value.lower()
-    test_pattern = pattern if case_sensitive else pattern.lower()
+    # Regex matching intentionally uses the original value and pattern.
+    if match_type == "regex":
+        try:
+            flags = 0 if case_sensitive else re.IGNORECASE
+            compiled = _compile_regex(pattern, flags)
+            if compiled is None:
+                return False
+            return bool(compiled.search(value))
+        except re.error:
+            return False
 
-    # Accent-insensitive comparison: strip diacritics so that e.g.
-    # "TÉLÉ RÉALITÉ" matches a filter value "tele realite".
-    if not case_sensitive:
-        test_value = _strip_accents(test_value)
-        test_pattern = _strip_accents(test_pattern)
-
-    # Normalize multiple whitespace characters to a single space
-    # so that e.g. "TELE  REALITE" (two spaces) matches "tele realite"
-    if match_type in ("exact", "starts_with", "ends_with", "contains", "not_contains"):
-        test_value = re.sub(r'\s+', ' ', test_value).strip()
-        test_pattern = re.sub(r'\s+', ' ', test_pattern).strip()
+    test_value = _normalise_filter_value(value, case_sensitive)
+    test_pattern = _normalise_filter_pattern(pattern, case_sensitive)
 
     if match_type == "exact":
         return test_value == test_pattern
@@ -64,17 +80,30 @@ def matches_filter(value: str, filter_rule: dict) -> bool:
         return test_pattern in test_value
     elif match_type == "not_contains":
         return test_pattern not in test_value
-    elif match_type == "regex":
-        try:
-            flags = 0 if case_sensitive else re.IGNORECASE
-            compiled = _compile_regex(pattern, flags)
-            if compiled is None:
-                return False
-            return bool(compiled.search(value))
-        except re.error:
-            return False
-
     return False
+
+
+def compile_filter_rules(filter_rules: list[dict] | None):
+    """Compile the include/exclude partition for repeated value checks."""
+    rules = tuple(filter_rules or ())
+    include_rules = tuple(r for r in rules if r.get("type") == "include")
+    exclude_rules = tuple(r for r in rules if r.get("type") == "exclude")
+    result_cache: dict[str, bool] = {}
+
+    def predicate(value: str) -> bool:
+        cached = result_cache.get(value)
+        if cached is not None:
+            return cached
+        if include_rules and not any(matches_filter(value, rule) for rule in include_rules):
+            result = False
+        else:
+            result = not any(matches_filter(value, rule) for rule in exclude_rules)
+        if len(result_cache) >= 4096:
+            result_cache.clear()
+        result_cache[value] = result
+        return result
+
+    return predicate
 
 
 def should_include(value: str, filter_rules: list[dict]) -> bool:
@@ -358,9 +387,9 @@ def _norm_atom(field_expr: str, rule: dict) -> tuple[str, list] | None:
         return None
     raw_value = str(rule.get("value", ""))
     if match_type == "all":
-        # matches_filter('all') always matches → an exclude-all veto excludes
-        # everything; as part of an include list it can never be satisfied.
-        return ("0", [])
+        # The caller applies NOT(...) to exclude rules, so this must represent
+        # a matching expression that is always true in either position.
+        return ("1", [])
     if not raw_value:
         # Empty patterns never match in matches_filter().
         return ("0", [])

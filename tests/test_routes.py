@@ -7,18 +7,18 @@ import os
 import pytest
 from starlette.testclient import TestClient
 
+from app.database import DB_NAME, db_connect, init_db
+from app.services.cache_service import CacheService
+from app.services.cart_service import CartService
+from app.services.category_service import CategoryService
 from app.services.config_service import ConfigService
+from app.services.epg_service import EpgService
 from app.services.http_client import HttpClientService
 from app.services.jellyfin_service import JellyfinService
-from app.services.cache_service import CacheService
-from app.services.epg_service import EpgService
-from app.services.xtream_service import XtreamService
-from app.services.notification_service import NotificationService
-from app.services.category_service import CategoryService
-from app.services.cart_service import CartService
-from app.services.monitor_service import MonitorService
 from app.services.m3u_service import M3uService
-from app.database import DB_NAME, init_db
+from app.services.monitor_service import MonitorService
+from app.services.notification_service import NotificationService
+from app.services.xtream_service import XtreamService
 
 
 def _build_app(data_dir: str):
@@ -26,10 +26,22 @@ def _build_app(data_dir: str):
     from fastapi import FastAPI, Request
 
     from app.routes import (
-        ui, filter_api, source_api, playlist, browse_api,
-        category_api, xtream_merged, stream_proxy, xtream_source,
-        epg, config_api, cache_api, cart_api, monitor_api, health,
+        browse_api,
+        cache_api,
+        cart_api,
+        category_api,
+        config_api,
+        epg,
+        filter_api,
+        health,
         log_api,
+        monitor_api,
+        playlist,
+        source_api,
+        stream_proxy,
+        ui,
+        xtream_merged,
+        xtream_source,
     )
     from app.services.log_service import LogService
 
@@ -119,6 +131,12 @@ def test_health(client):
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
+
+
+def test_preview_without_sources(client):
+    r = client.get("/preview")
+    assert r.status_code == 200
+    assert r.json() == {"stats": "# Error: No sources configured", "sample_channels": []}
 
 
 def test_version(client):
@@ -450,6 +468,84 @@ def test_sources_crud(client):
     assert r.json()["sources"] == []
 
 
+def test_source_replacement_prunes_cache_and_routes_new_source(client, monkeypatch):
+    from app.routes import stream_proxy
+
+    old_source = {
+        "name": "Old source",
+        "host": "http://old.example",
+        "username": "old-user",
+        "password": "old-pass",
+    }
+    old_id = client.post("/api/sources", json=old_source).json()["source"]["id"]
+
+    cache = client.app.state.cache_service
+    cache._api_cache["sources"] = {
+        old_id: {
+            "live_streams": [{"stream_id": "7"}],
+            "live_categories": [],
+            "vod_categories": [],
+            "series_categories": [],
+            "vod_streams": [],
+            "series": [],
+            "last_refresh": "2026-09-01T00:00:00+00:00",
+        }
+    }
+    conn = db_connect(os.path.join(client.app.state.config_service.data_dir, DB_NAME))
+    try:
+        conn.execute(
+            "INSERT INTO streams (source_id, content_type, stream_id, name) VALUES (?, ?, ?, ?)",
+            (old_id, "live", "7", "Old stream"),
+        )
+        conn.execute(
+            "INSERT INTO source_categories (source_id, content_type, category_id, category_name) VALUES (?, ?, ?, ?)",
+            (old_id, "live", "1", "Old category"),
+        )
+        conn.execute(
+            "INSERT INTO source_last_refresh (source_id, last_refresh) VALUES (?, ?)",
+            (old_id, "2026-09-01T00:00:00+00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    response = client.delete(f"/api/sources/{old_id}")
+    assert response.status_code == 200
+    assert cache._api_cache["sources"] == {}
+    assert cache.get_source_for_stream("7", "live") is None
+
+    conn = db_connect(os.path.join(client.app.state.config_service.data_dir, DB_NAME))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM streams").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM source_categories").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM source_last_refresh").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+    new_source = {
+        "name": "New source",
+        "host": "http://new.example",
+        "username": "new-user",
+        "password": "new-pass",
+    }
+    new_id = client.post("/api/sources", json=new_source).json()["source"]["id"]
+
+    captured = {}
+
+    async def fake_proxy(url, request, stream_type):
+        captured.update(url=url, stream_type=stream_type)
+        from fastapi.responses import Response
+
+        return Response(status_code=200)
+
+    monkeypatch.setattr(stream_proxy, "proxy_stream", fake_proxy)
+    response = client.get("/merged/live/user/pass/7.ts")
+
+    assert response.status_code == 200
+    assert captured == {"url": "http://new.example/new-user/new-pass/7.ts", "stream_type": "live"}
+    assert client.app.state.config_service.get_source_by_index(0)["id"] == new_id
+
+
 # -------------------------------------------------------------------
 # Cache API
 # -------------------------------------------------------------------
@@ -577,6 +673,37 @@ def test_cart_status(client):
     data = r.json()
     assert data["total"] == 0
     assert data["is_running"] is False
+    assert data["queue_paused"] is False
+
+
+def test_cart_pause_and_resume(client):
+    r = client.post("/api/cart/pause")
+    assert r.status_code == 400
+
+    r = client.post(
+        "/api/cart",
+        json={
+            "content_type": "vod",
+            "stream_id": "movie-1",
+            "source_id": "source-1",
+            "name": "Test movie",
+        },
+    )
+    assert r.status_code == 200
+
+    r = client.post("/api/cart/pause")
+    assert r.status_code == 200
+    assert client.get("/api/cart/status").json()["queue_paused"] is True
+
+    r = client.post("/api/cart/start")
+    assert r.status_code == 409
+
+    r = client.post("/api/cart/pause")
+    assert r.status_code == 200
+
+    r = client.post("/api/cart/resume")
+    assert r.status_code == 200
+    assert client.get("/api/cart/status").json()["queue_paused"] is False
 
 
 # -------------------------------------------------------------------
@@ -662,3 +789,231 @@ def test_cart_page(client):
 def test_monitor_page(client):
     r = client.get("/monitor")
     assert r.status_code == 200
+
+
+# -------------------------------------------------------------------
+# Xtream filtering performance / malformed category regression tests
+# -------------------------------------------------------------------
+
+
+def _configure_xtream_source(client, *, filters=None):
+    """Install a single cached source without making upstream HTTP requests."""
+    source = {
+        "id": "source-1",
+        "name": "Test source",
+        "host": "http://upstream.invalid",
+        "username": "user",
+        "password": "pass",
+        "enabled": True,
+        "route": "test-source",
+        "prefix": "",
+        "filters": filters or {
+            "live": {"groups": [], "channels": []},
+            "vod": {"groups": [], "channels": []},
+            "series": {"groups": [], "channels": []},
+        },
+    }
+    cfg = client.app.state.config_service
+    cfg.config["sources"] = [source]
+    cfg.save()
+
+    cache = client.app.state.cache_service
+    cache._api_cache["sources"] = {
+        source["id"]: cache._empty_source_cache(),
+    }
+    return source, cache._api_cache["sources"][source["id"]]
+
+
+def _mock_full_data_batch(monkeypatch, cache, source_cache):
+    """Make tests independent of the production SQLite persistence step."""
+    def get_full_data(content_type, source_id, stream_ids):
+        key = "series" if content_type == "series" else f"{content_type}_streams"
+        id_field = "series_id" if content_type == "series" else "stream_id"
+        return {
+            str(item.get(id_field)): item
+            for item in source_cache.get(key, [])
+            if str(item.get(id_field)) in stream_ids
+        }
+
+    monkeypatch.setattr(cache, "get_streams_full_data_batch", get_full_data)
+
+
+def test_source_vod_group_filters_are_evaluated_per_category(client, monkeypatch):
+    """Group rules should not be re-evaluated for every VOD item."""
+    from app.routes import xtream_source
+    from app.services.filter_service import should_include as real_should_include
+
+    filters = {
+        "live": {"groups": [], "channels": []},
+        "vod": {
+            "groups": [{
+                "type": "include", "match": "exact", "value": "Allowed",
+                "case_sensitive": False,
+            }],
+            "channels": [],
+        },
+        "series": {"groups": [], "channels": []},
+    }
+    _, source_cache = _configure_xtream_source(client, filters=filters)
+    source_cache["vod_categories"] = [
+        {"category_id": "10", "category_name": "Allowed"},
+        {"category_id": "20", "category_name": "Blocked"},
+    ]
+    source_cache["vod_streams"] = [
+        {"stream_id": i, "name": f"Allowed {i}", "category_id": "10"}
+        for i in range(100)
+    ] + [
+        {"stream_id": 1000 + i, "name": f"Blocked {i}", "category_id": "20"}
+        for i in range(100)
+    ] + [{"stream_id": 9999, "name": "Unknown category", "category_id": None}]
+    cache = client.app.state.cache_service
+    _mock_full_data_batch(monkeypatch, cache, source_cache)
+
+    calls = []
+
+    def counting_should_include(value, rules):
+        calls.append((value, rules))
+        return real_should_include(value, rules)
+
+    monkeypatch.setattr(xtream_source, "should_include", counting_should_include)
+    response = client.get("/test-source/player_api.php?action=get_vod_streams")
+
+    assert response.status_code == 200
+    assert len(response.json()) == 100
+    assert {item["category_id"] for item in response.json()} == {"10"}
+    assert len(calls) == 3
+
+
+def test_source_series_filtering_preserves_group_and_channel_semantics(client, monkeypatch):
+    filters = {
+        "live": {"groups": [], "channels": []},
+        "vod": {"groups": [], "channels": []},
+        "series": {
+            "groups": [{
+                "type": "include", "match": "exact", "value": "Allowed Series",
+                "case_sensitive": False,
+            }],
+            "channels": [{
+                "type": "exclude", "match": "contains", "value": "Blocked",
+                "case_sensitive": False,
+            }],
+        },
+    }
+    _, source_cache = _configure_xtream_source(client, filters=filters)
+    source_cache["series_categories"] = [
+        {"category_id": "10", "category_name": "Allowed Series"},
+        {"category_id": "20", "category_name": "Other Series"},
+    ]
+    source_cache["series"] = [
+        {"series_id": 1, "name": "Keep Me", "category_id": "10"},
+        {"series_id": 2, "name": "Blocked title", "category_id": "10"},
+        {"series_id": 3, "name": "Wrong category", "category_id": "20"},
+        {"series_id": 4, "name": "Unknown category", "category_id": None},
+    ]
+    cache = client.app.state.cache_service
+    _mock_full_data_batch(monkeypatch, cache, source_cache)
+
+    response = client.get("/test-source/player_api.php?action=get_series")
+    assert response.status_code == 200
+    assert [item["series_id"] for item in response.json()] == [1]
+
+
+def test_merged_vod_handles_null_category_id(client, monkeypatch):
+    """A provider item with category_id=null must not fail the whole catalog."""
+    _, source_cache = _configure_xtream_source(client)
+    source_cache["vod_categories"] = []
+    source_cache["vod_streams"] = [{
+        "stream_id": 123,
+        "name": "Uncategorised movie",
+        "category_id": None,
+    }]
+    _mock_full_data_batch(monkeypatch, client.app.state.cache_service, source_cache)
+
+    response = client.get("/merged/player_api.php?action=get_vod_streams")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["stream_id"] == 123
+    assert data[0]["category_id"] == "0"
+    assert data[0]["category_ids"] == [0]
+
+
+def test_merged_vod_preserves_category_and_channel_filters(client, monkeypatch):
+    filters = {
+        "live": {"groups": [], "channels": []},
+        "vod": {
+            "groups": [{
+                "type": "include", "match": "exact", "value": "Allowed",
+                "case_sensitive": False,
+            }],
+            "channels": [{
+                "type": "exclude", "match": "contains", "value": "Blocked",
+                "case_sensitive": False,
+            }],
+        },
+        "series": {"groups": [], "channels": []},
+    }
+    _, source_cache = _configure_xtream_source(client, filters=filters)
+    source_cache["vod_categories"] = [
+        {"category_id": "10", "category_name": "Allowed"},
+        {"category_id": "20", "category_name": "Other"},
+    ]
+    source_cache["vod_streams"] = [
+        {"stream_id": 1, "name": "Keep", "category_id": "10"},
+        {"stream_id": 2, "name": "Blocked title", "category_id": "10"},
+        {"stream_id": 3, "name": "Wrong category", "category_id": "20"},
+        {"stream_id": 4, "name": "Unknown category", "category_id": None},
+    ]
+    _mock_full_data_batch(monkeypatch, client.app.state.cache_service, source_cache)
+
+    response = client.get("/merged/player_api.php?action=get_vod_streams")
+    assert response.status_code == 200
+    data = response.json()
+    assert [item["stream_id"] for item in data] == [1]
+    assert data[0]["category_id"] == "10"
+    assert data[0]["category_ids"] == [10]
+
+
+def test_merged_vod_group_filters_are_evaluated_per_category(client, monkeypatch):
+    """Merged group rules should scale with categories, not stream count."""
+    from app.routes import xtream_merged
+    from app.services.filter_service import should_include as real_should_include
+
+    filters = {
+        "live": {"groups": [], "channels": []},
+        "vod": {
+            "groups": [{
+                "type": "include", "match": "exact", "value": "Allowed",
+                "case_sensitive": False,
+            }],
+            "channels": [],
+        },
+        "series": {"groups": [], "channels": []},
+    }
+    _, source_cache = _configure_xtream_source(client, filters=filters)
+    source_cache["vod_categories"] = [
+        {"category_id": "10", "category_name": "Allowed"},
+        {"category_id": "20", "category_name": "Blocked"},
+    ]
+    source_cache["vod_streams"] = [
+        {"stream_id": i, "name": f"Allowed {i}", "category_id": "10"}
+        for i in range(100)
+    ] + [
+        {"stream_id": 1000 + i, "name": f"Blocked {i}", "category_id": "20"}
+        for i in range(100)
+    ] + [{"stream_id": 9999, "name": "Unknown category", "category_id": None}]
+    cache = client.app.state.cache_service
+    _mock_full_data_batch(monkeypatch, cache, source_cache)
+
+    calls = []
+
+    def counting_should_include(value, rules):
+        calls.append((value, rules))
+        return real_should_include(value, rules)
+
+    monkeypatch.setattr(xtream_merged, "should_include", counting_should_include)
+    response = client.get("/merged/player_api.php?action=get_vod_streams")
+
+    assert response.status_code == 200
+    assert len(response.json()) == 100
+    assert len(calls) == 3

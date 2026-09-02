@@ -1,6 +1,7 @@
 """Xtream Codes merged API — combines all sources with virtual IDs."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import httpx
@@ -90,10 +91,10 @@ async def player_api_merged(
             return Response(content=response.content, status_code=response.status_code)
 
         elif action in ("get_live_categories", "get_vod_categories", "get_series_categories"):
-            return _handle_get_categories(action, enabled_sources, cache, cat_svc)
+            return await asyncio.to_thread(_handle_get_categories, action, enabled_sources, cache, cat_svc)
 
         elif action in ("get_live_streams", "get_vod_streams", "get_series"):
-            return _handle_get_streams(action, request, enabled_sources, cache, cat_svc)
+            return await asyncio.to_thread(_handle_get_streams, action, request, enabled_sources, cache, cat_svc)
 
         elif action == "get_series_info":
             return await _handle_get_series_info(request, client, cfg)
@@ -174,31 +175,81 @@ def _handle_get_streams(action: str, request: Request, enabled_sources, cache: C
         channel_filters = filters.get(ct, {}).get("channels", [])
         categories = cache.get_cached(cat_key, source_id)
         cat_map = build_category_map(categories)
+        allowed_category_ids = {
+            cat_id
+            for cat_id, group_name in cat_map.items()
+            if should_include(group_name, group_filters)
+        }
+        include_unknown_group = should_include("", group_filters)
 
+        # First pass: filter using slim dicts to find matching stream IDs
+        matching_ids: list[str] = []
+        matching_meta: dict[str, dict] = {}  # stream_id -> {virtual_cat_id, custom_cids, epg_prefix}
         for stream in cache.get_cached(stream_key, source_id):
             cat_id = str(stream.get("category_id", ""))
-            group_name = cat_map.get(cat_id, "")
-            channel_name = stream.get("name", "")
             stream_id_raw = str(stream.get(id_field, ""))
 
-            if should_include(group_name, group_filters) and should_include(channel_name, channel_filters):
-                virtual_cat_id = str(encode_virtual_id(idx, stream.get("category_id", 0)))
+            group_allowed = (
+                cat_id in allowed_category_ids
+                if cat_id in cat_map
+                else include_unknown_group
+            )
+            if group_allowed and channel_filters and not should_include(stream.get("name", ""), channel_filters):
+                group_allowed = False
+
+            if group_allowed:
+                raw_category_id = stream.get("category_id") or 0
+                virtual_cat_id = str(encode_virtual_id(idx, raw_category_id))
                 if requested_cat_id is None or requested_cat_id == virtual_cat_id:
-                    stream_copy = stream.copy()
-                    stream_copy[id_field] = encode_virtual_id(idx, stream.get(id_field, 0))
-                    stream_copy["category_id"] = virtual_cat_id
-                    stream_copy["category_ids"] = [int(virtual_cat_id)]
-                    if ct == "live":
-                        epg_id = stream.get("epg_channel_id", "")
-                        if epg_id:
-                            stream_copy["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
-                    result.append(stream_copy)
+                    matching_ids.append(stream_id_raw)
+                    matching_meta[stream_id_raw] = {
+                        "virtual_cat_id": virtual_cat_id,
+                        "id_value": encode_virtual_id(idx, stream.get(id_field, 0)),
+                        "epg_prefix": True if ct == "live" else False,
+                    }
 
             cids = custom_item_cats.get((source_id, stream_id_raw), [])
             for cid in cids:
                 if requested_cat_id is None or requested_cat_id == cid:
+                    if stream_id_raw not in matching_meta:
+                        matching_ids.append(stream_id_raw)
+                    matching_meta.setdefault(stream_id_raw, {})["custom_cids"] = matching_meta.get(stream_id_raw, {}).get("custom_cids", [])
+                    matching_meta[stream_id_raw]["custom_cids"].append(cid)
+                    matching_meta[stream_id_raw]["id_value"] = encode_virtual_id(idx, stream.get(id_field, 0))
+
+        # Fetch full data from SQLite in batch
+        full_data = cache.get_streams_full_data_batch(ct, source_id, matching_ids)
+
+        # Second pass: build result from full data
+        seen: set[str] = set()
+        for stream_id_raw in matching_ids:
+            if stream_id_raw in seen:
+                continue
+            seen.add(stream_id_raw)
+            stream = full_data.get(stream_id_raw)
+            if not stream:
+                continue
+            meta = matching_meta.get(stream_id_raw, {})
+            virtual_cat_id = meta.get("virtual_cat_id")
+            id_value = meta.get("id_value", encode_virtual_id(idx, stream.get(id_field, 0)))
+
+            # Add for the main category
+            if virtual_cat_id and (requested_cat_id is None or requested_cat_id == virtual_cat_id):
+                stream_copy = stream.copy()
+                stream_copy[id_field] = id_value
+                stream_copy["category_id"] = virtual_cat_id
+                stream_copy["category_ids"] = [int(virtual_cat_id)]
+                if ct == "live":
+                    epg_id = stream.get("epg_channel_id", "")
+                    if epg_id:
+                        stream_copy["epg_channel_id"] = f"{source_id}_{epg_id}".lower()
+                result.append(stream_copy)
+
+            # Add for custom categories
+            for cid in meta.get("custom_cids", []):
+                if requested_cat_id is None or requested_cat_id == cid:
                     stream_copy = stream.copy()
-                    stream_copy[id_field] = encode_virtual_id(idx, stream.get(id_field, 0))
+                    stream_copy[id_field] = id_value
                     stream_copy["category_id"] = cid
                     stream_copy["category_ids"] = [int(cid)]
                     if ct == "live":

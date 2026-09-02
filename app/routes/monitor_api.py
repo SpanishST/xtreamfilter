@@ -18,10 +18,9 @@ from app.services.filter_service import normalize_name
 from app.services.monitor_service import (  # noqa: F401 - _normalize_imdb_id used in series dup checks
     MonitorService,
     _normalize_imdb_id,
-    _normalize_tmdb_id,
     _safe_episode_num,
 )
-from app.services.xtream_service import XtreamService
+from app.services.xtream_service import XtreamService, compact_episode_info
 
 router = APIRouter(tags=["monitor"])
 logger = logging.getLogger(__name__)
@@ -531,7 +530,7 @@ async def redownload_episodes(
             "season": ep.get("season"),
             "episode_num": ep.get("episode_num", 0),
             "episode_title": ep.get("title", ""),
-            "episode_info": ep.get("info", {}),
+            "episode_info": compact_episode_info(ep.get("info", {})),
             "icon": entry.get("cover", ""),
             "group": "",
             "container_extension": ep.get("container_extension", "mp4"),

@@ -3,26 +3,51 @@
 These tests start the real FastAPI server (with a temp data dir) in a
 background thread, then use Playwright to exercise the UI.
 """
+
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
+from pathlib import Path
 
 import pytest
 import uvicorn
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, expect, sync_playwright
+
+pytestmark = pytest.mark.e2e
+
+
+def _playwright_chromium_available() -> bool:
+    """Avoid poisoning the test process when Playwright browsers are absent."""
+    try:
+        with sync_playwright() as playwright:
+            executable = (
+                Path(os.environ["PLAYWRIGHT_EXECUTABLE_PATH"])
+                if os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH")
+                else Path(playwright.chromium.executable_path)
+            )
+            return executable.exists()
+    except Exception:
+        return False
+
+
+if not _playwright_chromium_available():
+    pytestmark = [
+        pytest.mark.e2e,
+        pytest.mark.skip(reason="Playwright Chromium is not installed; run 'playwright install chromium'"),
+    ]
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="session")
 def _server(tmp_path_factory):
     """Start uvicorn in a daemon thread with a temp data dir."""
-    import os
-
     data_dir = str(tmp_path_factory.mktemp("e2e_data"))
     # Write a minimal config
     config = {
@@ -78,6 +103,7 @@ def base_url(_server):
 # Tests
 # ---------------------------------------------------------------------------
 
+
 def test_index_page_loads(page: Page, base_url: str):
     """Main config page loads and has expected elements."""
     page.goto(base_url + "/")
@@ -94,6 +120,7 @@ def test_cart_page_loads(page: Page, base_url: str):
     """Cart page renders."""
     page.goto(base_url + "/cart")
     expect(page.locator("body")).to_be_visible()
+    expect(page.locator("#queue-pause-btn")).to_be_attached()
 
 
 def test_monitor_page_loads(page: Page, base_url: str):

@@ -3,6 +3,7 @@
 The entire codebase is split into models, services, and route modules.
 This file only wires everything together via the FastAPI lifespan.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +12,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.gzip import GZipMiddleware
 
 from app.database import DB_NAME, init_db
 from app.migrate import run_migration_if_needed
@@ -20,6 +22,7 @@ from app.routes import (
     cart_api,
     category_api,
     config_api,
+    database_api,
     epg,
     filter_api,
     health,
@@ -37,6 +40,7 @@ from app.services.cache_service import CacheService
 from app.services.cart_service import CartService
 from app.services.category_service import CategoryService
 from app.services.config_service import ConfigService
+from app.services.database_maintenance_service import DatabaseMaintenanceService
 from app.services.epg_service import EpgService
 from app.services.http_client import HttpClientService
 from app.services.jellyfin_service import JellyfinService
@@ -58,6 +62,7 @@ logger = logging.getLogger(__name__)
 # Background refresh loop
 # ---------------------------------------------------------------------------
 
+
 async def background_refresh_loop(
     cache: CacheService,
     epg_svc: EpgService,
@@ -73,25 +78,17 @@ async def background_refresh_loop(
             cache_was_refreshed = False
             if not cache.is_cache_valid():
                 logger.info("Cache expired, triggering refresh…")
-                await cache.refresh_cache()
-                cache_was_refreshed = True
+                category_callback = cat.refresh_pattern_categories_async if cat else None
+                if cache.start_refresh(on_cache_refreshed=category_callback):
+                    cache_was_refreshed = await cache.wait_for_refresh()
             else:
                 logger.info(f"Cache still valid. Last refresh: {cache._api_cache.get('last_refresh', 'Never')}")
 
             if cache_was_refreshed:
                 async def _run_post_refresh_tasks():
-                    coros = [
-                        monitor.check_monitored_series(),
-                        monitor.check_monitored_movies(),
-                    ]
-                    if cat:
-                        coros.insert(0, cat.refresh_pattern_categories_async())
+                    coros = [monitor.check_monitored_series(), monitor.check_monitored_movies()]
                     results = await asyncio.gather(*coros, return_exceptions=True)
-                    names = (
-                        ["category refresh", "series monitoring", "movie monitoring"]
-                        if cat
-                        else ["series monitoring", "movie monitoring"]
-                    )
+                    names = ["series monitoring", "movie monitoring"]
                     for i, res in enumerate(results):
                         if isinstance(res, Exception):
                             logger.error(f"{names[i]} error in background loop: {res}")
@@ -128,14 +125,18 @@ async def download_schedule_loop(cart: CartService) -> None:
     while True:
         try:
             schedule = cart.config_service.get_download_schedule()
-            logger.info(f"Schedule check: enabled={schedule.get('enabled', False)}, in_window={cart.is_in_download_window()}, cart_size={len(cart.cart)}, queued={[i.get('name') for i in cart.cart if i.get('status') == 'queued']}")
+            logger.info(
+                f"Schedule check: enabled={schedule.get('enabled', False)}, in_window={cart.is_in_download_window()}, cart_size={len(cart.cart)}, queued={[i.get('name') for i in cart.cart if i.get('status') == 'queued']}"
+            )
             if schedule.get("enabled", False):
                 has_queued = any(i.get("status") == "queued" for i in cart.cart)
                 logger.info(f"has_queued={has_queued}")
                 if has_queued and cart.is_in_download_window():
                     cart._force_started = False
                     started = cart._try_start_worker()
-                    logger.info(f"Download schedule: has_queued={has_queued}, in_window={cart.is_in_download_window()}, started={started}")
+                    logger.info(
+                        f"Download schedule: has_queued={has_queued}, in_window={cart.is_in_download_window()}, started={started}"
+                    )
                     if started:
                         queued_count = len([i for i in cart.cart if i.get("status") == "queued"])
                         logger.info(f"Download schedule: auto-started worker for {queued_count} queued items")
@@ -151,6 +152,7 @@ async def download_schedule_loop(cart: CartService) -> None:
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -175,6 +177,8 @@ async def lifespan(app: FastAPI):
     notif = NotificationService(cfg, http)
 
     cache = CacheService(cfg, http, notif)
+    database_maintenance = DatabaseMaintenanceService(cfg, cache)
+    database_maintenance.recover_interrupted()
 
     epg_svc = EpgService(cfg, http, cache)
     xtream = XtreamService(cfg, cache, http)
@@ -192,6 +196,7 @@ async def lifespan(app: FastAPI):
     app.state.config_service = cfg
     app.state.http_client = http
     app.state.cache_service = cache
+    app.state.database_maintenance_service = database_maintenance
     app.state.epg_service = epg_svc
     app.state.xtream_service = xtream
     app.state.notification_service = notif
@@ -217,12 +222,8 @@ async def lifespan(app: FastAPI):
     epg_svc.load_epg_cache_from_disk()
 
     # --- background tasks (start before yield so they run during app lifetime) ---
-    bg_task = asyncio.create_task(
-        background_refresh_loop(cache, epg_svc, monitor, cat)
-    )
-    schedule_task = asyncio.create_task(
-        download_schedule_loop(cart)
-    )
+    bg_task = asyncio.create_task(background_refresh_loop(cache, epg_svc, monitor, cat))
+    schedule_task = asyncio.create_task(download_schedule_loop(cart))
 
     # --- yield here so server can start accepting requests ASAP ---
     yield
@@ -240,6 +241,7 @@ async def lifespan(app: FastAPI):
         logger.info(f"Recovered {recovered} stuck download(s) back to queued")
 
     # --- shutdown ---
+    await cache.cancel_refresh("Application shutdown")
     bg_task.cancel()
     schedule_task.cancel()
     try:
@@ -250,6 +252,7 @@ async def lifespan(app: FastAPI):
         await schedule_task
     except asyncio.CancelledError:
         pass
+    await database_maintenance.shutdown()
     await http.close()
     logger.info("Application shutdown complete")
 
@@ -259,6 +262,9 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="XtreamFilter", lifespan=lifespan)
+
+# Compress API/HTML responses (browse payloads shrink ~4x over the network).
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 # Middleware — ensure UTF-8 charset on JSON responses
@@ -281,6 +287,7 @@ app.include_router(filter_api.router)
 app.include_router(source_api.router)
 app.include_router(config_api.router)
 app.include_router(cache_api.router)
+app.include_router(database_api.router)
 app.include_router(cart_api.router)
 app.include_router(monitor_api.router)
 app.include_router(log_api.router)

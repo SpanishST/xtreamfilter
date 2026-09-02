@@ -7,12 +7,13 @@ import logging
 import os
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from rapidfuzz import fuzz
 
 from app.database import DB_NAME, db_connect
 from app.services.filter_service import normalize_name
+from app.services.xtream_service import compact_episode_info
 
 if TYPE_CHECKING:
     from app.services.cache_service import CacheService
@@ -847,7 +848,7 @@ class MonitorService:
                     "season": _season,
                     "episode_num": _ep_num,
                     "episode_title": ep.get("title", ""),
-                    "episode_info": ep.get("info", {}),
+                    "episode_info": compact_episode_info(ep.get("info", {})),
                     "icon": entry.get("cover", ""),
                     "group": "",
                     "container_extension": ep.get("container_extension", "mp4"),
@@ -1038,7 +1039,7 @@ class MonitorService:
                     "season": ep.get("season"),
                     "episode_num": ep.get("episode_num", 0),
                     "episode_title": ep.get("title", ""),
-                    "episode_info": ep.get("info", {}),
+                    "episode_info": compact_episode_info(ep.get("info", {})),
                     "icon": entry.get("cover", ""),
                     "group": "",
                     "container_extension": ep.get("container_extension", "mp4"),
@@ -1348,8 +1349,19 @@ class MonitorService:
         conn = db_connect(self.db_path)
         try:
             placeholders = ",".join("?" * len(target_source_ids))
+            # Extract only the needed fields via json_extract instead of
+            # loading the full data blob and json.loads-ing every row.
             rows = conn.execute(
-                f"SELECT source_id, stream_id, name, category_id, data "
+                f"SELECT source_id, stream_id, name, category_id, "
+                f"json_extract(data, '$.tmdb_id') AS d_tmdb_id, "
+                f"json_extract(data, '$.tmdb') AS d_tmdb, "
+                f"json_extract(data, '$.imdb_id') AS d_imdb_id, "
+                f"json_extract(data, '$.imdb') AS d_imdb, "
+                f"json_extract(data, '$.stream_icon') AS d_stream_icon, "
+                f"json_extract(data, '$.movie_image') AS d_movie_image, "
+                f"json_extract(data, '$.cover') AS d_cover, "
+                f"json_extract(data, '$.backdrop_path') AS d_backdrop, "
+                f"json_extract(data, '$.container_extension') AS d_container_ext "
                 f"FROM streams WHERE content_type = 'vod' AND source_id IN ({placeholders})",
                 target_source_ids,
             ).fetchall()
@@ -1366,14 +1378,9 @@ class MonitorService:
                 if allowed_cats and str(row["category_id"] or "") not in [str(c) for c in allowed_cats]:
                     continue
 
-            try:
-                data = json.loads(row["data"]) if row["data"] else {}
-            except Exception:
-                data = {}
-
-            s_tmdb_id = _normalize_tmdb_id(data.get("tmdb_id") or data.get("tmdb"))
-            s_imdb_id = _normalize_imdb_id(data.get("imdb_id") or data.get("imdb"))
-            s_name = row["name"] or data.get("name", "")
+            s_tmdb_id = _normalize_tmdb_id(row["d_tmdb_id"] or row["d_tmdb"])
+            s_imdb_id = _normalize_imdb_id(row["d_imdb_id"] or row["d_imdb"])
+            s_name = row["name"] or ""
             s_normalized = normalize_name(s_name)
 
             matched_by_id = bool(
@@ -1382,8 +1389,8 @@ class MonitorService:
             )
 
             cover = (
-                data.get("stream_icon") or data.get("movie_image")
-                or data.get("cover") or data.get("backdrop_path") or ""
+                row["d_stream_icon"] or row["d_movie_image"]
+                or row["d_cover"] or row["d_backdrop"] or ""
             )
 
             if matched_by_id:
@@ -1392,7 +1399,7 @@ class MonitorService:
                     "stream_id": str(row["stream_id"]),
                     "name": s_name,
                     "cover": cover,
-                    "container_extension": data.get("container_extension", "mkv"),
+                    "container_extension": row["d_container_ext"] or "mkv",
                     "tmdb_id": s_tmdb_id,
                     "category_id": row["category_id"],
                     "score": 100,
@@ -1408,7 +1415,7 @@ class MonitorService:
                         "stream_id": str(row["stream_id"]),
                         "name": s_name,
                         "cover": cover,
-                        "container_extension": data.get("container_extension", "mkv"),
+                        "container_extension": row["d_container_ext"] or "mkv",
                         "tmdb_id": s_tmdb_id,
                         "category_id": row["category_id"],
                         "score": score,

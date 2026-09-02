@@ -1,4 +1,5 @@
 """Cache service — in-memory API cache with disk persistence and stream-source mapping."""
+
 from __future__ import annotations
 
 import asyncio
@@ -6,28 +7,31 @@ import copy
 import json
 import logging
 import os
+import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from app.database import DB_NAME, db_connect, adb_connect, adb_transaction, _row_to_dict
+from app.database import (
+    DB_NAME,
+    _row_to_dict,
+    adb_transaction,
+    backfill_streams_denormalized_sql,
+    db_connect,
+)
+from app.services.filter_service import register_xf_norm
 
 if TYPE_CHECKING:
-    from app.services.config_service import ConfigService
-    from app.services.notification_service import NotificationService
     from app.services.cart_service import CartService
+    from app.services.config_service import ConfigService
+    from app.services.http_client import HttpClientService
+    from app.services.log_service import LogService
+    from app.services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "*/*",
-    "Accept-Encoding": "gzip, deflate",
-    "Connection": "keep-alive",
-}
 
 REFRESH_STEP_DEFINITIONS: list[tuple[str, str, str]] = [
     ("live_categories", "Live categories", "get_live_categories"),
@@ -53,7 +57,7 @@ class CacheService:
         self.http_client = http_client
         self.notification_service = notification_service
         self.cart_service: "CartService | None" = None
-        self.log_service = None  # set after init via attribute binding
+        self.log_service: "LogService | None" = None  # set after init via attribute binding
         self.data_dir = config_service.data_dir
         self.db_path = os.path.join(self.data_dir, DB_NAME)
 
@@ -64,6 +68,21 @@ class CacheService:
             "refresh_progress": self._default_refresh_progress(),
         }
         self._cache_lock = asyncio.Lock()
+        self._refresh_lock = asyncio.Lock()
+        self._refresh_task: asyncio.Task | None = None
+        self._refresh_cancel_requested = False
+        self._refresh_cancel_reason = ""
+        self._maintenance_active = False
+
+        # Browse group metadata cache: (content_type, source) -> aggregates.
+        # Only changes when catalog data changes, so it is invalidated
+        # explicitly on refresh save, clear, prune, and maintenance cleanup.
+        self._group_counts_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._group_counts_lock = threading.Lock()
+        self._group_counts_generation = 0
+        # Pushed-down source-rule predicates make COUNT expensive; cache the
+        # resulting totals keyed by predicate hash under the same generation.
+        self._rule_total_cache: dict[tuple, int] = {}
 
         self._stream_source_map: dict[str, dict[str, str]] = {
             "live": {},
@@ -79,9 +98,15 @@ class CacheService:
 
         # Async progress save throttling
         self._progress_save_lock = asyncio.Lock()
+        self._db_write_lock = asyncio.Lock()
         self._last_progress_save = 0.0
         self._progress_save_interval = 2.0  # seconds
         self._pending_progress_saves: list[asyncio.Task] = []
+
+    async def _log_activity(self, level: str, message: str, details: dict | None = None) -> None:
+        log_service = self.log_service
+        if log_service is not None:
+            await log_service.log("cache", level, message, details)
 
     @staticmethod
     def _empty_source_cache() -> dict[str, Any]:
@@ -126,6 +151,7 @@ class CacheService:
             "current_source_name": "",
             "current_step": "",
             "percent": 0,
+            "phase": "sources",
             "started_at": None,
             "heartbeat_at": None,
             "finished_at": None,
@@ -142,9 +168,12 @@ class CacheService:
         progress["in_progress"] = bool(progress_data.get("in_progress", progress["in_progress"]))
         progress["current_source"] = int(progress_data.get("current_source", progress["current_source"]) or 0)
         progress["total_sources"] = int(progress_data.get("total_sources", progress["total_sources"]) or 0)
-        progress["current_source_name"] = str(progress_data.get("current_source_name", progress["current_source_name"]) or "")
+        progress["current_source_name"] = str(
+            progress_data.get("current_source_name", progress["current_source_name"]) or ""
+        )
         progress["current_step"] = str(progress_data.get("current_step", progress["current_step"]) or "")
         progress["percent"] = int(progress_data.get("percent", progress["percent"]) or 0)
+        progress["phase"] = str(progress_data.get("phase", progress["phase"]) or "sources")
         progress["started_at"] = progress_data.get("started_at")
         progress["heartbeat_at"] = progress_data.get("heartbeat_at")
         progress["finished_at"] = progress_data.get("finished_at")
@@ -163,7 +192,7 @@ class CacheService:
                 source_results = []
         if not isinstance(source_results, list):
             source_results = []
-        progress["source_results"] = source_results
+        progress["source_results"] = copy.deepcopy(source_results)
 
         if progress["total_sources"] == 0 and source_results:
             progress["total_sources"] = len(source_results)
@@ -179,7 +208,7 @@ class CacheService:
         default_summary = self._default_refresh_summary(progress["total_sources"])
         for key in default_summary:
             if key in summary:
-                default_summary[key] = summary[key]
+                default_summary[key] = copy.deepcopy(summary[key])
         progress["summary"] = default_summary
         return progress
 
@@ -207,10 +236,7 @@ class CacheService:
 
     @staticmethod
     def _build_source_counts(source_cache: dict[str, Any]) -> dict[str, int]:
-        return {
-            key: len(source_cache.get(key, []))
-            for key in REFRESH_SOURCE_KEYS
-        }
+        return {key: len(source_cache.get(key, [])) for key in REFRESH_SOURCE_KEYS}
 
     def _build_refresh_summary(self, source_results: list[dict], total_sources: int) -> dict[str, Any]:
         summary = self._default_refresh_summary(total_sources)
@@ -282,14 +308,22 @@ class CacheService:
                 return
             task = loop.create_task(self.save_refresh_progress_async(progress_data))
             self._pending_progress_saves.append(task)
-            task.add_done_callback(lambda t: self._pending_progress_saves.remove(t) if t in self._pending_progress_saves else None)
+            task.add_done_callback(
+                lambda t: self._pending_progress_saves.remove(t) if t in self._pending_progress_saves else None
+            )
         else:
             self._save_refresh_progress_sync(progress_data)
 
     async def _flush_pending_progress_saves(self) -> None:
-        if self._pending_progress_saves:
-            await asyncio.gather(*self._pending_progress_saves, return_exceptions=True)
-        self._pending_progress_saves.clear()
+        # A save can enqueue another task while the current batch is draining.
+        # Keep draining until no task remains so terminal states cannot race a
+        # late intermediate update.
+        while True:
+            pending = [task for task in self._pending_progress_saves if not task.done()]
+            if not pending:
+                self._pending_progress_saves[:] = [task for task in self._pending_progress_saves if not task.done()]
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
 
     def _save_refresh_progress_sync(self, progress_data: dict) -> None:
         progress_data = self._normalise_refresh_progress(progress_data)
@@ -299,8 +333,8 @@ class CacheService:
                 """INSERT OR REPLACE INTO refresh_progress
                    (id, in_progress, current_source, total_sources,
                     current_source_name, current_step, percent, started_at,
-                    heartbeat_at, status, source_results, summary, finished_at, last_error)
-                   VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   heartbeat_at, status, phase, source_results, summary, finished_at, last_error)
+                   VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     int(progress_data.get("in_progress", False)),
                     progress_data.get("current_source", 0),
@@ -311,6 +345,7 @@ class CacheService:
                     progress_data.get("started_at"),
                     progress_data.get("heartbeat_at"),
                     progress_data.get("status", "idle"),
+                    progress_data.get("phase", "sources"),
                     json.dumps(progress_data.get("source_results", []), ensure_ascii=False),
                     json.dumps(progress_data.get("summary", {}), ensure_ascii=False),
                     progress_data.get("finished_at"),
@@ -333,25 +368,28 @@ class CacheService:
             row = conn.execute(
                 "SELECT in_progress, current_source, total_sources, "
                 "current_source_name, current_step, percent, started_at, "
-                "heartbeat_at, status, source_results, summary, finished_at, last_error "
+                "heartbeat_at, status, phase, source_results, summary, finished_at, last_error "
                 "FROM refresh_progress WHERE id = 1"
             ).fetchone()
             if row:
-                progress = self._normalise_refresh_progress({
-                    "in_progress": bool(row["in_progress"]),
-                    "current_source": row["current_source"],
-                    "total_sources": row["total_sources"],
-                    "current_source_name": row["current_source_name"],
-                    "current_step": row["current_step"],
-                    "percent": row["percent"],
-                    "started_at": row["started_at"],
+                progress = self._normalise_refresh_progress(
+                    {
+                        "in_progress": bool(row["in_progress"]),
+                        "current_source": row["current_source"],
+                        "total_sources": row["total_sources"],
+                        "current_source_name": row["current_source_name"],
+                        "current_step": row["current_step"],
+                        "percent": row["percent"],
+                        "started_at": row["started_at"],
                     "heartbeat_at": row["heartbeat_at"],
                     "status": row["status"],
+                    "phase": row["phase"],
                     "source_results": row["source_results"],
-                    "summary": row["summary"],
-                    "finished_at": row["finished_at"],
-                    "last_error": row["last_error"],
-                })
+                        "summary": row["summary"],
+                        "finished_at": row["finished_at"],
+                        "last_error": row["last_error"],
+                    }
+                )
                 self._api_cache["refresh_progress"] = progress
                 return progress
         except Exception:
@@ -360,10 +398,62 @@ class CacheService:
             conn.close()
         return self._default_refresh_progress()
 
+    # ------------------------------------------------------------------
+    # Database maintenance coordination
+    # ------------------------------------------------------------------
+
+    def is_maintenance_active(self) -> bool:
+        return self._maintenance_active
+
+    def try_begin_maintenance(self) -> bool:
+        """Claim the cache lifecycle for a database maintenance operation."""
+        refresh_active = (
+            self._refresh_lock.locked()
+            or (self._refresh_task is not None and not self._refresh_task.done())
+            or bool(self._api_cache.get("refresh_in_progress"))
+        )
+        if self._maintenance_active or refresh_active:
+            return False
+        self._maintenance_active = True
+        return True
+
+    def end_maintenance(self) -> None:
+        self._maintenance_active = False
+
+    async def prune_sources_to_ids(self, source_ids: set[str]) -> None:
+        """Remove cache entries and persisted catalog rows for unknown sources."""
+        source_ids = {str(source_id) for source_id in source_ids}
+        async with self._cache_lock:
+            sources = self._api_cache.get("sources", {})
+            self._api_cache["sources"] = {
+                source_id: source_cache
+                for source_id, source_cache in sources.items()
+                if source_id in source_ids
+            }
+
+        async with self._db_write_lock:
+            async with adb_transaction(self.db_path) as conn:
+                if source_ids:
+                    placeholders = ",".join("?" * len(source_ids))
+                    params = tuple(source_ids)
+                    for table in ("streams", "source_categories", "source_last_refresh"):
+                        await conn.execute(
+                            f"DELETE FROM {table} WHERE source_id NOT IN ({placeholders})",
+                            params,
+                        )
+                else:
+                    for table in ("streams", "source_categories", "source_last_refresh"):
+                        await conn.execute(f"DELETE FROM {table}")
+
+        self.invalidate_group_counts_cache()
+        await self.rebuild_stream_source_map()
+        await asyncio.to_thread(self._rebuild_stream_index)
+
     def clear_refresh_progress(self, status: str = "cancelled", last_error: str = "") -> None:
         progress = self.load_refresh_progress()
         progress["in_progress"] = False
         progress["status"] = status
+        progress["phase"] = "cancelled" if status == "cancelled" else "complete"
         progress["current_step"] = "Cancelled" if status == "cancelled" else ""
         progress["current_source_name"] = ""
         progress["percent"] = 0 if status == "cancelled" else progress.get("percent", 0)
@@ -375,39 +465,52 @@ class CacheService:
         )
         self.save_refresh_progress(progress)
 
-    async def save_refresh_progress_async(self, progress_data: dict) -> None:
+    async def _write_refresh_progress_async(self, progress_data: dict) -> None:
+        """Persist progress with bounded retries for transient SQLite locks."""
+        for attempt in range(4):
+            try:
+                async with self._db_write_lock:
+                    async with adb_transaction(self.db_path) as conn:
+                        await conn.execute(
+                            """INSERT OR REPLACE INTO refresh_progress
+                               (id, in_progress, current_source, total_sources,
+                                current_source_name, current_step, percent, started_at,
+                                heartbeat_at, status, phase, source_results, summary, finished_at, last_error)
+                               VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (
+                                int(progress_data.get("in_progress", False)),
+                                progress_data.get("current_source", 0),
+                                progress_data.get("total_sources", 0),
+                                progress_data.get("current_source_name", ""),
+                                progress_data.get("current_step", ""),
+                                progress_data.get("percent", 0),
+                                progress_data.get("started_at"),
+                                progress_data.get("heartbeat_at"),
+                                progress_data.get("status", "idle"),
+                                progress_data.get("phase", "sources"),
+                                json.dumps(progress_data.get("source_results", []), ensure_ascii=False),
+                                json.dumps(progress_data.get("summary", {}), ensure_ascii=False),
+                                progress_data.get("finished_at"),
+                                progress_data.get("last_error", ""),
+                            ),
+                        )
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 3:
+                    raise
+                await asyncio.sleep(0.1 * (2**attempt))
+
+    async def save_refresh_progress_async(self, progress_data: dict, force: bool = False) -> None:
         progress_data = self._normalise_refresh_progress(progress_data)
         # Always update in-memory state so the UI sees the latest progress
         self._api_cache["refresh_progress"] = progress_data
         async with self._progress_save_lock:
             now = time.time()
-            if now - self._last_progress_save < self._progress_save_interval:
+            if not force and now - self._last_progress_save < self._progress_save_interval:
                 return
             self._last_progress_save = now
             try:
-                async with adb_transaction(self.db_path) as conn:
-                    await conn.execute(
-                        """INSERT OR REPLACE INTO refresh_progress
-                           (id, in_progress, current_source, total_sources,
-                            current_source_name, current_step, percent, started_at,
-                            heartbeat_at, status, source_results, summary, finished_at, last_error)
-                           VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (
-                            int(progress_data.get("in_progress", False)),
-                            progress_data.get("current_source", 0),
-                            progress_data.get("total_sources", 0),
-                            progress_data.get("current_source_name", ""),
-                            progress_data.get("current_step", ""),
-                            progress_data.get("percent", 0),
-                            progress_data.get("started_at"),
-                            progress_data.get("heartbeat_at"),
-                            progress_data.get("status", "idle"),
-                            json.dumps(progress_data.get("source_results", []), ensure_ascii=False),
-                            json.dumps(progress_data.get("summary", {}), ensure_ascii=False),
-                            progress_data.get("finished_at"),
-                            progress_data.get("last_error", ""),
-                        ),
-                    )
+                await self._write_refresh_progress_async(progress_data)
             except Exception as e:
                 logger.warning(f"Failed to save progress async: {e}")
 
@@ -417,27 +520,30 @@ class CacheService:
                 async with conn.execute(
                     "SELECT in_progress, current_source, total_sources, "
                     "current_source_name, current_step, percent, started_at, "
-                    "heartbeat_at, status, source_results, summary, finished_at, last_error "
+                    "heartbeat_at, status, phase, source_results, summary, finished_at, last_error "
                     "FROM refresh_progress WHERE id = 1"
                 ) as cursor:
                     row = await cursor.fetchone()
                     if row:
                         d = _row_to_dict(row)
-                        return self._normalise_refresh_progress({
-                            "in_progress": bool(d["in_progress"]),
-                            "current_source": d["current_source"],
-                            "total_sources": d["total_sources"],
-                            "current_source_name": d["current_source_name"],
-                            "current_step": d["current_step"],
-                            "percent": d["percent"],
-                            "started_at": d["started_at"],
-                            "heartbeat_at": d.get("heartbeat_at"),
-                            "status": d["status"],
-                            "source_results": d["source_results"],
-                            "summary": d["summary"],
-                            "finished_at": d["finished_at"],
-                            "last_error": d["last_error"],
-                        })
+                        return self._normalise_refresh_progress(
+                            {
+                                "in_progress": bool(d["in_progress"]),
+                                "current_source": d["current_source"],
+                                "total_sources": d["total_sources"],
+                                "current_source_name": d["current_source_name"],
+                                "current_step": d["current_step"],
+                                "percent": d["percent"],
+                                "started_at": d["started_at"],
+                                "heartbeat_at": d.get("heartbeat_at"),
+                                "status": d["status"],
+                                "phase": d.get("phase", "sources"),
+                                "source_results": d["source_results"],
+                                "summary": d["summary"],
+                                "finished_at": d["finished_at"],
+                                "last_error": d["last_error"],
+                            }
+                        )
         except Exception:
             pass
         return self._default_refresh_progress()
@@ -450,9 +556,7 @@ class CacheService:
         conn = db_connect(self.db_path)
         try:
             # Global last_refresh
-            meta_row = conn.execute(
-                "SELECT last_refresh FROM cache_meta WHERE id = 1"
-            ).fetchone()
+            meta_row = conn.execute("SELECT last_refresh FROM cache_meta WHERE id = 1").fetchone()
             if meta_row:
                 self._api_cache["last_refresh"] = meta_row["last_refresh"]
 
@@ -464,8 +568,7 @@ class CacheService:
 
             # Per-source streams
             stream_rows = conn.execute(
-                "SELECT source_id, content_type, stream_id, data "
-                "FROM streams ORDER BY source_id, content_type"
+                "SELECT source_id, content_type, stream_id, data FROM streams ORDER BY source_id, content_type"
             ).fetchall()
 
             sources: dict[str, dict] = {}
@@ -486,9 +589,13 @@ class CacheService:
                 ct = row["content_type"]
                 if src not in sources:
                     sources[src] = {
-                        "live_categories": [], "vod_categories": [],
-                        "series_categories": [], "live_streams": [],
-                        "vod_streams": [], "series": [], "last_refresh": None,
+                        "live_categories": [],
+                        "vod_categories": [],
+                        "series_categories": [],
+                        "live_streams": [],
+                        "vod_streams": [],
+                        "series": [],
+                        "last_refresh": None,
                     }
                 key = CAT_KEY.get(ct)
                 if key:
@@ -502,21 +609,24 @@ class CacheService:
                 ct = row["content_type"]
                 if src not in sources:
                     sources[src] = {
-                        "live_categories": [], "vod_categories": [],
-                        "series_categories": [], "live_streams": [],
-                        "vod_streams": [], "series": [], "last_refresh": None,
+                        "live_categories": [],
+                        "vod_categories": [],
+                        "series_categories": [],
+                        "live_streams": [],
+                        "vod_streams": [],
+                        "series": [],
+                        "last_refresh": None,
                     }
                 key = STREAM_KEY.get(ct)
                 if key:
                     try:
-                        sources[src][key].append(json.loads(row["data"]))
+                        full_data = json.loads(row["data"])
+                        sources[src][key].append(self._slim_stream(full_data, ct))
                     except (json.JSONDecodeError, TypeError):
                         pass
 
             # Per-source last_refresh from separate table
-            src_refresh_rows = conn.execute(
-                "SELECT source_id, last_refresh FROM source_last_refresh"
-            ).fetchall()
+            src_refresh_rows = conn.execute("SELECT source_id, last_refresh FROM source_last_refresh").fetchall()
             for rr in src_refresh_rows:
                 if rr["source_id"] in sources:
                     sources[rr["source_id"]]["last_refresh"] = rr["last_refresh"]
@@ -527,9 +637,7 @@ class CacheService:
                 self._inject_source_info()
                 self._rebuild_stream_source_map_sync()
                 self._rebuild_stream_index()
-                logger.info(
-                    f"Loaded cache from DB. Last refresh: {self._api_cache.get('last_refresh', 'Never')}"
-                )
+                logger.info(f"Loaded cache from DB. Last refresh: {self._api_cache.get('last_refresh', 'Never')}")
             else:
                 logger.info("DB cache is empty — will refresh on first request")
         except Exception as e:
@@ -539,9 +647,7 @@ class CacheService:
 
     async def load_cache_from_disk_async(self) -> None:
         async with adb_transaction(self.db_path) as conn:
-            async with conn.execute(
-                "SELECT last_refresh FROM cache_meta WHERE id = 1"
-            ) as cursor:
+            async with conn.execute("SELECT last_refresh FROM cache_meta WHERE id = 1") as cursor:
                 meta_row = await cursor.fetchone()
             if meta_row:
                 self._api_cache["last_refresh"] = meta_row["last_refresh"]
@@ -553,14 +659,11 @@ class CacheService:
                 cat_rows = await cursor.fetchall()
 
             async with conn.execute(
-                "SELECT source_id, content_type, stream_id, data "
-                "FROM streams ORDER BY source_id, content_type"
+                "SELECT source_id, content_type, stream_id, data FROM streams ORDER BY source_id, content_type"
             ) as cursor:
                 stream_rows = await cursor.fetchall()
 
-            async with conn.execute(
-                "SELECT source_id, last_refresh FROM source_last_refresh"
-            ) as cursor:
+            async with conn.execute("SELECT source_id, last_refresh FROM source_last_refresh") as cursor:
                 src_refresh_rows = await cursor.fetchall()
 
         sources: dict[str, dict] = {}
@@ -581,9 +684,13 @@ class CacheService:
             ct = row["content_type"]
             if src not in sources:
                 sources[src] = {
-                    "live_categories": [], "vod_categories": [],
-                    "series_categories": [], "live_streams": [],
-                    "vod_streams": [], "series": [], "last_refresh": None,
+                    "live_categories": [],
+                    "vod_categories": [],
+                    "series_categories": [],
+                    "live_streams": [],
+                    "vod_streams": [],
+                    "series": [],
+                    "last_refresh": None,
                 }
             key = CAT_KEY.get(ct)
             if key:
@@ -597,14 +704,19 @@ class CacheService:
             ct = row["content_type"]
             if src not in sources:
                 sources[src] = {
-                    "live_categories": [], "vod_categories": [],
-                    "series_categories": [], "live_streams": [],
-                    "vod_streams": [], "series": [], "last_refresh": None,
+                    "live_categories": [],
+                    "vod_categories": [],
+                    "series_categories": [],
+                    "live_streams": [],
+                    "vod_streams": [],
+                    "series": [],
+                    "last_refresh": None,
                 }
             key = STREAM_KEY.get(ct)
             if key:
                 try:
-                    sources[src][key].append(json.loads(row["data"]))
+                    full_data = json.loads(row["data"])
+                    sources[src][key].append(self._slim_stream(full_data, ct))
                 except (json.JSONDecodeError, TypeError):
                     pass
 
@@ -627,9 +739,7 @@ class CacheService:
             self._inject_source_info()
             await asyncio.to_thread(self._rebuild_stream_source_map_sync)
             await asyncio.to_thread(self._rebuild_stream_index)
-            logger.info(
-                f"Loaded cache from DB. Last refresh: {self._api_cache.get('last_refresh', 'Never')}"
-            )
+            logger.info(f"Loaded cache from DB. Last refresh: {self._api_cache.get('last_refresh', 'Never')}")
         else:
             logger.info("DB cache is empty — will refresh on first request")
 
@@ -671,18 +781,33 @@ class CacheService:
             ]
 
             for source_id, src_cache in sources.items():
+                preserved_steps = set(src_cache.get("_preserved_steps", []))
+                cat_names: dict[tuple[str, str], str] = {}
                 cat_rows = []
                 for cat_key, ct in CAT_MAP:
                     for cat in src_cache.get(cat_key, []):
-                        cat_rows.append((
-                            source_id, ct,
-                            str(cat.get("category_id", "")),
-                            cat.get("category_name", ""),
-                            json.dumps(cat, ensure_ascii=False),
-                        ))
+                        cid = str(cat.get("category_id", ""))
+                        if (ct, cid) not in cat_names:
+                            cat_names[(ct, cid)] = cat.get("category_name", "")
+                    if cat_key not in src_cache or cat_key in preserved_steps:
+                        continue
+                    conn.execute(
+                        "DELETE FROM source_categories WHERE source_id=? AND content_type=?",
+                        (source_id, ct),
+                    )
+                    for cat in src_cache.get(cat_key, []):
+                        cat_rows.append(
+                            (
+                                source_id,
+                                ct,
+                                str(cat.get("category_id", "")),
+                                cat.get("category_name", ""),
+                                json.dumps(cat, ensure_ascii=False),
+                            )
+                        )
                 if cat_rows:
                     conn.executemany(
-                        "INSERT OR REPLACE INTO source_categories "
+                        "INSERT OR IGNORE INTO source_categories "
                         "(source_id, content_type, category_id, category_name, data) "
                         "VALUES (?,?,?,?,?)",
                         cat_rows,
@@ -690,6 +815,12 @@ class CacheService:
 
                 stream_rows = []
                 for list_key, ct, id_field in TYPE_MAP:
+                    if list_key not in src_cache or list_key in preserved_steps:
+                        continue
+                    conn.execute(
+                        "DELETE FROM streams WHERE source_id=? AND content_type=?",
+                        (source_id, ct),
+                    )
                     for stream in src_cache.get(list_key, []):
                         sid = str(stream.get(id_field, ""))
                         if not sid:
@@ -699,18 +830,41 @@ class CacheService:
                             added = int(added_raw) if added_raw else 0
                         except (ValueError, TypeError):
                             added = 0
-                        stream_rows.append((
-                            source_id, ct, sid,
-                            stream.get("name", ""),
-                            str(stream.get("category_id", "")),
-                            added,
-                            json.dumps(stream, ensure_ascii=False),
-                        ))
+                        try:
+                            rating = float(stream.get("rating") or 0)
+                        except (ValueError, TypeError):
+                            rating = 0.0
+                        group_name = cat_names.get(
+                            (ct, str(stream.get("category_id", ""))), "Unknown"
+                        )
+                        icon = stream.get("stream_icon") or stream.get("cover") or ""
+                        raw_tmdb = stream.get("tmdb_id") or stream.get("tmdb")
+                        tmdb_value = str(raw_tmdb) if raw_tmdb else None
+                        container_ext = (
+                            str(stream.get("container_extension") or "mp4") if ct == "vod" else ""
+                        )
+                        stream_rows.append(
+                            (
+                                source_id,
+                                ct,
+                                sid,
+                                stream.get("name", ""),
+                                str(stream.get("category_id", "")),
+                                added,
+                                json.dumps(stream, ensure_ascii=False),
+                                group_name,
+                                rating,
+                                icon,
+                                tmdb_value,
+                                container_ext,
+                            )
+                        )
                 if stream_rows:
                     conn.executemany(
-                        "INSERT OR REPLACE INTO streams "
-                        "(source_id, content_type, stream_id, name, category_id, added, data) "
-                        "VALUES (?,?,?,?,?,?,?)",
+                        "INSERT OR IGNORE INTO streams "
+                        "(source_id, content_type, stream_id, name, category_id, added, data, "
+                        "group_name, rating, icon, tmdb_id, container_ext) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                         stream_rows,
                     )
 
@@ -729,6 +883,7 @@ class CacheService:
                 )
 
             conn.commit()
+            self.invalidate_group_counts_cache()
             logger.info(f"Cache saved to DB at {datetime.now(timezone.utc).isoformat()}")
         except Exception as e:
             logger.error(f"Failed to save cache to DB: {e}")
@@ -736,6 +891,10 @@ class CacheService:
             conn.close()
 
     async def save_cache_to_disk_async(self) -> None:
+        async with self._db_write_lock:
+            await self._save_cache_to_disk_async_unlocked()
+
+    async def _save_cache_to_disk_async_unlocked(self) -> None:
         async with adb_transaction(self.db_path) as conn:
             sources = self._api_cache.get("sources", {})
 
@@ -772,18 +931,33 @@ class CacheService:
             ]
 
             for source_id, src_cache in sources.items():
+                preserved_steps = set(src_cache.get("_preserved_steps", []))
+                cat_names: dict[tuple[str, str], str] = {}
                 cat_rows = []
                 for cat_key, ct in CAT_MAP:
                     for cat in src_cache.get(cat_key, []):
-                        cat_rows.append((
-                            source_id, ct,
-                            str(cat.get("category_id", "")),
-                            cat.get("category_name", ""),
-                            json.dumps(cat, ensure_ascii=False),
-                        ))
+                        cid = str(cat.get("category_id", ""))
+                        if (ct, cid) not in cat_names:
+                            cat_names[(ct, cid)] = cat.get("category_name", "")
+                    if cat_key not in src_cache or cat_key in preserved_steps:
+                        continue
+                    await conn.execute(
+                        "DELETE FROM source_categories WHERE source_id=? AND content_type=?",
+                        (source_id, ct),
+                    )
+                    for cat in src_cache.get(cat_key, []):
+                        cat_rows.append(
+                            (
+                                source_id,
+                                ct,
+                                str(cat.get("category_id", "")),
+                                cat.get("category_name", ""),
+                                json.dumps(cat, ensure_ascii=False),
+                            )
+                        )
                 if cat_rows:
                     await conn.executemany(
-                        "INSERT OR REPLACE INTO source_categories "
+                        "INSERT OR IGNORE INTO source_categories "
                         "(source_id, content_type, category_id, category_name, data) "
                         "VALUES (?,?,?,?,?)",
                         cat_rows,
@@ -791,6 +965,12 @@ class CacheService:
 
                 stream_rows = []
                 for list_key, ct, id_field in TYPE_MAP:
+                    if list_key not in src_cache or list_key in preserved_steps:
+                        continue
+                    await conn.execute(
+                        "DELETE FROM streams WHERE source_id=? AND content_type=?",
+                        (source_id, ct),
+                    )
                     for stream in src_cache.get(list_key, []):
                         sid = str(stream.get(id_field, ""))
                         if not sid:
@@ -800,18 +980,41 @@ class CacheService:
                             added = int(added_raw) if added_raw else 0
                         except (ValueError, TypeError):
                             added = 0
-                        stream_rows.append((
-                            source_id, ct, sid,
-                            stream.get("name", ""),
-                            str(stream.get("category_id", "")),
-                            added,
-                            json.dumps(stream, ensure_ascii=False),
-                        ))
+                        try:
+                            rating = float(stream.get("rating") or 0)
+                        except (ValueError, TypeError):
+                            rating = 0.0
+                        group_name = cat_names.get(
+                            (ct, str(stream.get("category_id", ""))), "Unknown"
+                        )
+                        icon = stream.get("stream_icon") or stream.get("cover") or ""
+                        raw_tmdb = stream.get("tmdb_id") or stream.get("tmdb")
+                        tmdb_value = str(raw_tmdb) if raw_tmdb else None
+                        container_ext = (
+                            str(stream.get("container_extension") or "mp4") if ct == "vod" else ""
+                        )
+                        stream_rows.append(
+                            (
+                                source_id,
+                                ct,
+                                sid,
+                                stream.get("name", ""),
+                                str(stream.get("category_id", "")),
+                                added,
+                                json.dumps(stream, ensure_ascii=False),
+                                group_name,
+                                rating,
+                                icon,
+                                tmdb_value,
+                                container_ext,
+                            )
+                        )
                 if stream_rows:
                     await conn.executemany(
-                        "INSERT OR REPLACE INTO streams "
-                        "(source_id, content_type, stream_id, name, category_id, added, data) "
-                        "VALUES (?,?,?,?,?,?,?)",
+                        "INSERT OR IGNORE INTO streams "
+                        "(source_id, content_type, stream_id, name, category_id, added, data, "
+                        "group_name, rating, icon, tmdb_id, container_ext) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                         stream_rows,
                     )
 
@@ -829,6 +1032,7 @@ class CacheService:
                     (global_refresh,),
                 )
 
+        self.invalidate_group_counts_cache()
         logger.info(f"Cache saved to DB at {datetime.now(timezone.utc).isoformat()}")
 
     def save_cache_to_disk(self) -> None:
@@ -870,6 +1074,101 @@ class CacheService:
                     item["_source_id"] = src_id
                     item["_source_name"] = src_name
 
+    @staticmethod
+    def _slim_stream(stream: dict, content_type: str) -> dict:
+        """Extract only the fields needed for routing, M3U, monitoring, and display."""
+        slim: dict = {}
+        # ID fields
+        if content_type == "series":
+            slim["series_id"] = stream.get("series_id", "")
+        else:
+            slim["stream_id"] = stream.get("stream_id", "")
+        # Common fields
+        slim["name"] = stream.get("name", "")
+        slim["category_id"] = stream.get("category_id", "")
+        slim["added"] = stream.get("added") or stream.get("last_modified", 0)
+        # Icon/cover
+        slim["stream_icon"] = stream.get("stream_icon", "")
+        slim["cover"] = stream.get("cover", "")
+        # Type-specific fields
+        if content_type == "live":
+            slim["epg_channel_id"] = stream.get("epg_channel_id", "")
+        elif content_type == "vod":
+            slim["container_extension"] = stream.get("container_extension", "mp4")
+            slim["tmdb_id"] = stream.get("tmdb_id", "")
+            slim["tmdb"] = stream.get("tmdb", "")
+            slim["rating"] = stream.get("rating", 0)
+        elif content_type == "series":
+            slim["tmdb_id"] = stream.get("tmdb_id", "")
+            slim["tmdb"] = stream.get("tmdb", "")
+            slim["imdb_id"] = stream.get("imdb_id", "")
+            slim["imdb"] = stream.get("imdb", "")
+        return slim
+
+    def _slim_cache_in_memory(self) -> None:
+        """Replace full stream dicts in the in-memory cache with slim versions.
+
+        Call this AFTER the full data has been persisted to SQLite. The slim
+        dicts contain only the fields needed for routing, M3U, monitoring,
+        and display — the full upstream JSON blob stays in the DB only.
+        """
+        STREAM_KEYS = {
+            "live_streams": "live",
+            "vod_streams": "vod",
+            "series": "series",
+        }
+        sources = self._api_cache.get("sources", {})
+        for _src_id, src_cache in sources.items():
+            for list_key, ct in STREAM_KEYS.items():
+                slim_list = [self._slim_stream(item, ct) for item in src_cache.get(list_key, [])]
+                src_cache[list_key] = slim_list
+
+    def get_stream_full_data(self, content_type: str, source_id: str, stream_id: str) -> dict | None:
+        """Fetch the full stream JSON from SQLite on demand.
+
+        Use this when a consumer (e.g. Xtream API emulation) needs the
+        complete upstream data blob that is no longer kept in memory.
+        """
+        conn = db_connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT data FROM streams WHERE source_id=? AND content_type=? AND stream_id=?",
+                (source_id, content_type, stream_id),
+            ).fetchone()
+            if row:
+                try:
+                    return json.loads(row["data"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        finally:
+            conn.close()
+        return None
+
+    def get_streams_full_data_batch(self, content_type: str, source_id: str, stream_ids: list[str]) -> dict[str, dict]:
+        """Fetch multiple full stream JSON blobs from SQLite in one query.
+
+        Returns a dict mapping stream_id -> full stream dict.
+        """
+        if not stream_ids:
+            return {}
+        conn = db_connect(self.db_path)
+        try:
+            placeholders = ",".join("?" * len(stream_ids))
+            rows = conn.execute(
+                f"SELECT stream_id, data FROM streams "
+                f"WHERE source_id=? AND content_type=? AND stream_id IN ({placeholders})",
+                [source_id, content_type] + stream_ids,
+            ).fetchall()
+            result: dict[str, dict] = {}
+            for row in rows:
+                try:
+                    result[row["stream_id"]] = json.loads(row["data"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            return result
+        finally:
+            conn.close()
+
     def _rebuild_stream_index(self) -> None:
         """Build a (content_type, source_id, stream_id) → dict lookup index."""
         idx: dict[tuple[str, str, str], dict] = {}
@@ -888,9 +1187,7 @@ class CacheService:
         self._stream_index = idx
         logger.debug(f"Built stream index with {len(idx)} entries")
 
-    def get_streams_by_ids(
-        self, content_type: str, id_set: set[tuple[str, str]]
-    ) -> list[dict]:
+    def get_streams_by_ids(self, content_type: str, id_set: set[tuple[str, str]]) -> list[dict]:
         """Return stream dicts for a set of (stream_id, source_id) pairs.
 
         Uses the pre-built ``_stream_index`` for O(1) lookups per item,
@@ -909,6 +1206,616 @@ class CacheService:
         for src_cache in self._api_cache.get("sources", {}).values():
             result.extend(src_cache.get(category_key, []))
         return result
+
+    # ------------------------------------------------------------------
+    # SQLite-backed browse
+    # ------------------------------------------------------------------
+
+    def _ensure_denormalized(self, conn) -> None:
+        """Heal rows written before group_name/rating denormalization.
+
+        The EXISTS probe is an indexed no-op on healthy databases; the update
+        only runs when legacy rows (group_name IS NULL) are detected.
+        """
+        missing = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM streams WHERE group_name IS NULL)"
+        ).fetchone()[0]
+        if not missing:
+            return
+        conn.execute(backfill_streams_denormalized_sql())
+        conn.commit()
+
+    def browse_channels_db(
+        self,
+        content_type: str,
+        source: str = "",
+        search: str = "",
+        group: str = "",
+        page: int = 1,
+        per_page: int = 100,
+    ) -> dict:
+        """Return a bounded page of lightweight channel names and groups."""
+        conn = db_connect(self.db_path)
+        try:
+            self._ensure_denormalized(conn)
+            conditions = ["s.content_type = ?"]
+            params: list = [content_type]
+            if source:
+                conditions.append("s.source_id = ?")
+                params.append(source)
+            if search:
+                conditions.append("lower(s.name) LIKE lower(?)")
+                params.append(f"%{search}%")
+            if group:
+                conditions.append("s.group_name = ?")
+                params.append(group)
+            where_clause = " AND ".join(conditions)
+
+            total = conn.execute(
+                f"SELECT COUNT(*) AS cnt FROM streams s WHERE {where_clause}",
+                params,
+            ).fetchone()["cnt"]
+            offset = max(0, page - 1) * per_page
+            rows = conn.execute(
+                f"""
+                SELECT s.name, s.group_name AS group_name
+                FROM streams s
+                WHERE {where_clause}
+                ORDER BY lower(s.name), s.source_id, s.stream_id
+                LIMIT ? OFFSET ?
+                """,
+                params + [per_page, offset],
+            ).fetchall()
+            items = [
+                {"name": row["name"] or "", "group": row["group_name"] or "Unknown"}
+                for row in rows
+            ]
+            return {
+                "items": items,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": (total + per_page - 1) // per_page if total else 0,
+            }
+        finally:
+            conn.close()
+
+    def invalidate_group_counts_cache(self) -> None:
+        """Drop cached browse group metadata after catalog data changes."""
+        with self._group_counts_lock:
+            self._group_counts_generation += 1
+            self._group_counts_cache.clear()
+            self._rule_total_cache.clear()
+
+    def _query_group_counts(
+        self,
+        conn,
+        content_types: list[str],
+        source: str = "",
+        news_days: int = 0,
+        max_added_days: int = 0,
+        tmdb_search_id: str | None = None,
+        category_id: str = "",
+        category_mode: str = "manual",
+    ) -> tuple[dict[str, int], dict[str, str]]:
+        """Aggregate browse group/source metadata for the given scope."""
+        self._ensure_denormalized(conn)
+        current_time = int(time.time())
+        news_cutoff = current_time - (news_days * 86400) if news_days > 0 else 0
+        added_cutoff = current_time - (max_added_days * 86400) if max_added_days > 0 else 0
+
+        if category_id:
+            category_table = (
+                "category_cached_items" if category_mode == "automatic" else "category_manual_items"
+            )
+            from_clause = (
+                f"{category_table} ci JOIN streams s "
+                "ON s.source_id = ci.source_id "
+                "AND s.content_type = ci.content_type "
+                "AND s.stream_id = ci.stream_id"
+            )
+            conditions: list[str] = ["ci.category_id = ?"]
+            params: list = [category_id]
+        else:
+            from_clause = "streams s"
+            if len(content_types) == 1:
+                conditions = ["s.content_type = ?"]
+                params = [content_types[0]]
+            else:
+                placeholders = ",".join("?" * len(content_types))
+                conditions = [f"s.content_type IN ({placeholders})"]
+                params = list(content_types)
+        if source:
+            conditions.append("s.source_id = ?")
+            params.append(source)
+        if news_days > 0:
+            conditions.append("s.added >= ?")
+            params.append(news_cutoff)
+        if max_added_days > 0:
+            conditions.append("s.added >= ?")
+            params.append(added_cutoff)
+        if tmdb_search_id is not None:
+            conditions.append(
+                "(json_extract(s.data, '$.tmdb_id') = ? OR "
+                "json_extract(s.data, '$.tmdb') = ? OR "
+                "json_extract(s.data, '$.tmdb_id') = ? OR "
+                "json_extract(s.data, '$.tmdb') = ?)"
+            )
+            tmdb_prefixed = f"tmdb:{tmdb_search_id}"
+            params.extend([tmdb_search_id, tmdb_search_id, tmdb_prefixed, tmdb_prefixed])
+
+        where_clause = " AND ".join(conditions)
+        rows = conn.execute(
+            f"""
+            SELECT COALESCE(NULLIF(s.group_name, ''), 'Unknown') as grp, COUNT(*) as cnt,
+                   s.source_id
+            FROM {from_clause}
+            WHERE {where_clause}
+            GROUP BY grp, s.source_id
+            """,
+            params,
+        ).fetchall()
+
+        source_names = self._source_names
+        group_counts: dict[str, int] = {}
+        source_set: dict[str, str] = {}
+        for row in rows:
+            grp = row["grp"]
+            group_counts[grp] = group_counts.get(grp, 0) + row["cnt"]
+            src_id = row["source_id"]
+            if src_id:
+                source_set[src_id] = source_names.get(src_id, "Unknown")
+        return group_counts, source_set
+
+    def _scope_count(
+        self,
+        conn,
+        content_types: list[str],
+        source: str = "",
+        group: str = "",
+        category_id: str = "",
+        category_mode: str = "manual",
+    ) -> int:
+        """Count rows for a baseline scope without touching wide columns."""
+        params: list = []
+        if category_id:
+            category_table = (
+                "category_cached_items" if category_mode == "automatic" else "category_manual_items"
+            )
+            sql = (
+                f"SELECT COUNT(*) AS cnt FROM {category_table} ci "
+                "JOIN streams s ON s.source_id = ci.source_id "
+                "AND s.content_type = ci.content_type AND s.stream_id = ci.stream_id "
+                "WHERE ci.category_id = ?"
+            )
+            params.append(category_id)
+        else:
+            if len(content_types) == 1:
+                sql = "SELECT COUNT(*) AS cnt FROM streams s WHERE s.content_type = ?"
+                params.append(content_types[0])
+            else:
+                placeholders = ",".join("?" * len(content_types))
+                sql = f"SELECT COUNT(*) AS cnt FROM streams s WHERE s.content_type IN ({placeholders})"
+                params.extend(content_types)
+        if source:
+            sql += " AND s.source_id = ?"
+            params.append(source)
+        if group:
+            sql += " AND s.group_name = ?"
+            params.append(group)
+        return conn.execute(sql, params).fetchone()["cnt"]
+
+    def _get_scope_metadata(
+        self,
+        content_types: list[str],
+        source: str = "",
+        group: str = "",
+        category_id: str = "",
+        category_mode: str = "manual",
+    ) -> tuple[int, dict[str, int], dict[str, str]]:
+        """Return baseline totals/facets via the metadata cache.
+
+        The generation counter guards against writing aggregates that were
+        computed before a concurrent invalidation (e.g. a refresh finishing).
+        Group filters are part of the key: totals must respect them, while
+        facets intentionally keep their unfiltered-by-group semantics.
+        """
+        types_key = tuple(sorted(content_types))
+        category_key = f"{category_mode}:{category_id}" if category_id else ""
+        key = (types_key, source, group, category_key)
+        with self._group_counts_lock:
+            entry = self._group_counts_cache.get(key)
+            generation = self._group_counts_generation
+        if entry is not None:
+            return entry["total"], entry["group_counts"], entry["source_set"]
+
+        conn = db_connect(self.db_path)
+        try:
+            total = self._scope_count(
+                conn, content_types,
+                source=source, group=group,
+                category_id=category_id, category_mode=category_mode,
+            )
+            group_counts, source_set = self._query_group_counts(
+                conn, content_types,
+                source=source, category_id=category_id, category_mode=category_mode,
+            )
+        finally:
+            conn.close()
+
+        with self._group_counts_lock:
+            if self._group_counts_generation == generation:
+                self._group_counts_cache[key] = {
+                    "total": total,
+                    "group_counts": group_counts,
+                    "source_set": source_set,
+                }
+        return total, group_counts, source_set
+
+    def _get_group_counts(self, content_type: str, source: str = "") -> tuple[dict[str, int], dict[str, str]]:
+        """Return baseline group/source metadata via the metadata cache."""
+        _total, group_counts, source_set = self._get_scope_metadata([content_type], source=source)
+        return group_counts, source_set
+
+    def browse_group_counts_db(self, content_type: str, source: str = "") -> list[dict]:
+        """Aggregate browse groups in SQLite without loading stream rows."""
+        _total, group_counts, _source_set = self._get_scope_metadata([content_type], source=source)
+        return [{"name": name, "count": count} for name, count in sorted(group_counts.items())]
+
+    def _browse_item_from_row(self, row, source_names: dict[str, str]) -> dict:
+        """Shape a full (non-slim) streams row into the browse item contract."""
+        src_id = row["source_id"]
+        rating_val = float(row["rating"]) if row["rating"] else 0.0
+
+        item_data = {
+            "name": row["name"],
+            "group": row["group_name"],
+            "icon": row["icon"] or "",
+            "id": str(row["stream_id"]),
+            "source_id": src_id,
+            "source_name": source_names.get(src_id, "Unknown"),
+            "added": row["added"] or 0,
+            "rating": rating_val,
+            "content_type": row["content_type"],
+        }
+        if row["content_type"] in ("vod", "series"):
+            item_data["tmdb_id"] = row["tmdb_id"] if row["tmdb_id"] else None
+        if row["content_type"] == "vod":
+            item_data["container_extension"] = row["container_ext"] or "mp4"
+        return item_data
+
+    def hydrate_browse_items(self, keys: list[tuple[str, str, str]]) -> list[dict]:
+        """Fetch full browse items for (stream_id, source_id, content_type) keys.
+
+        Preserves the caller's key order; used to rebuild final pages after
+        slim catalog scans without ever materializing the whole catalog.
+        """
+        if not keys:
+            return []
+        conn = db_connect(self.db_path)
+        source_names = self._source_names
+        found: dict[tuple[str, str, str], dict] = {}
+        try:
+            self._ensure_denormalized(conn)
+            chunk_size = 300
+            for start in range(0, len(keys), chunk_size):
+                chunk = keys[start : start + chunk_size]
+                conditions = " OR ".join(
+                    "(s.stream_id=? AND s.source_id=? AND s.content_type=?)"
+                    for _ in chunk
+                )
+                params: list = []
+                for stream_id, source_id, content_type in chunk:
+                    params.extend([stream_id, source_id, content_type])
+                rows = conn.execute(
+                    f"""
+                    SELECT s.source_id, s.content_type, s.stream_id, s.name,
+                           s.category_id, s.added, s.rating, s.icon, s.tmdb_id,
+                           s.container_ext,
+                           COALESCE(NULLIF(s.group_name, ''), 'Unknown') as group_name
+                    FROM streams s
+                    WHERE {conditions}
+                    """,
+                    params,
+                ).fetchall()
+                for row in rows:
+                    found[(row["stream_id"], row["source_id"], row["content_type"])] = (
+                        self._browse_item_from_row(row, source_names)
+                    )
+        finally:
+            conn.close()
+        return [found[key] for key in keys if key in found]
+
+    def browse_streams_db(
+        self,
+        content_type: str | list[str],
+        search: str = "",
+        group: str = "",
+        source: str = "",
+        news_days: int = 0,
+        min_rating: float = 0,
+        max_added_days: int = 0,
+        sort_by: str = "",
+        sort_order: str = "desc",
+        page: int = 1,
+        per_page: int = 50,
+        tmdb_search_id: str | None = None,
+        category_id: str = "",
+        category_mode: str = "manual",
+        extra_where_sql: str = "",
+        extra_where_params: list | None = None,
+        _slim: bool = False,
+    ) -> dict:
+        """Query streams directly from SQLite with filters, sort and pagination.
+
+        Returns a dict with: {items, total, page, per_page, total_pages,
+        group_counts, source_counts} where items are lightweight dicts
+        containing only the fields needed by the browse UI.
+
+        extra_where_sql/params inject caller-built predicates (e.g. source
+        filter rules) into count and page queries; facets intentionally stay
+        rule-agnostic. _slim skips the wide JSON column entirely for cheap
+        catalog scans; hydrated rows must then be rebuilt by the caller.
+        """
+        current_time = int(time.time())
+        news_cutoff = current_time - (news_days * 86400) if news_days > 0 else 0
+        added_cutoff = current_time - (max_added_days * 86400) if max_added_days > 0 else 0
+        content_types = [content_type] if isinstance(content_type, str) else list(content_type)
+        if not content_types:
+            return {
+                "items": [],
+                "total": 0,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": 0,
+                "group_counts": {},
+                "source_set": {},
+            }
+
+        conn = db_connect(self.db_path)
+        try:
+            self._ensure_denormalized(conn)
+            if extra_where_sql:
+                register_xf_norm(conn)
+            # Sorting — group_name/rating are denormalized columns so the
+            # default and rating orders walk indexes instead of temp B-trees.
+            # rating is never NULL after the backfill, so a bare column
+            # reference keeps the (content_type, rating, ...) index usable.
+            order_map = {
+                "added": "s.added",
+                "name": "lower(s.name)",
+                "rating": "s.rating",
+            }
+            order_col = order_map.get(sort_by, "")
+            if order_col:
+                direction = "DESC" if sort_order == "desc" else "ASC"
+                order_clause = f"{order_col} {direction}, s.source_id {direction}, s.stream_id {direction}"
+            elif news_days > 0:
+                order_clause = "s.added DESC, s.source_id ASC, s.stream_id ASC"
+            else:
+                order_clause = "lower(s.group_name), lower(s.name), s.source_id, s.stream_id"
+
+            if per_page > 0:
+                offset = (page - 1) * per_page
+                limit_clause = "LIMIT ? OFFSET ?"
+                limit_params: list = [per_page, offset]
+            else:
+                limit_clause = ""
+                limit_params = []
+
+            category_table = (
+                "category_cached_items" if category_mode == "automatic" else "category_manual_items"
+            )
+
+            def build_scope_queries(search_mode: str):
+                """Build count/page SQL for this scope.
+
+                Category scopes are driven by the membership table joined to
+                streams by primary key, so their cost scales with category
+                size rather than catalog size. search_mode selects the
+                two-phase strategy: 'fts' matches stream names via the FTS5
+                index, 'group' falls back to a group-name LIKE scan, ''
+                applies no search predicate.
+                """
+                params: list = []
+                if category_id:
+                    from_clause = (
+                        f"{category_table} ci JOIN streams s "
+                        "ON s.source_id = ci.source_id "
+                        "AND s.content_type = ci.content_type "
+                        "AND s.stream_id = ci.stream_id"
+                    )
+                    conditions: list[str] = ["ci.category_id = ?"]
+                    params.append(category_id)
+                else:
+                    from_clause = "streams s"
+                    if len(content_types) == 1:
+                        conditions = ["s.content_type = ?"]
+                        params.append(content_types[0])
+                    else:
+                        placeholders = ",".join("?" * len(content_types))
+                        conditions = [f"s.content_type IN ({placeholders})"]
+                        params.extend(content_types)
+
+                if source:
+                    conditions.append("s.source_id = ?")
+                    params.append(source)
+                if news_days > 0:
+                    conditions.append("s.added >= ?")
+                    params.append(news_cutoff)
+                if max_added_days > 0:
+                    conditions.append("s.added >= ?")
+                    params.append(added_cutoff)
+                if tmdb_search_id is not None:
+                    # Denormalized column stores first-nonempty(tmdb_id, tmdb),
+                    # matching the legacy json_extract precedence; both plain
+                    # and tmdb:-prefixed stored forms are matched.
+                    conditions.append("(s.tmdb_id = ? OR s.tmdb_id = ?)")
+                    params.extend([tmdb_search_id, f"tmdb:{tmdb_search_id}"])
+                elif search:
+                    if search_mode == "fts":
+                        conditions.append(
+                            "s.rowid IN (SELECT rowid FROM streams_fts WHERE streams_fts MATCH ?)"
+                        )
+                        params.append(search.replace('"', '""'))
+                    elif search_mode == "group":
+                        conditions.append("lower(s.group_name) LIKE lower(?)")
+                        params.append(f"%{search}%")
+                if group:
+                    conditions.append("s.group_name = ?")
+                    params.append(group)
+                if min_rating > 0:
+                    conditions.append("s.rating >= ?")
+                    params.append(min_rating)
+                if extra_where_sql:
+                    conditions.append(f"({extra_where_sql})")
+                    params.extend(extra_where_params or [])
+
+                where_clause = " AND ".join(conditions) if conditions else "1=1"
+                if _slim:
+                    data_columns = (
+                        "s.source_id, s.content_type, s.stream_id, s.name, "
+                        "s.category_id, s.added, s.rating, "
+                        "COALESCE(NULLIF(s.group_name, ''), 'Unknown') as group_name"
+                    )
+                else:
+                    data_columns = (
+                        "s.source_id, s.content_type, s.stream_id, s.name, "
+                        "s.category_id, s.added, s.rating, s.icon, s.tmdb_id, "
+                        "s.container_ext, "
+                        "COALESCE(NULLIF(s.group_name, ''), 'Unknown') as group_name"
+                    )
+                count_sql = f"""
+                    SELECT COUNT(*) as cnt
+                    FROM {from_clause}
+                    WHERE {where_clause}
+                """
+                data_sql = f"""
+                    SELECT {data_columns}
+                    FROM {from_clause}
+                    WHERE {where_clause}
+                    ORDER BY {order_clause}
+                    {limit_clause}
+                """
+                return count_sql, data_sql, params
+
+            # Baseline scopes (no narrowing filters, no injected predicates)
+            # serve total + facets from the metadata cache; anything else
+            # computes fresh.
+            cacheable_scope = (
+                not search
+                and news_days <= 0
+                and max_added_days <= 0
+                and tmdb_search_id is None
+                and min_rating <= 0
+                and not extra_where_sql
+            )
+            if cacheable_scope:
+                total, group_counts, source_set = self._get_scope_metadata(
+                    content_types,
+                    source=source,
+                    group=group,
+                    category_id=category_id,
+                    category_mode=category_mode,
+                )
+                _, data_sql, qparams = build_scope_queries("")
+                rows = conn.execute(data_sql, qparams + limit_params).fetchall()
+            else:
+                initial_mode = "fts" if (search and tmdb_search_id is None) else ""
+                count_sql, data_sql, qparams = build_scope_queries(initial_mode)
+                rule_key = None
+                if extra_where_sql and initial_mode == "" and not category_id:
+                    import hashlib
+
+                    rule_key = (
+                        tuple(sorted(content_types)),
+                        source,
+                        group,
+                        hashlib.md5(
+                            (extra_where_sql + "\x00" + repr(sorted(map(str, extra_where_params or [])))).encode()
+                        ).hexdigest(),
+                    )
+                    with self._group_counts_lock:
+                        cached_rule_total = self._rule_total_cache.get(rule_key)
+                        generation_at_read = self._group_counts_generation
+                else:
+                    cached_rule_total = None
+                    generation_at_read = None
+                if cached_rule_total is not None and generation_at_read == self._group_counts_generation:
+                    total = cached_rule_total
+                    _, data_sql, qparams = build_scope_queries("")
+                else:
+                    total = conn.execute(count_sql, qparams).fetchone()["cnt"]
+                    # Two-phase search: group-name matches only surface when no
+                    # stream name matched the FTS query.
+                    if initial_mode == "fts" and total == 0:
+                        count_sql, data_sql, qparams = build_scope_queries("group")
+                        total = conn.execute(count_sql, qparams).fetchone()["cnt"]
+                    if rule_key is not None:
+                        with self._group_counts_lock:
+                            if self._group_counts_generation == generation_at_read:
+                                self._rule_total_cache[rule_key] = total
+                rows = conn.execute(data_sql, qparams + limit_params).fetchall()
+                # Facets never include source-rule predicates by design, so
+                # baseline scopes can reuse the shared metadata cache even
+                # when the item queries carry pushed-down rules.
+                facet_cacheable = (
+                    not search
+                    and news_days <= 0
+                    and max_added_days <= 0
+                    and tmdb_search_id is None
+                    and min_rating <= 0
+                )
+                if facet_cacheable:
+                    _fc_total, group_counts, source_set = self._get_scope_metadata(
+                        content_types,
+                        source=source,
+                        group=group,
+                        category_id=category_id,
+                        category_mode=category_mode,
+                    )
+                else:
+                    group_counts, source_set = self._query_group_counts(
+                        conn,
+                        content_types,
+                        source=source,
+                        news_days=news_days,
+                        max_added_days=max_added_days,
+                        tmdb_search_id=tmdb_search_id,
+                        category_id=category_id,
+                        category_mode=category_mode,
+                    )
+
+            # Resolve source names from in-memory config
+            source_names = self._source_names
+
+            items = []
+            for row in rows:
+                if _slim:
+                    items.append({
+                        "id": str(row["stream_id"]),
+                        "name": row["name"] or "",
+                        "group": row["group_name"],
+                        "source_id": row["source_id"],
+                        "content_type": row["content_type"],
+                        "added": row["added"] or 0,
+                    })
+                    continue
+                items.append(self._browse_item_from_row(row, source_names))
+
+            total_pages = (total + per_page - 1) // per_page if total > 0 and per_page > 0 else 0
+
+            return {
+                "items": items,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": total_pages,
+                "group_counts": group_counts,
+                "source_set": source_set,
+            }
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # Stream source map
@@ -1016,9 +1923,7 @@ class CacheService:
     def get_source_for_stream(self, stream_id: str, stream_type: str = "live") -> str | None:
         return self._stream_source_map.get(stream_type, {}).get(str(stream_id))
 
-    def get_source_credentials_for_stream(
-        self, stream_id: str, stream_type: str = "live"
-    ) -> tuple[str, str, str]:
+    def get_source_credentials_for_stream(self, stream_id: str, stream_type: str = "live") -> tuple[str, str, str]:
         source_id = self.get_source_for_stream(stream_id, stream_type)
         if source_id:
             source = self.config_service.get_source_by_id(source_id)
@@ -1062,69 +1967,65 @@ class CacheService:
         for attempt in range(retries + 1):
             start_time = time.time()
             try:
-                async with httpx.AsyncClient(
-                    headers=HEADERS,
-                    timeout=httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0),
-                    follow_redirects=True,
-                ) as client:
-                    response = await client.get(url, params=params)
-                    elapsed_ms = int((time.time() - start_time) * 1000)
-                    if response.status_code == 200:
-                        try:
-                            data = response.json()
-                        except ValueError as exc:
-                            last_error = {
-                                "type": "parse_error",
-                                "message": str(exc),
-                                "status_code": 200,
-                                "attempt": attempt + 1,
-                                "duration_ms": elapsed_ms,
-                            }
-                            logger.error(f"Invalid JSON for {action}: {exc} (attempt {attempt + 1}/{retries + 1})")
-                            if attempt < retries:
-                                await asyncio.sleep(2**attempt)
-                            continue
-
-                        if not isinstance(data, list):
-                            last_error = {
-                                "type": "invalid_payload",
-                                "message": f"Expected a list response for {action}",
-                                "status_code": 200,
-                                "attempt": attempt + 1,
-                                "duration_ms": elapsed_ms,
-                            }
-                            logger.error(
-                                f"Unexpected payload for {action}: {type(data).__name__} "
-                                f"(attempt {attempt + 1}/{retries + 1})"
-                            )
-                            if attempt < retries:
-                                await asyncio.sleep(2**attempt)
-                            continue
-
-                        logger.debug(
-                            f"Fetched {action}: {len(data)} items in {elapsed_ms / 1000:.1f}s"
-                        )
-                        return {
-                            "ok": True,
-                            "action": action,
-                            "data": data,
-                            "status_code": 200,
-                            "duration_ms": elapsed_ms,
-                            "attempts": attempt + 1,
-                            "error": None,
-                        }
-                    else:
+                http_client = self.http_client
+                if http_client is None:
+                    raise RuntimeError("HTTP client is not configured")
+                client = await http_client.get_client()
+                response = await client.get(url, params=params)
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                    except ValueError as exc:
                         last_error = {
-                            "type": "http_error",
-                            "message": f"HTTP {response.status_code} while fetching {action}",
-                            "status_code": response.status_code,
+                            "type": "parse_error",
+                            "message": str(exc),
+                            "status_code": 200,
                             "attempt": attempt + 1,
                             "duration_ms": elapsed_ms,
                         }
-                        logger.warning(
-                            f"Fetch {action} failed with status {response.status_code} "
-                            f"in {elapsed_ms / 1000:.1f}s"
+                        logger.error(f"Invalid JSON for {action}: {exc} (attempt {attempt + 1}/{retries + 1})")
+                        if attempt < retries:
+                            await asyncio.sleep(2**attempt)
+                        continue
+
+                    if not isinstance(data, list):
+                        last_error = {
+                            "type": "invalid_payload",
+                            "message": f"Expected a list response for {action}",
+                            "status_code": 200,
+                            "attempt": attempt + 1,
+                            "duration_ms": elapsed_ms,
+                        }
+                        logger.error(
+                            f"Unexpected payload for {action}: {type(data).__name__} "
+                            f"(attempt {attempt + 1}/{retries + 1})"
                         )
+                        if attempt < retries:
+                            await asyncio.sleep(2**attempt)
+                        continue
+
+                    logger.debug(f"Fetched {action}: {len(data)} items in {elapsed_ms / 1000:.1f}s")
+                    return {
+                        "ok": True,
+                        "action": action,
+                        "data": data,
+                        "status_code": 200,
+                        "duration_ms": elapsed_ms,
+                        "attempts": attempt + 1,
+                        "error": None,
+                    }
+                else:
+                    last_error = {
+                        "type": "http_error",
+                        "message": f"HTTP {response.status_code} while fetching {action}",
+                        "status_code": response.status_code,
+                        "attempt": attempt + 1,
+                        "duration_ms": elapsed_ms,
+                    }
+                    logger.warning(
+                        f"Fetch {action} failed with status {response.status_code} in {elapsed_ms / 1000:.1f}s"
+                    )
             except httpx.TimeoutException:
                 last_error = {
                     "type": "timeout",
@@ -1176,7 +2077,8 @@ class CacheService:
             "status_code": (last_error or {}).get("status_code"),
             "duration_ms": (last_error or {}).get("duration_ms"),
             "attempts": retries + 1,
-            "error": last_error or {
+            "error": last_error
+            or {
                 "type": "unknown_error",
                 "message": f"Unknown error while fetching {action}",
             },
@@ -1191,7 +2093,7 @@ class CacheService:
         source: dict,
         source_idx: int,
         source_result: dict,
-        existing_sources_snapshot: dict[str, dict],
+        existing_sources_ref: dict[str, dict],
         total_sources: int,
         progress: dict,
     ) -> tuple[str, dict, bool]:
@@ -1211,10 +2113,11 @@ class CacheService:
 
         logger.info(f"Refreshing source: {source_name}")
 
-        existing_source_cache = copy.deepcopy(
-            existing_sources_snapshot.get(source_id, self._empty_source_cache())
-        )
-        source_cache = copy.deepcopy(existing_source_cache)
+        # Start with an empty cache — no deep copy of existing data.
+        # On success we store fresh data; on failure we shallow-copy only
+        # the specific step's list from the existing cache (selective rollback).
+        source_cache: dict[str, Any] = {}
+        existing_source = existing_sources_ref.get(source_id, {})
         source_updated = False
 
         for step_idx, (cache_key, label, action) in enumerate(REFRESH_STEP_DEFINITIONS):
@@ -1225,9 +2128,12 @@ class CacheService:
             step_result["preserved_existing"] = False
             progress["current_step"] = f"{source_name}: {label}"
             progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
-            progress["percent"] = int(
-                (progress["summary"].get("processed_steps", 0) / max(progress["summary"].get("total_steps", 1), 1))
-                * 100
+            progress["percent"] = min(
+                95,
+                int(
+                    (progress["summary"].get("processed_steps", 0) / max(progress["summary"].get("total_steps", 1), 1))
+                    * 100
+                ),
             )
             self.save_refresh_progress(progress)
             logger.info(
@@ -1244,10 +2150,13 @@ class CacheService:
                 step_result["count"] = len(data)
                 source_updated = True
             else:
+                # Selective rollback: shallow-copy only this step's existing list
+                source_cache[cache_key] = list(existing_source.get(cache_key, []))
+                source_cache.setdefault("_preserved_steps", []).append(cache_key)
                 error = dict(fetch_result.get("error") or {})
                 step_result["status"] = "failed"
                 step_result["error"] = error
-                step_result["preserved_existing"] = source_id in existing_sources_snapshot
+                step_result["preserved_existing"] = bool(source_cache[cache_key])
                 step_result["count"] = len(source_cache.get(cache_key, []))
                 source_result["errors"].append(
                     {
@@ -1262,14 +2171,19 @@ class CacheService:
             source_result["counts"] = self._build_source_counts(source_cache)
             source_result["status"] = self._derive_source_status(source_result)
             progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
-            progress["percent"] = int(
-                (progress["summary"].get("processed_steps", 0) / max(progress["summary"].get("total_steps", 1), 1))
-                * 100
+            progress["percent"] = min(
+                95,
+                int(
+                    (progress["summary"].get("processed_steps", 0) / max(progress["summary"].get("total_steps", 1), 1))
+                    * 100
+                ),
             )
             self.save_refresh_progress(progress)
 
         if source_updated:
             source_cache["last_refresh"] = datetime.now(timezone.utc).isoformat()
+        elif existing_source.get("last_refresh"):
+            source_cache["last_refresh"] = existing_source["last_refresh"]
 
         source_result["counts"] = self._build_source_counts(source_cache)
         source_result["last_refresh"] = source_cache.get("last_refresh")
@@ -1277,7 +2191,99 @@ class CacheService:
 
         return source_id, source_cache, source_updated
 
+    def _refresh_task_done(self, task: asyncio.Task) -> None:
+        if self._refresh_task is task:
+            self._refresh_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.info("Cache refresh task cancelled")
+        except Exception:
+            logger.exception("Unhandled exception in cache refresh task")
+
+    def start_refresh(self, on_cache_refreshed=None) -> bool:
+        """Start one background refresh task, returning whether it was started."""
+        if self._maintenance_active:
+            return False
+        if self._refresh_lock.locked():
+            return False
+        if self._refresh_task is not None and not self._refresh_task.done():
+            return False
+        self._refresh_cancel_requested = False
+        self._refresh_cancel_reason = ""
+        self._refresh_task = asyncio.create_task(self.refresh_cache(on_cache_refreshed=on_cache_refreshed))
+        self._refresh_task.add_done_callback(self._refresh_task_done)
+        return True
+
+    async def wait_for_refresh(self) -> bool:
+        """Wait for the currently owned refresh without treating its cancellation as shutdown."""
+        task = self._refresh_task
+        if task is None:
+            return False
+        try:
+            return await task
+        except asyncio.CancelledError:
+            # A user cancellation cancels the child refresh task. A shutdown
+            # cancellation cancels this caller too and must still propagate.
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                raise
+            return False
+
+    async def _persist_cancelled_progress(self, reason: str = "Cancelled by user") -> None:
+        progress = self._normalise_refresh_progress(self._api_cache.get("refresh_progress"))
+        progress["in_progress"] = False
+        progress["status"] = "cancelled"
+        progress["phase"] = "cancelled"
+        progress["current_step"] = "Cancelled"
+        progress["current_source_name"] = ""
+        progress["percent"] = 0
+        progress["finished_at"] = datetime.now(timezone.utc).isoformat()
+        progress["last_error"] = reason
+        progress["summary"] = self._build_refresh_summary(
+            progress.get("source_results", []),
+            progress.get("total_sources", 0),
+        )
+        async with self._cache_lock:
+            self._api_cache["refresh_in_progress"] = False
+        await self._flush_pending_progress_saves()
+        await self.save_refresh_progress_async(progress, force=True)
+
+    async def cancel_refresh(self, reason: str = "Cancelled by user") -> bool:
+        """Cancel the active refresh and wait until no refresh work remains."""
+        task = self._refresh_task
+        if task is not None and not task.done():
+            self._refresh_cancel_requested = True
+            self._refresh_cancel_reason = reason
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await self._persist_cancelled_progress(reason)
+            finally:
+                self._refresh_cancel_requested = False
+                self._refresh_cancel_reason = ""
+            return True
+
+        progress = self.load_refresh_progress()
+        if progress.get("in_progress") or self._api_cache.get("refresh_in_progress"):
+            await self._persist_cancelled_progress(reason)
+        return False
+
     async def refresh_cache(self, on_cache_refreshed=None) -> bool:
+        """Run one cache refresh, never overlapping another refresh."""
+        if self._maintenance_active:
+            logger.info("Database maintenance is running, skipping cache refresh")
+            return False
+        if self._refresh_lock.locked():
+            logger.info("Refresh already running, skipping")
+            return False
+        async with self._refresh_lock:
+            return await self._refresh_cache_locked(on_cache_refreshed)
+
+    async def _refresh_cache_locked(self, on_cache_refreshed=None) -> bool:
         """Refresh all cached data from all configured sources.
 
         *on_cache_refreshed* is an optional async callback invoked after a
@@ -1303,8 +2309,7 @@ class CacheService:
         # refresh triggers coalesce into a single waiter.
         if self.cart_service is not None and self.cart_service.is_download_active():
             logger.info("Cache refresh delayed: download in progress in cart")
-            if getattr(self, 'log_service', None):
-                await getattr(self, 'log_service', None).log("cache", "warning", "Cache refresh delayed — download in progress")
+            await self._log_activity("warning", "Cache refresh delayed — download in progress")
             wait_started_at = datetime.now(timezone.utc).isoformat()
             async with self._cache_lock:
                 self._api_cache["refresh_in_progress"] = True
@@ -1312,6 +2317,7 @@ class CacheService:
                 {
                     "in_progress": True,
                     "status": "waiting",
+                    "phase": "waiting",
                     "current_source": 0,
                     "total_sources": 0,
                     "current_source_name": "",
@@ -1329,8 +2335,8 @@ class CacheService:
             max_wait_seconds = 24 * 3600  # safety cap
             poll_interval = 30
             heartbeat_interval = 300  # refresh started_at every 5min so the
-                                      # 600s staleness guard at the top keeps
-                                      # coalescing concurrent refresh triggers
+            # 600s staleness guard at the top keeps
+            # coalescing concurrent refresh triggers
             waited = 0
             last_heartbeat = 0
             try:
@@ -1340,14 +2346,16 @@ class CacheService:
                             "Cache refresh waited %ss for downloads to finish; aborting",
                             waited,
                         )
-                        if getattr(self, 'log_service', None):
-                            await getattr(self, 'log_service', None).log("cache", "error", f"Cache refresh aborted — waited {waited}s for downloads to finish")
+                        await self._log_activity(
+                            "error", f"Cache refresh aborted — waited {waited}s for downloads to finish"
+                        )
                         async with self._cache_lock:
                             self._api_cache["refresh_in_progress"] = False
                         self.save_refresh_progress(
                             {
                                 "in_progress": False,
                                 "status": "failed",
+                                "phase": "complete",
                                 "current_source": 0,
                                 "total_sources": 0,
                                 "current_source_name": "",
@@ -1369,13 +2377,11 @@ class CacheService:
                             {
                                 "in_progress": True,
                                 "status": "waiting",
+                                "phase": "waiting",
                                 "current_source": 0,
                                 "total_sources": 0,
                                 "current_source_name": "",
-                                "current_step": (
-                                    f"Waiting for active download to finish "
-                                    f"({waited // 60} min)"
-                                ),
+                                "current_step": (f"Waiting for active download to finish ({waited // 60} min)"),
                                 "percent": 0,
                                 "started_at": wait_started_at,
                                 "heartbeat_at": datetime.now(timezone.utc).isoformat(),
@@ -1386,17 +2392,10 @@ class CacheService:
                             }
                         )
             except asyncio.CancelledError:
-                async with self._cache_lock:
-                    self._api_cache["refresh_in_progress"] = False
-                self.clear_refresh_progress(
-                    status="cancelled",
-                    last_error="Cancelled while waiting for downloads",
-                )
+                await self._persist_cancelled_progress("Cancelled while waiting for downloads")
                 raise
 
-            logger.info(
-                "Download finished after %ss, resuming cache refresh", waited
-            )
+            logger.info("Download finished after %ss, resuming cache refresh", waited)
 
         config = self.config_service.config
         sources = config.get("sources", [])
@@ -1417,21 +2416,19 @@ class CacheService:
             ]
 
         enabled_sources = [
-            s
-            for s in sources
-            if s.get("enabled", True) and s.get("host") and s.get("username") and s.get("password")
+            s for s in sources if s.get("enabled", True) and s.get("host") and s.get("username") and s.get("password")
         ]
 
         if not enabled_sources:
             logger.info("Cannot refresh - no valid sources configured")
-            if getattr(self, 'log_service', None):
-                await getattr(self, 'log_service', None).log("cache", "warning", "Cache refresh skipped — no valid sources configured")
+            await self._log_activity("warning", "Cache refresh skipped — no valid sources configured")
             async with self._cache_lock:
                 self._api_cache["refresh_in_progress"] = False
             self.save_refresh_progress(
                 {
                     "in_progress": False,
                     "status": "failed",
+                    "phase": "complete",
                     "current_source": 0,
                     "total_sources": 0,
                     "current_source_name": "",
@@ -1450,15 +2447,21 @@ class CacheService:
 
         async with self._cache_lock:
             raw_sources = self._api_cache.get("sources", {})
-            previous_last_refresh = self._api_cache.get("last_refresh")
             self._api_cache["refresh_in_progress"] = True
-        existing_sources_snapshot = await asyncio.to_thread(copy.deepcopy, raw_sources)
+        # Lightweight snapshot: just record which sources exist and their
+        # last_refresh timestamps.  The full stream data is NOT copied here;
+        # _refresh_source_async reads from raw_sources directly and only
+        # shallow-copies individual step lists on failure (selective rollback).
+        existing_source_ids = set(raw_sources.keys())
+        existing_last_refresh: dict[str, str | None] = {
+            sid: src.get("last_refresh") for sid, src in raw_sources.items()
+        }
 
         source_results = [
             self._build_source_result(
                 source.get("id", "default"),
                 source.get("name", source.get("id", "default")),
-                existing_sources_snapshot.get(source.get("id", "default"), {}).get("last_refresh"),
+                existing_last_refresh.get(source.get("id", "default")),
             )
             for source in enabled_sources
         ]
@@ -1466,6 +2469,7 @@ class CacheService:
             {
                 "in_progress": True,
                 "status": "running",
+                "phase": "sources",
                 "current_source": 0,
                 "total_sources": total_sources,
                 "current_source_name": "",
@@ -1481,11 +2485,11 @@ class CacheService:
         self.save_refresh_progress(progress)
 
         logger.info(f"Starting full refresh at {datetime.now(timezone.utc).isoformat()} for {total_sources} source(s)")
-        if getattr(self, 'log_service', None):
-            await getattr(self, 'log_service', None).log("cache", "info", f"Cache refresh started ({total_sources} source(s))")
+        await self._log_activity("info", f"Cache refresh started ({total_sources} source(s))")
 
         new_sources_cache: dict[str, dict] = {}
         any_source_updated = False
+        persistence_failed = False
         final_status = "failed"
 
         try:
@@ -1494,25 +2498,27 @@ class CacheService:
                     source,
                     source_idx,
                     progress["source_results"][source_idx],
-                    existing_sources_snapshot,
+                    raw_sources,
                     total_sources,
                     progress,
                 )
                 for source_idx, source in enumerate(enabled_sources)
             ]
             results = await asyncio.gather(*tasks)
+            if self._refresh_cancel_requested:
+                raise asyncio.CancelledError
 
             for source_id, source_cache, source_updated in results:
                 if source_updated:
                     any_source_updated = True
-                if source_updated or source_id in existing_sources_snapshot:
+                if source_updated or source_id in existing_source_ids:
                     new_sources_cache[source_id] = source_cache
 
             summary = self._build_refresh_summary(progress["source_results"], total_sources)
             failed_sources = summary.get("failed_sources", 0)
             partial_sources = summary.get("partial_sources", 0)
 
-            if new_sources_cache or existing_sources_snapshot:
+            if new_sources_cache or existing_source_ids:
                 async with self._cache_lock:
                     self._api_cache["sources"] = new_sources_cache
                     # Always update last_refresh so the UI shows the most recent
@@ -1523,16 +2529,30 @@ class CacheService:
                 await asyncio.to_thread(self._inject_source_info)
                 await self.rebuild_stream_source_map()
                 await asyncio.to_thread(self._rebuild_stream_index)
-                await self.save_cache_to_disk_async()
+                try:
+                    await self.save_cache_to_disk_async()
+                except Exception:
+                    persistence_failed = True
+                    raise
+                finally:
+                    # Persistence failures must not leave the full upstream
+                    # payload resident in the long-lived in-memory cache.
+                    await asyncio.to_thread(self._slim_cache_in_memory)
+                    await asyncio.to_thread(self._inject_source_info)
+                    await asyncio.to_thread(self._rebuild_stream_index)
+
+                if self._refresh_cancel_requested:
+                    raise asyncio.CancelledError
 
                 if on_cache_refreshed and any_source_updated:
                     progress["in_progress"] = True
+                    progress["phase"] = "categories"
                     progress["current_source"] = total_sources
-                    progress["current_source_name"] = "Categories"
-                    progress["current_step"] = "Refreshing automatic categories..."
-                    progress["percent"] = min(progress.get("percent", 0), 95)
+                    progress["current_source_name"] = "Browse categories"
+                    progress["current_step"] = "Refreshing configured browse categories..."
+                    progress["percent"] = 95
                     progress["summary"] = summary
-                    self.save_refresh_progress(progress)
+                    await self.save_refresh_progress_async(progress, force=True)
                     await on_cache_refreshed()
 
                 if failed_sources or partial_sources:
@@ -1544,72 +2564,87 @@ class CacheService:
                     f"Refresh complete with status={final_status}. Total: {summary['live_streams']} live, "
                     f"{summary['vod_streams']} vod, {summary['series']} series"
                 )
-                if getattr(self, 'log_service', None):
-                    level = "info" if final_status == "success" else "warning"
-                    msg = f"Cache refresh completed ({final_status}): {summary['live_streams']} live, {summary['vod_streams']} vod, {summary['series']} series"
-                    details = {"status": final_status, **summary}
-                    # Add per-source error details if any
-                    failed_steps = []
-                    for sr in progress.get("source_results", []):
-                        for err in sr.get("errors", []):
-                            failed_steps.append(f"{sr.get('source_name', sr.get('source_id', '?'))}: {err.get('label', '?')}")
-                    if failed_steps:
-                        details["failed_steps"] = failed_steps
-                    await getattr(self, 'log_service', None).log("cache", level, msg, details)
+                level = "info" if final_status == "success" else "warning"
+                msg = f"Cache refresh completed ({final_status}): {summary['live_streams']} live, {summary['vod_streams']} vod, {summary['series']} series"
+                details = {"status": final_status, **summary}
+                # Add per-source error details if any
+                failed_steps = []
+                for sr in progress.get("source_results", []):
+                    for err in sr.get("errors", []):
+                        failed_steps.append(
+                            f"{sr.get('source_name', sr.get('source_id', '?'))}: {err.get('label', '?')}"
+                        )
+                if failed_steps:
+                    details["failed_steps"] = failed_steps
+                await self._log_activity(level, msg, details)
             else:
                 logger.warning("Refresh completed but no data was fetched from any source")
-                if getattr(self, 'log_service', None):
-                    await getattr(self, 'log_service', None).log("cache", "error", "Cache refresh failed — no data fetched from any source")
+                await self._log_activity("error", "Cache refresh failed — no data fetched from any source")
                 async with self._cache_lock:
                     self._api_cache["refresh_in_progress"] = False
                     self._api_cache["last_refresh"] = datetime.now(timezone.utc).isoformat()
                 final_status = "failed"
         except Exception as exc:
             logger.error(f"Cache refresh failed unexpectedly: {exc}")
-            if getattr(self, 'log_service', None):
-                await getattr(self, 'log_service', None).log("cache", "error", f"Cache refresh failed unexpectedly: {exc}")
+            await self._log_activity("error", f"Cache refresh failed unexpectedly: {exc}")
             progress["last_error"] = progress.get("last_error") or str(exc)
-            final_status = "partial" if any_source_updated else "failed"
+            final_status = "failed" if persistence_failed else ("partial" if any_source_updated else "failed")
             async with self._cache_lock:
                 self._api_cache["refresh_in_progress"] = False
         finally:
+            current_task = asyncio.current_task()
+            cancelled = self._refresh_cancel_requested or (current_task is not None and current_task.cancelling())
+            async with self._cache_lock:
+                self._api_cache["refresh_in_progress"] = False
             await self._flush_pending_progress_saves()
             finished_at = datetime.now(timezone.utc).isoformat()
             progress["in_progress"] = False
-            progress["status"] = final_status
+            if cancelled:
+                progress["status"] = "cancelled"
+                progress["phase"] = "cancelled"
+                progress["current_step"] = "Cancelled"
+                progress["percent"] = 0
+                progress["last_error"] = (
+                    self._refresh_cancel_reason or progress.get("last_error") or "Cancelled by user"
+                )
+            else:
+                progress["status"] = final_status
+                progress["phase"] = "complete"
+                progress["current_step"] = {
+                    "success": "Complete",
+                    "partial": "Complete with warnings",
+                    "failed": "Refresh failed",
+                }.get(final_status, "Complete")
+                progress["percent"] = 100 if total_sources else 0
             progress["current_source"] = total_sources
             progress["current_source_name"] = ""
-            progress["current_step"] = {
-                "success": "Complete",
-                "partial": "Complete with warnings",
-                "failed": "Refresh failed",
-            }.get(final_status, "Complete")
-            progress["percent"] = 100 if total_sources else 0
             progress["finished_at"] = finished_at
             progress["summary"] = self._build_refresh_summary(progress["source_results"], total_sources)
-            if final_status == "failed" and not progress.get("last_error"):
+            if not cancelled and final_status == "failed" and not progress.get("last_error"):
                 progress["last_error"] = "Refresh failed for every source"
-            self._save_refresh_progress_sync(
-                progress
-            )
-            if final_status in {"partial", "failed"} and self.notification_service:
+            await self.save_refresh_progress_async(progress, force=True)
+            if not cancelled and final_status in {"partial", "failed"} and self.notification_service:
                 try:
                     await self.notification_service.send_cache_refresh_failure_notification(progress)
                 except Exception as exc:
                     logger.error(f"Failed to dispatch cache refresh notification: {exc}")
-        return final_status in {"success", "partial"}
+        return not cancelled and final_status in {"success", "partial"}
 
     # ------------------------------------------------------------------
     # Clear
     # ------------------------------------------------------------------
 
     async def clear_cache(self) -> None:
+        if self._maintenance_active:
+            raise RuntimeError("Database maintenance is in progress")
+        await self.cancel_refresh("Cache cleared while refresh was active")
         async with self._cache_lock:
             self._api_cache = {"sources": {}, "last_refresh": None, "refresh_in_progress": False}
         async with self._stream_map_lock:
             self._stream_source_map = {"live": {}, "vod": {}, "series": {}}
         self._stream_index = {}
         self._source_names = {}
+        self.invalidate_group_counts_cache()
         conn = db_connect(self.db_path)
         try:
             conn.execute("DELETE FROM streams")

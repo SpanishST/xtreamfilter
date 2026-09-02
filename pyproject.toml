@@ -1,6 +1,6 @@
 [project]
 name = "xtreamfilter"
-version = "0.5.12"
+version = "0.5.13"
 description = "A Docker-based Xtream Codes proxy that filters IPTV content with advanced per-category rules, caching, Telegram notifications, and download support."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -38,6 +38,9 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "e2e: browser-based end-to-end tests",
+]
 
 [dependency-groups]
 dev = [

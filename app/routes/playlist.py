@@ -1,6 +1,8 @@
 """Playlist routes — M3U file serving."""
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 
@@ -18,7 +20,7 @@ async def playlist(
     m3u: M3uService = Depends(get_m3u_service),
 ):
     server_url = str(request.base_url).rstrip("/")
-    m3u_content = m3u.generate_m3u(server_url)
+    m3u_content = await asyncio.to_thread(m3u.generate_m3u, server_url)
     return Response(
         content=m3u_content,
         media_type="audio/x-mpegurl",
@@ -45,11 +47,11 @@ async def playlist_full(
             "series": {"groups": [], "channels": []},
         }
         unfiltered_sources.append(s_copy)
-    # Temporarily swap sources
-    original_sources = config.get("sources", [])
-    config["sources"] = unfiltered_sources
-    m3u_content = m3u.generate_m3u(server_url)
-    config["sources"] = original_sources
+    m3u_content = await asyncio.to_thread(
+        m3u.generate_m3u,
+        server_url,
+        sources_override=unfiltered_sources,
+    )
     return Response(
         content=m3u_content,
         media_type="audio/x-mpegurl",

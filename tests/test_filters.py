@@ -1,7 +1,11 @@
 """Unit tests for app.services.filter_service."""
 
-from app.services.filter_service import matches_filter, should_include, normalize_name
-
+from app.services.filter_service import (
+    matches_filter,
+    normalize_name,
+    should_include,
+    source_rules_predicate,
+)
 
 # ---------------------------------------------------------------
 # matches_filter
@@ -130,6 +134,25 @@ class TestShouldInclude:
         # include first, then exclude: TF1 passes include but is still excluded by "all"
         assert should_include("TF1", rules) is False
         assert should_include("Other", rules) is False
+
+    def test_sql_predicate_preserves_all_matcher_semantics(self):
+        predicate = source_rules_predicate(
+            {
+                "src1": {
+                    "filters": {
+                        "live": {
+                            "groups": [{"type": "exclude", "match": "all", "value": "*"}],
+                            "channels": [],
+                        }
+                    }
+                }
+            },
+            ["live"],
+        )
+
+        assert predicate is not None
+        sql, _params = predicate
+        assert "NOT (1)" in sql
 
 
 # ---------------------------------------------------------------

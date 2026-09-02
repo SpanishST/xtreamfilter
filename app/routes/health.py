@@ -8,7 +8,7 @@ from fastapi import APIRouter
 
 router = APIRouter(tags=["health"])
 
-APP_VERSION = "0.5.13"
+APP_VERSION = "0.5.14"
 GITHUB_REPO = "SpanishST/xtreamfilter"
 
 _version_cache: dict = {"latest": None, "release_url": "", "checked_at": 0.0}

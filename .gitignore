@@ -12,3 +12,6 @@ wheels/
 # local data
 data/
 .vscode/
+.kilo*
+.pytest*
+.ruff*

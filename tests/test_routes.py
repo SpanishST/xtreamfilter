@@ -716,6 +716,107 @@ def test_cart_pause_and_resume(client):
     assert client.get("/api/cart/status").json()["queue_paused"] is False
 
 
+def test_cart_batch_adds_movies_from_multiple_sources_and_reports_duplicates(client):
+    selections = [
+        {
+            "content_type": "vod",
+            "source_id": "source-1",
+            "stream_id": "movie-1",
+            "name": "Movie One",
+        },
+        {
+            "content_type": "vod",
+            "source_id": "source-2",
+            "stream_id": "movie-1",
+            "name": "Movie One (backup)",
+        },
+        {
+            "content_type": "vod",
+            "source_id": "source-1",
+            "stream_id": "movie-1",
+            "name": "Movie One duplicate",
+        },
+    ]
+
+    response = client.post("/api/cart/batch", json={"selections": selections})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["added"] == 2
+    assert data["errors"] == []
+    assert data["skipped"] == [{
+        "index": 2,
+        "name": "Movie One duplicate",
+        "count": 1,
+        "reason": "already_queued",
+    }]
+    assert {(item["source_id"], item["stream_id"]) for item in data["items"]} == {
+        ("source-1", "movie-1"),
+        ("source-2", "movie-1"),
+    }
+
+
+def test_cart_batch_resolves_series_scope_server_side(client, monkeypatch):
+    async def fetch_series_episodes(source_id, series_id):
+        assert source_id == "source-1"
+        assert series_id == "series-1"
+        return [
+            {
+                "stream_id": "episode-1",
+                "season": "1",
+                "episode_num": 1,
+                "title": "Pilot",
+                "container_extension": "mkv",
+                "info": {"duration": 42, "codec": "h264"},
+                "series_name": "Provider Series",
+            },
+            {
+                "stream_id": "episode-2",
+                "season": "1",
+                "episode_num": 2,
+                "title": "Second",
+                "container_extension": "mp4",
+                "info": {},
+                "series_name": "Provider Series",
+            },
+            {
+                "stream_id": "episode-3",
+                "season": "2",
+                "episode_num": 1,
+                "title": "Return",
+                "container_extension": "mp4",
+                "info": {},
+                "series_name": "Provider Series",
+            },
+        ]
+
+    monkeypatch.setattr(
+        client.app.state.xtream_service,
+        "fetch_series_episodes",
+        fetch_series_episodes,
+    )
+
+    response = client.post("/api/cart/batch", json={"selections": [{
+        "content_type": "series",
+        "source_id": "source-1",
+        "stream_id": "series-1",
+        "series_id": "series-1",
+        "name": "Example Series",
+        "series_name": "Example Series",
+        "scope": {"mode": "seasons", "seasons": ["1"]},
+    }]})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["added"] == 2
+    assert data["errors"] == []
+    assert {(item["stream_id"], item["season"], item["episode_num"]) for item in data["items"]} == {
+        ("episode-1", "1", 1),
+        ("episode-2", "1", 2),
+    }
+    assert data["items"][0]["episode_info"] == {"duration": 42}
+
+
 # -------------------------------------------------------------------
 # Monitor API
 # -------------------------------------------------------------------

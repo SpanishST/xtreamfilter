@@ -499,6 +499,7 @@ class CartService:
         self._download_resume_event.set()
         self._force_started: bool = False
         self.log_service = None  # set after init via attribute binding
+        self._cart_mutation_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Properties
@@ -1098,53 +1099,93 @@ class CartService:
     # Cart CRUD (used by routes)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _cart_item_key(item: dict) -> tuple:
+        """Return the source-local identity used for active cart de-duplication."""
+        return (
+            item.get("content_type", ""),
+            str(item.get("source_id", "")),
+            str(item.get("stream_id", "")),
+        )
+
+    def _is_active_duplicate(self, candidate: dict) -> bool:
+        candidate_key = self._cart_item_key(candidate)
+        for item in self._download_cart:
+            if item.get("status") not in ("queued", "downloading"):
+                continue
+            if self._cart_item_key(item) == candidate_key:
+                return True
+            if (
+                candidate.get("content_type") == "series"
+                and item.get("content_type") == "series"
+                and item.get("source_id") == candidate.get("source_id")
+                and item.get("series_id") == candidate.get("series_id")
+                and str(item.get("season")) == str(candidate.get("season"))
+                and item.get("episode_num") == candidate.get("episode_num")
+            ):
+                return True
+        return False
+
     async def add_to_cart(self, data: dict) -> dict:
-        """Add item(s) to the cart. Returns {"added": n, "items": [...]} or {"error": ...}."""
+        """Add one cart request through the serialized mutation path."""
+        async with self._cart_mutation_lock:
+            return await self._add_to_cart(data)
+
+    async def _add_to_cart(self, data: dict, save: bool = True) -> dict:
+        """Build cart items from one request, optionally deferring persistence."""
         content_type = data.get("content_type", "vod")
         add_mode = data.get("add_mode", "episode")
         added_items: list[dict] = []
+        skipped_count = 0
 
-        # Resolve monitor canonical name for series items so the folder
-        # name is always the monitor title, even for manual additions.
-        _series_monitor_canon: str | None = None
+        # Resolve monitor canonical name for series items so the folder name
+        # is always the monitor title, even for manual additions.
+        series_monitor_canon: str | None = None
         if content_type == "series" and self.monitor_service is not None:
-            # Prefer explicit canonical from the frontend (already resolved)
-            _series_monitor_canon = data.get("monitor_canonical") or None
-            if not _series_monitor_canon:
-                _src_id = data.get("source_id", "")
-                _ref_id = data.get("series_id", data.get("stream_id", ""))
-                if _src_id and _ref_id:
-                    _series_monitor_canon = self.monitor_service.resolve_canonical_name_by_source(_src_id, _ref_id)
-            # Final fallback: match by series_name against monitored canonical names
-            if not _series_monitor_canon:
-                _sname = data.get("series_name", "")
-                if _sname:
-                    _series_monitor_canon = self.monitor_service.resolve_canonical_name_by_series_name(_sname)
+            series_monitor_canon = data.get("monitor_canonical") or None
+            if not series_monitor_canon:
+                source_id = data.get("source_id", "")
+                series_id = data.get("series_id", data.get("stream_id", ""))
+                if source_id and series_id:
+                    series_monitor_canon = self.monitor_service.resolve_canonical_name_by_source(source_id, series_id)
+            if not series_monitor_canon and data.get("series_name"):
+                series_monitor_canon = self.monitor_service.resolve_canonical_name_by_series_name(data["series_name"])
 
-        if content_type == "series" and add_mode in ("series", "season"):
+        if content_type == "series" and add_mode in ("series", "season", "episodes"):
             series_id = data.get("series_id", data.get("stream_id", ""))
             source_id = data.get("source_id", "")
             series_name = data.get("series_name", data.get("name", ""))
             season_filter = data.get("season_num") if add_mode == "season" else None
+            season_filters = {str(value) for value in season_filter} if isinstance(season_filter, list) else None
+            episode_ids = {str(value) for value in data.get("episode_ids", [])}
             episodes = await self.xtream_service.fetch_series_episodes(source_id, series_id)
             if not episodes:
                 return {"error": "Could not fetch series episodes"}
+
             for ep in episodes:
-                if season_filter and str(ep["season"]) != str(season_filter):
+                if season_filters is not None and str(ep["season"]) not in season_filters:
                     continue
-                if any(
-                    i.get("source_id") == source_id
-                    and i.get("stream_id") == ep["stream_id"]
-                    and i.get("status") in ("queued", "downloading")
-                    for i in self._download_cart
-                ):
+                if season_filters is None and season_filter and str(ep["season"]) != str(season_filter):
+                    continue
+                if add_mode == "episodes" and str(ep.get("stream_id", "")) not in episode_ids:
+                    continue
+                candidate = {
+                    "content_type": "series",
+                    "source_id": source_id,
+                    "stream_id": ep["stream_id"],
+                    "series_id": series_id,
+                    "season": ep["season"],
+                    "episode_num": ep.get("episode_num", 0),
+                }
+                if self._is_active_duplicate(candidate):
+                    skipped_count += 1
                     continue
                 item = self._build_cart_item(
                     source_id=source_id,
                     stream_id=ep["stream_id"],
                     content_type="series",
                     name=ep.get("title", "") or f"Episode {ep['episode_num']}",
-                    series_name=ep.get("series_name", series_name),
+                    series_name=series_name or ep.get("series_name", ""),
                     series_id=series_id,
                     season=ep["season"],
                     episode_num=ep.get("episode_num", 0),
@@ -1153,19 +1194,27 @@ class CartService:
                     icon=data.get("icon", ""),
                     group=data.get("group", ""),
                     container_extension=ep.get("container_extension", "mp4"),
-                    monitor_canonical=_series_monitor_canon,
+                    monitor_canonical=series_monitor_canon,
                 )
                 self._download_cart.append(item)
                 added_items.append(item)
+
+            if add_mode == "episodes":
+                resolved_ids = {str(ep.get("stream_id", "")) for ep in episodes}
+                missing_ids = sorted(episode_ids - resolved_ids)
+                if missing_ids:
+                    return {
+                        "error": "Some selected episodes are no longer available",
+                        "missing_episode_ids": missing_ids,
+                        "added": len(added_items),
+                        "skipped": skipped_count,
+                        "items": added_items,
+                    }
         else:
             source_id = data.get("source_id", "")
             stream_id = data.get("stream_id", "")
-            if any(
-                i.get("source_id") == source_id
-                and i.get("stream_id") == stream_id
-                and i.get("status") in ("queued", "downloading")
-                for i in self._download_cart
-            ):
+            candidate = {"content_type": content_type, "source_id": source_id, "stream_id": stream_id}
+            if self._is_active_duplicate(candidate):
                 return {"error": "Item already in cart"}
             item = self._build_cart_item(
                 source_id=source_id,
@@ -1181,19 +1230,87 @@ class CartService:
                 icon=data.get("icon", ""),
                 group=data.get("group", ""),
                 container_extension=data.get("container_extension", "mp4"),
-                monitor_canonical=_series_monitor_canon,
+                monitor_canonical=series_monitor_canon,
             )
             self._download_cart.append(item)
             added_items.append(item)
 
-        self.save_cart()
-        if getattr(self, 'log_service', None) and added_items:
-            names = [i.get("name", "Unknown") for i in added_items[:5]]
-            label = ", ".join(names)
-            if len(added_items) > 5:
-                label += f" +{len(added_items) - 5} more"
-            await getattr(self, 'log_service', None).log("cart", "info", f"Added {len(added_items)} item(s) to cart: {label}")
-        return {"added": len(added_items), "items": added_items}
+        if save:
+            self.save_cart()
+            if getattr(self, "log_service", None) and added_items:
+                names = [i.get("name", "Unknown") for i in added_items[:5]]
+                label = ", ".join(names)
+                if len(added_items) > 5:
+                    label += f" +{len(added_items) - 5} more"
+                await self.log_service.log("cart", "info", f"Added {len(added_items)} item(s) to cart: {label}")
+        return {"added": len(added_items), "skipped": skipped_count, "items": added_items}
+
+    async def add_to_cart_batch(self, selections: list[dict]) -> dict:
+        """Add mixed movie/series selections with one persistence operation."""
+        async with self._cart_mutation_lock:
+            added_items: list[dict] = []
+            skipped: list[dict] = []
+            errors: list[dict] = []
+
+            for index, selection in enumerate(selections):
+                content_type = selection.get("content_type")
+                if content_type not in ("vod", "series"):
+                    errors.append({"index": index, "reason": "Unsupported content type"})
+                    continue
+
+                data = dict(selection)
+                if content_type == "series":
+                    scope = selection.get("scope") or {"mode": "all"}
+                    mode = scope.get("mode", "all")
+                    if mode == "all":
+                        data["add_mode"] = "series"
+                    elif mode == "seasons":
+                        seasons = scope.get("seasons") or []
+                        if not seasons:
+                            errors.append({"index": index, "reason": "No seasons selected"})
+                            continue
+                        data["add_mode"] = "season"
+                        data["season_num"] = seasons
+                    elif mode == "episodes":
+                        episode_ids = scope.get("episode_ids") or []
+                        if not episode_ids:
+                            errors.append({"index": index, "reason": "No episodes selected"})
+                            continue
+                        data["add_mode"] = "episodes"
+                        data["episode_ids"] = episode_ids
+                    else:
+                        errors.append({"index": index, "reason": "Unsupported series scope"})
+                        continue
+
+                result = await self._add_to_cart(data, save=False)
+                added_items.extend(result.get("items", []))
+                if result.get("skipped"):
+                    skipped.append({
+                        "index": index,
+                        "name": selection.get("name") or selection.get("series_name", ""),
+                        "count": result["skipped"],
+                        "reason": "already_queued",
+                    })
+                if result.get("error") == "Item already in cart":
+                    skipped.append({
+                        "index": index,
+                        "name": selection.get("name") or selection.get("series_name", ""),
+                        "count": 1,
+                        "reason": "already_queued",
+                    })
+                elif result.get("error"):
+                    errors.append({
+                        "index": index,
+                        "name": selection.get("name") or selection.get("series_name", ""),
+                        "reason": result["error"],
+                        "missing_episode_ids": result.get("missing_episode_ids", []),
+                    })
+
+            if added_items:
+                self.save_cart()
+                if getattr(self, "log_service", None):
+                    await self.log_service.log("cart", "info", f"Added {len(added_items)} item(s) to cart in batch")
+            return {"added": len(added_items), "skipped": skipped, "errors": errors, "items": added_items}
 
     @staticmethod
     def _build_cart_item(**kwargs) -> dict:

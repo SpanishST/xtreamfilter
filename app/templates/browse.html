@@ -57,9 +57,44 @@
         .type-pill { padding: 8px 16px; border-radius: 20px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #888; cursor: pointer; transition: all 0.2s; font-size: 0.85em; }
         .type-pill:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
         .type-pill.active { background: rgba(0, 212, 255, 0.2); border-color: #00d4ff; color: #00d4ff; }
-        .stats-bar { display: flex; justify-content: space-between; margin-bottom: 15px; padding: 0 5px; }
-        .stats-info { color: #888; font-size: 0.9em; }
-        .stats-info strong { color: #00d4ff; }
+         .stats-bar { display: flex; justify-content: space-between; margin-bottom: 15px; padding: 0 5px; }
+         .stats-info { color: #888; font-size: 0.9em; }
+         .stats-info strong { color: #00d4ff; }
+         .stats-actions { display: flex; gap: 8px; align-items: center; }
+         .page-select-all { display: none; }
+         body.selection-mode .page-select-all { display: inline-block; }
+         .page-select-all:disabled { opacity: 0.45; cursor: not-allowed; }
+         .selection-toggle.active { background: rgba(46, 213, 115, 0.18); border-color: #2ed573; color: #2ed573; }
+         .selection-bar { display: none; align-items: center; gap: 12px; margin: -5px 0 15px; padding: 10px 14px; background: rgba(46, 213, 115, 0.09); border: 1px solid rgba(46, 213, 115, 0.3); border-radius: 10px; }
+         .selection-bar.show { display: flex; }
+         .selection-bar-info { flex: 1; color: #ccc; font-size: 0.9em; }
+         .selection-bar-info strong { color: #2ed573; }
+         .selection-checkbox { position: absolute; top: 10px; left: 10px; width: 24px; height: 24px; margin: 0; accent-color: #2ed573; cursor: pointer; z-index: 10; display: none; }
+         body.selection-mode .selection-checkbox { display: block; }
+         body.selection-mode .new-badge { left: 46px; }
+         body.selection-mode .download-history-wrap { left: 52px; }
+         body.selection-mode .content-card:hover { border-color: rgba(46, 213, 115, 0.45); }
+         body.selection-mode .content-card.selected-for-cart { border-color: #2ed573; box-shadow: 0 0 0 2px rgba(46, 213, 115, 0.25); }
+         .bulk-review-list { display: flex; flex-direction: column; gap: 10px; max-height: 58vh; overflow-y: auto; }
+         .bulk-review-row { padding: 12px; border: 1px solid rgba(255,255,255,0.1); border-radius: 9px; background: rgba(0,0,0,0.18); }
+         .bulk-review-layout { display: flex; gap: 12px; align-items: flex-start; }
+         .bulk-review-poster, .bulk-review-poster-placeholder { width: 58px; height: 84px; flex: 0 0 58px; border-radius: 5px; object-fit: cover; background: linear-gradient(135deg, rgba(0,212,255,0.12), rgba(0,0,0,0.35)); }
+         .bulk-review-poster-placeholder { display: flex; align-items: center; justify-content: center; font-size: 1.5em; color: rgba(255,255,255,0.35); }
+         .bulk-review-details { flex: 1; min-width: 0; }
+         .bulk-review-title { display: flex; align-items: center; gap: 8px; color: #fff; font-weight: 600; margin-bottom: 9px; }
+         .bulk-review-title .bulk-type { margin-left: auto; font-size: 0.72em; color: #888; font-weight: 400; }
+         .bulk-review-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+         .bulk-review-controls label { color: #888; font-size: 0.8em; }
+         .bulk-review-controls select { flex: 1; min-width: 180px; padding: 7px 9px; color: #fff; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.14); border-radius: 6px; }
+         .bulk-scope-options { display: flex; gap: 6px; margin-top: 9px; flex-wrap: wrap; }
+         .bulk-scope-option { padding: 6px 10px; border: 1px solid rgba(255,255,255,0.13); border-radius: 6px; color: #aaa; cursor: pointer; font-size: 0.8em; }
+         .bulk-scope-option.selected { color: #00d4ff; border-color: #00d4ff; background: rgba(0,212,255,0.12); }
+         .bulk-season-list, .bulk-episode-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+         .bulk-season-option, .bulk-episode-option { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; color: #bbb; background: rgba(255,255,255,0.05); border-radius: 5px; font-size: 0.78em; cursor: pointer; }
+         .bulk-episode-list { max-height: 130px; overflow-y: auto; }
+         .bulk-review-meta { margin-top: 8px; color: #888; font-size: 0.78em; }
+         .bulk-review-error { margin-top: 8px; color: #ff6b6b; font-size: 0.8em; }
+         @media (max-width: 768px) { .selection-bar { align-items: stretch; flex-wrap: wrap; } .selection-bar-info { flex-basis: 100%; } }
         .content-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 20px; margin-bottom: 30px; }
         .content-card { background: rgba(255, 255, 255, 0.05); border-radius: 12px; overflow: hidden; border: 1px solid rgba(255, 255, 255, 0.08); transition: all 0.3s; position: relative; }
         .content-card.history-popup-open { overflow: visible; z-index: 30; }
@@ -411,7 +446,18 @@
                 </div>
             </div>
         </div>
-        <div class="stats-bar"><div class="stats-info">Showing <strong id="showing-count">0</strong> of <strong id="total-count">0</strong> items</div></div>
+        <div class="stats-bar">
+            <div class="stats-info">Showing <strong id="showing-count">0</strong> of <strong id="total-count">0</strong> items</div>
+            <div class="stats-actions">
+                <button id="page-select-all" class="btn btn-secondary btn-small page-select-all" onclick="toggleSelectAllDisplayed()">☑ Select all shown</button>
+                <button id="selection-toggle" class="btn btn-secondary btn-small selection-toggle" onclick="toggleBrowseSelectionMode()">☑ Select</button>
+            </div>
+        </div>
+        <div id="selection-bar" class="selection-bar">
+            <div class="selection-bar-info"><strong id="selection-count">0</strong> titles selected</div>
+            <button class="btn btn-secondary btn-small" onclick="clearBrowseSelection()">Clear</button>
+            <button class="btn btn-primary btn-small" onclick="openBulkReview()">Configure and add</button>
+        </div>
         <div id="loading-state" class="loading" style="display: none;"><div class="loading-spinner"></div><p>Loading content...</p></div>
         <div id="empty-state" class="empty-state" style="display: none;"><div class="empty-state-icon">No results</div><h3>No content found</h3><p>Try adjusting your filters or search terms</p></div>
         <div class="content-grid" id="content-grid"></div>
@@ -711,6 +757,26 @@
             <div class="modal-footer">
                 <button class="btn btn-primary" onclick="submitVodAdd()">Add to Cart</button>
                 <button class="btn btn-secondary" onclick="closeVodAddModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bulk Cart Review Modal -->
+    <div class="modal-overlay" id="bulk-cart-modal">
+        <div class="modal" style="max-width: min(920px, 95vw);">
+            <div class="modal-header">
+                <h2>Configure Download Selection</h2>
+                <button class="modal-close" onclick="closeBulkReview()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="color:#888;font-size:0.85em;margin-bottom:12px;">Each title is added once. Choose the source for duplicate titles and the episode scope for series.</p>
+                <div id="bulk-review-list" class="bulk-review-list"></div>
+                <div id="bulk-review-summary" style="margin-top:14px;padding:10px 12px;border-radius:8px;background:rgba(0,212,255,0.08);border:1px solid rgba(0,212,255,0.2);color:#00d4ff;font-size:0.9em;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-danger" onclick="clearBulkReviewSelection()">Clear selection</button>
+                <button class="btn btn-secondary" onclick="closeBulkReview()">Cancel</button>
+                <button id="bulk-add-btn" class="btn btn-primary" onclick="submitBulkCart()">Add to Cart</button>
             </div>
         </div>
     </div>
@@ -1335,6 +1401,12 @@
         let _pendingGroupName = '';
         let _pendingCategoryId = null;
         let _lastBrowseUrl = '';
+        let _browseSelectionMode = false;
+        const _browseSelections = new Map();
+        const _browseCandidates = new Map();
+        let _lastRenderedBrowseItems = [];
+        let _lastRenderedBrowseGrouped = false;
+        let _bulkReviewRows = [];
 
         const iconMap = {
             'folder': '📁', 'heart': '❤️', 'star': '⭐', 'fire': '🔥', 'clock': '🕐',
@@ -1482,6 +1554,7 @@
             document.querySelector('#controls-bar > .controls-row:first-child').style.display = selectedCategoryId ? 'none' : 'flex';
             document.getElementById('sort-filter-row').style.display = selectedCategoryId ? 'flex' : ((contentType === 'vod' || contentType === 'series') ? 'flex' : 'none');
             updateDownloadStatusControl();
+            updateSelectionAvailability();
             document.getElementById('controls-bar').style.display = 'block';
             renderBrowseNav();
             currentPage = 1;
@@ -1498,6 +1571,7 @@
             const sortFilterRow = document.getElementById('sort-filter-row');
             sortFilterRow.style.display = (type === 'vod' || type === 'series') ? 'flex' : 'none';
             updateDownloadStatusControl();
+            updateSelectionAvailability();
             currentPage = 1;
             loadGroups();
             saveBrowseFilters();
@@ -1510,6 +1584,15 @@
             const disabled = !selectedCategoryId && contentType === 'live';
             select.disabled = disabled;
             if (disabled) select.value = 'all';
+        }
+
+        function updateSelectionAvailability() {
+            const button = document.getElementById('selection-toggle');
+            if (!button) return;
+            const disabled = !selectedCategoryId && contentType === 'live';
+            button.disabled = disabled;
+            button.title = disabled ? 'Bulk download is available for films and series' : 'Select titles for bulk download';
+            if (disabled && _browseSelectionMode) toggleBrowseSelectionMode();
         }
 
         async function loadGroups() {
@@ -1647,7 +1730,134 @@
             }
         }
 
+        function _browseLeafKey(item) {
+            return (item.content_type || contentType) + '|' + String(item.source_id || '') + '|' + String(item.id || '');
+        }
+
+        function _browseVariant(item) {
+            const type = item.content_type || contentType;
+            return {
+                source_id: item.source_id || '',
+                source_name: item.source_name || 'Unknown',
+                stream_id: item.id || '',
+                series_id: type === 'series' ? (item.id || '') : undefined,
+                name: item.name || '',
+                icon: item.icon || item.cover || '',
+                group: item.group || '',
+                container_extension: item.container_extension || 'mp4'
+            };
+        }
+
+        function _registerBrowseCandidate(candidate) {
+            const existing = _browseCandidates.get(candidate.selectionKey);
+            if (existing) {
+                const variants = new Map(existing.variants.map(variant => [variant.source_id + '|' + variant.stream_id, variant]));
+                candidate.variants.forEach(variant => variants.set(variant.source_id + '|' + variant.stream_id, variant));
+                existing.variants = Array.from(variants.values());
+                existing.name = candidate.name || existing.name;
+                existing.icon = candidate.icon || existing.icon;
+                existing.group = candidate.group || existing.group;
+                return candidate.selectionKey;
+            }
+            _browseCandidates.set(candidate.selectionKey, candidate);
+            return candidate.selectionKey;
+        }
+
+        function _candidateForItem(item) {
+            const type = item.content_type || contentType;
+            return {
+                selectionKey: _browseLeafKey(item),
+                content_type: type,
+                name: item.name || '',
+                icon: item.icon || '',
+                group: item.group || '',
+                variants: [_browseVariant(item)]
+            };
+        }
+
+        function _candidateForGroup(group) {
+            const type = group.items[0]?.content_type || contentType;
+            const tmdb = group.tmdb_id ? String(group.tmdb_id) : '';
+            const selectionKey = 'group|' + type + '|' + (tmdb || String(group.name || '').toLowerCase().trim());
+            return {
+                selectionKey,
+                content_type: type,
+                name: group.name || '',
+                icon: group.icon || '',
+                group: group.items[0]?.group || '',
+                variants: group.items.map(_browseVariant)
+            };
+        }
+
+        function selectionCheckboxHtml(selectionKey) {
+            const checked = _browseSelections.has(selectionKey) ? ' checked' : '';
+            return '<input type="checkbox" class="selection-checkbox" data-selection-key="' + escapeAttr(selectionKey) + '"' + checked + ' onclick="event.stopPropagation()" onchange="toggleBrowseSelection(this)" aria-label="Select for download">';
+        }
+
+        function toggleBrowseSelectionMode() {
+            _browseSelectionMode = !_browseSelectionMode;
+            if (!_browseSelectionMode) _browseSelections.clear();
+            document.body.classList.toggle('selection-mode', _browseSelectionMode);
+            const button = document.getElementById('selection-toggle');
+            button.classList.toggle('active', _browseSelectionMode);
+            button.textContent = _browseSelectionMode ? '✕ Done selecting' : '☑ Select';
+            if (_lastRenderedBrowseItems.length) {
+                renderContent(_lastRenderedBrowseItems, _lastRenderedBrowseGrouped);
+            }
+            updateBrowseSelectionBar();
+        }
+
+        function toggleBrowseSelection(checkbox) {
+            const key = checkbox.dataset.selectionKey;
+            const candidate = _browseCandidates.get(key);
+            if (!candidate) return;
+            if (checkbox.checked) {
+                _browseSelections.set(key, candidate);
+            } else {
+                _browseSelections.delete(key);
+            }
+            const card = checkbox.closest('.content-card');
+            if (card) card.classList.toggle('selected-for-cart', checkbox.checked);
+            updateBrowseSelectionBar();
+        }
+
+        function clearBrowseSelection() {
+            _browseSelections.clear();
+            if (_lastRenderedBrowseItems.length) renderContent(_lastRenderedBrowseItems, _lastRenderedBrowseGrouped);
+            updateBrowseSelectionBar();
+        }
+
+        function toggleSelectAllDisplayed() {
+            const checkboxes = Array.from(document.querySelectorAll('#content-grid .selection-checkbox'));
+            if (checkboxes.length === 0) return;
+            const selectAll = !checkboxes.every(checkbox => checkbox.checked);
+            checkboxes.forEach(checkbox => {
+                const key = checkbox.dataset.selectionKey;
+                const candidate = _browseCandidates.get(key);
+                if (!candidate) return;
+                checkbox.checked = selectAll;
+                if (selectAll) _browseSelections.set(key, candidate);
+                else _browseSelections.delete(key);
+                const card = checkbox.closest('.content-card');
+                if (card) card.classList.toggle('selected-for-cart', selectAll);
+            });
+            updateBrowseSelectionBar();
+        }
+
+        function updateBrowseSelectionBar() {
+            const count = _browseSelections.size;
+            document.getElementById('selection-count').textContent = count;
+            document.getElementById('selection-bar').classList.toggle('show', _browseSelectionMode && count > 0);
+            const pageSelectAll = document.getElementById('page-select-all');
+            const pageCheckboxes = Array.from(document.querySelectorAll('#content-grid .selection-checkbox'));
+            const allDisplayedSelected = pageCheckboxes.length > 0 && pageCheckboxes.every(checkbox => checkbox.checked);
+            pageSelectAll.disabled = pageCheckboxes.length === 0;
+            pageSelectAll.textContent = allDisplayedSelected ? '☐ Clear shown' : '☑ Select all shown';
+        }
+
         function renderContent(items, grouped) {
+            _lastRenderedBrowseItems = items;
+            _lastRenderedBrowseGrouped = grouped;
             const grid = document.getElementById('content-grid');
             grid.innerHTML = items.map((item, idx) => {
                 if (grouped && item.count > 1) {
@@ -1658,6 +1868,7 @@
                 return renderSingleCard(single);
             }).join('');
             bindDownloadHistoryPopups();
+            updateBrowseSelectionBar();
         }
 
         const typeLabels = { live: 'Live', vod: 'Film', series: 'Series' };
@@ -1774,6 +1985,8 @@
 
         function renderSingleCard(item) {
             const itemType = item.content_type || contentType;
+            const selectionCandidate = itemType === 'vod' || itemType === 'series' ? _candidateForItem(item) : null;
+            const selectionKey = selectionCandidate ? _registerBrowseCandidate(selectionCandidate) : '';
             const posterClass = itemType === 'live' ? 'card-poster-placeholder live' : 'card-poster-placeholder';
             const poster = item.icon;
             const placeholderIcon = itemType === 'live' ? '📡' : '🎬';
@@ -1815,8 +2028,10 @@
                     ? '<button class="play-btn" onclick="event.stopPropagation(); openPlayer(\'' + escapeAttr(itemType) + '\', \'' + escapeAttr(item.source_id) + '\', \'' + escapeAttr(item.id) + '\', \'' + jsEscape(item.name) + '\', \'' + escapeAttr(item.icon || '') + '\', \'' + escapeAttr(item.group || '') + '\', \'' + escapeAttr(playExt) + '\')" title="Play in browser">▶</button>'
                     : '');
 
-            const cardClass = downloadHistoryBadge ? 'content-card has-download-history' : 'content-card';
+            const cardClass = (downloadHistoryBadge ? 'content-card has-download-history' : 'content-card') +
+                (selectionCandidate && _browseSelections.has(selectionKey) ? ' selected-for-cart' : '');
             return '<div class="' + cardClass + '" ' + (itemType === 'series' ? 'onclick="_handleCartAdd(\'' + escapeAttr(item.source_id) + '\', \'' + escapeAttr(item.id) + '\', \'series\', \'' + jsEscape(item.name) + '\', \'' + escapeAttr(item.icon || '') + '\', \'' + escapeAttr(item.group || '') + '\', null, \'' + escapeAttr(playExt) + '\')" style="cursor:pointer"' : '') + '>' +
+                (selectionCandidate ? selectionCheckboxHtml(selectionKey) : '') +
                 (isNew ? '<div class="new-badge">NEW</div>' : '') +
                 cartBtn +
                 monitorBtn +
@@ -1843,6 +2058,8 @@
         function renderGroupedCard(group, idx) {
             // Determine dominant content type from sub-items
             const groupType = group.items[0]?.content_type || contentType;
+            const selectionCandidate = groupType === 'vod' || groupType === 'series' ? _candidateForGroup(group) : null;
+            const selectionKey = selectionCandidate ? _registerBrowseCandidate(selectionCandidate) : '';
             const inCategoryView = !!selectedCategoryId;
             const posterClass = groupType === 'live' ? 'card-poster-placeholder live' : 'card-poster-placeholder';
             const poster = group.icon;
@@ -1962,10 +2179,12 @@
                 }));
             const groupDownloadHistoryBadge = downloadHistoryBadgeHtml(groupType, group.downloaded, group.downloaded_episode_count, groupDownloadHistoryKeys);
 
-            const cardClass = groupDownloadHistoryBadge
+            const cardClass = (groupDownloadHistoryBadge
                 ? 'content-card no-cat-btn has-download-history'
-                : 'content-card no-cat-btn';
+                : 'content-card no-cat-btn') +
+                (selectionCandidate && _browseSelections.has(selectionKey) ? ' selected-for-cart' : '');
             return '<div class="' + cardClass + '">' +
+                (selectionCandidate ? selectionCheckboxHtml(selectionKey) : '') +
                 (isNew ? '<div class="new-badge">NEW</div>' : '') +
                 groupCartBtn +
                 groupMonitorBtn +
@@ -2486,6 +2705,248 @@
             
             closeVodAddModal();
             await _addVodToCart(sId, iId, finalName, ic, grp, xt);
+        }
+
+        function _bulkSourceLabel(variant) {
+            const source = sources.find(item => item.id === variant.source_id);
+            return (source ? source.name : variant.source_name || variant.source_id) +
+                (variant.group ? ' — ' + variant.group : '');
+        }
+
+        function _bulkEpisodes(row) {
+            if (!row.episodesData) return [];
+            return Object.values(row.episodesData.seasons || {}).flat();
+        }
+
+        function _bulkEpisodeCount(row) {
+            if (row.scopeMode === 'seasons') {
+                return _bulkEpisodes(row).filter(ep => row.seasons.has(String(ep.season))).length;
+            }
+            if (row.scopeMode === 'episodes') return row.episodeIds.size;
+            return _bulkEpisodes(row).length;
+        }
+
+        function renderBulkReview() {
+            const container = document.getElementById('bulk-review-list');
+            container.innerHTML = _bulkReviewRows.map((row, index) => {
+                const candidate = row.candidate;
+                const variant = candidate.variants[row.sourceIndex] || candidate.variants[0];
+                const sourceOptions = candidate.variants.map((sourceVariant, sourceIndex) =>
+                    '<option value="' + sourceIndex + '"' + (sourceIndex === row.sourceIndex ? ' selected' : '') + '>' +
+                    escapeHtml(_bulkSourceLabel(sourceVariant)) + '</option>'
+                ).join('');
+                const sourceControl = candidate.content_type === 'vod' && candidate.variants.length === 1
+                    ? '<div class="bulk-review-controls"><label>Source</label><span style="color:#ccc;font-size:0.85em;">' + escapeHtml(_bulkSourceLabel(variant)) + '</span></div>'
+                    : '<div class="bulk-review-controls"><label>Source</label>' +
+                        '<select onchange="onBulkSourceChange(' + index + ', this.value)">' + sourceOptions + '</select></div>';
+                const posterUrl = variant.icon || candidate.icon || '';
+                const posterIcon = candidate.content_type === 'series' ? '📺' : '🎬';
+                const posterHtml = posterUrl
+                    ? '<img class="bulk-review-poster" src="' + escapeAttr(posterUrl) + '" alt="" loading="lazy" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'">' +
+                        '<div class="bulk-review-poster-placeholder" style="display:none">' + posterIcon + '</div>'
+                    : '<div class="bulk-review-poster-placeholder">' + posterIcon + '</div>';
+                let html = '<div class="bulk-review-row"><div class="bulk-review-layout">' + posterHtml + '<div class="bulk-review-details">' +
+                    '<div class="bulk-review-title">' + (candidate.content_type === 'series' ? '📺 ' : '🎬 ') + escapeHtml(candidate.name) +
+                    '<span class="bulk-type">' + (candidate.content_type === 'series' ? 'Series' : 'Movie') + '</span></div>' +
+                    sourceControl;
+
+                if (candidate.content_type === 'series') {
+                    if (row.loading) {
+                        html += '<div class="bulk-review-meta">Loading episode list…</div>';
+                    } else if (row.error) {
+                        html += '<div class="bulk-review-error">' + escapeHtml(row.error) + '</div>';
+                    } else {
+                        html += '<div class="bulk-scope-options">' +
+                            ['all', 'seasons', 'episodes'].map(mode =>
+                                '<div class="bulk-scope-option' + (row.scopeMode === mode ? ' selected' : '') + '" onclick="setBulkScope(' + index + ', \'' + mode + '\')">' +
+                                (mode === 'all' ? 'All episodes' : mode === 'seasons' ? 'Selected seasons' : 'Selected episodes') + '</div>'
+                            ).join('') + '</div>';
+                        if (row.scopeMode === 'seasons') {
+                            html += '<div class="bulk-season-list">' + Object.keys(row.episodesData.seasons || {}).map(season =>
+                                '<label class="bulk-season-option"><input type="checkbox"' + (row.seasons.has(String(season)) ? ' checked' : '') +
+                                ' onchange="toggleBulkSeason(' + index + ', \'' + escapeAttr(season) + '\')">Season ' + escapeHtml(season) +
+                                ' (' + row.episodesData.seasons[season].length + ')</label>'
+                            ).join('') + '</div>';
+                        } else if (row.scopeMode === 'episodes') {
+                            html += '<div class="bulk-episode-list">' + Object.entries(row.episodesData.seasons || {}).map(([season, episodes]) =>
+                                episodes.map(ep => '<label class="bulk-episode-option"><input type="checkbox"' +
+                                    (row.episodeIds.has(String(ep.stream_id)) ? ' checked' : '') +
+                                    ' onchange="toggleBulkEpisode(' + index + ', \'' + escapeAttr(ep.stream_id) + '\')">S' + escapeHtml(season) + 'E' +
+                                    String(ep.episode_num).padStart(2, '0') + '</label>').join('')
+                            ).join('') + '</div>';
+                        }
+                        html += '<div class="bulk-review-meta">' + _bulkEpisodeCount(row) + ' episode' + (_bulkEpisodeCount(row) === 1 ? '' : 's') + ' selected</div>';
+                    }
+                }
+                return html + '</div></div></div>';
+            }).join('');
+            updateBulkReviewSummary();
+        }
+
+        function updateBulkReviewSummary() {
+            let movies = 0;
+            let episodes = 0;
+            _bulkReviewRows.forEach(row => {
+                if (row.candidate.content_type === 'vod') movies++;
+                else episodes += _bulkEpisodeCount(row);
+            });
+            const series = _bulkReviewRows.filter(row => row.candidate.content_type === 'series').length;
+            document.getElementById('bulk-review-summary').textContent =
+                movies + ' movie' + (movies === 1 ? '' : 's') + ' + ' + series + ' series → ' +
+                (movies + episodes) + ' file' + (movies + episodes === 1 ? '' : 's') + ' will be added';
+        }
+
+        async function _loadBulkEpisodes(row) {
+            const variant = row.candidate.variants[row.sourceIndex] || row.candidate.variants[0];
+            row.loading = true;
+            row.error = '';
+            row.episodesData = null;
+            renderBulkReview();
+            try {
+                const response = await fetch('/api/cart/series-episodes/' + encodeURIComponent(variant.source_id) + '/' + encodeURIComponent(variant.series_id));
+                const data = await response.json();
+                if (!response.ok || !data.seasons) throw new Error(data.error || 'Could not load episodes');
+                row.episodesData = data;
+            } catch (error) {
+                row.error = error.message || 'Could not load episodes';
+            } finally {
+                row.loading = false;
+                renderBulkReview();
+            }
+        }
+
+        async function onBulkSourceChange(index, sourceIndex) {
+            const row = _bulkReviewRows[index];
+            row.sourceIndex = parseInt(sourceIndex, 10) || 0;
+            row.seasons = new Set();
+            row.episodeIds = new Set();
+            if (row.candidate.content_type === 'series') await _loadBulkEpisodes(row);
+            else renderBulkReview();
+        }
+
+        function setBulkScope(index, mode) {
+            const row = _bulkReviewRows[index];
+            row.scopeMode = mode;
+            renderBulkReview();
+        }
+
+        function toggleBulkSeason(index, season) {
+            const row = _bulkReviewRows[index];
+            if (row.seasons.has(String(season))) row.seasons.delete(String(season));
+            else row.seasons.add(String(season));
+            renderBulkReview();
+        }
+
+        function toggleBulkEpisode(index, episodeId) {
+            const row = _bulkReviewRows[index];
+            if (row.episodeIds.has(String(episodeId))) row.episodeIds.delete(String(episodeId));
+            else row.episodeIds.add(String(episodeId));
+            renderBulkReview();
+        }
+
+        async function openBulkReview() {
+            if (_browseSelections.size === 0) return;
+            _bulkReviewRows = Array.from(_browseSelections.values()).map(candidate => ({
+                candidate,
+                sourceIndex: 0,
+                scopeMode: 'all',
+                seasons: new Set(),
+                episodeIds: new Set(),
+                episodesData: null,
+                loading: candidate.content_type === 'series',
+                error: ''
+            }));
+
+            // A single-source movie has nothing to configure. Add a selection
+            // containing only those movies directly without opening a modal.
+            const directMovieBatch = _bulkReviewRows.length > 0 && _bulkReviewRows.every(row =>
+                row.candidate.content_type === 'vod' && row.candidate.variants.length === 1
+            );
+            if (directMovieBatch) {
+                await submitBulkCart();
+                return;
+            }
+
+            document.getElementById('bulk-cart-modal').classList.add('show');
+            renderBulkReview();
+            await Promise.all(_bulkReviewRows.filter(row => row.candidate.content_type === 'series').map(_loadBulkEpisodes));
+        }
+
+        function closeBulkReview() {
+            document.getElementById('bulk-cart-modal').classList.remove('show');
+            _bulkReviewRows = [];
+        }
+
+        function clearBulkReviewSelection() {
+            closeBulkReview();
+            clearBrowseSelection();
+        }
+
+        async function submitBulkCart() {
+            const selections = [];
+            for (const row of _bulkReviewRows) {
+                const candidate = row.candidate;
+                const variant = candidate.variants[row.sourceIndex] || candidate.variants[0];
+                const selection = {
+                    content_type: candidate.content_type,
+                    source_id: variant.source_id,
+                    stream_id: variant.stream_id,
+                    series_id: candidate.content_type === 'series' ? variant.series_id : undefined,
+                    name: candidate.name,
+                    series_name: candidate.content_type === 'series' ? candidate.name : undefined,
+                    icon: candidate.icon || variant.icon || '',
+                    group: candidate.group || variant.group || '',
+                    container_extension: variant.container_extension || 'mp4'
+                };
+                if (candidate.content_type === 'series') {
+                    if (row.loading || row.error || !row.episodesData) {
+                        showToast('Resolve all series episode lists before adding', 'error');
+                        return;
+                    }
+                    if (row.scopeMode === 'seasons' && row.seasons.size === 0) {
+                        showToast('Select at least one season', 'error');
+                        return;
+                    }
+                    if (row.scopeMode === 'episodes' && row.episodeIds.size === 0) {
+                        showToast('Select at least one episode', 'error');
+                        return;
+                    }
+                    selection.scope = row.scopeMode === 'all'
+                        ? { mode: 'all' }
+                        : row.scopeMode === 'seasons'
+                            ? { mode: 'seasons', seasons: Array.from(row.seasons) }
+                            : { mode: 'episodes', episode_ids: Array.from(row.episodeIds) };
+                }
+                selections.push(selection);
+            }
+
+            const button = document.getElementById('bulk-add-btn');
+            button.disabled = true;
+            try {
+                const response = await fetch('/api/cart/batch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ selections })
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    showToast(data.error || 'Failed to add selection', 'error');
+                    return;
+                }
+                const skipped = (data.skipped || []).reduce((sum, item) => sum + (item.count || 0), 0);
+                const errors = (data.errors || []).length;
+                let message = 'Added ' + data.added + ' file' + (data.added === 1 ? '' : 's');
+                if (skipped) message += ', skipped ' + skipped;
+                if (errors) message += ', ' + errors + ' error' + (errors === 1 ? '' : 's');
+                showToast(message, errors && !data.added ? 'error' : skipped || errors ? 'info' : 'success');
+                updateCartBadge();
+                closeBulkReview();
+                clearBrowseSelection();
+            } catch (error) {
+                showToast('Error adding selection to cart', 'error');
+            } finally {
+                button.disabled = false;
+            }
         }
 
         async function openEpisodeModal(sourceId, seriesId, seriesName, icon, group, allSources) {

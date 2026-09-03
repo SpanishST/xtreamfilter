@@ -4,8 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import uuid
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
@@ -107,94 +105,32 @@ async def active_source_downloads(cart: CartService = Depends(get_cart_service))
 async def add_to_cart(
     request: Request,
     cart: CartService = Depends(get_cart_service),
-    xtream: XtreamService = Depends(get_xtream_service),
 ):
     data = await request.json()
-    content_type = data.get("content_type", "vod")
-    add_mode = data.get("add_mode", "episode")
-    added_items: list[dict] = []
+    result = await cart.add_to_cart(data)
+    if result.get("error"):
+        status_code = 409 if result["error"] == "Item already in cart" else 400
+        return JSONResponse(status_code=status_code, content=result)
+    return {"status": "ok", **result}
 
-    if content_type == "series" and add_mode in ("series", "season"):
-        series_id = data.get("series_id", data.get("stream_id", ""))
-        source_id = data.get("source_id", "")
-        series_name = data.get("series_name", data.get("name", ""))
-        season_filter = data.get("season_num") if add_mode == "season" else None
 
-        episodes = await xtream.fetch_series_episodes(source_id, series_id)
-        if not episodes:
-            return JSONResponse(status_code=400, content={"error": "Could not fetch series episodes"})
-
-        for ep in episodes:
-            if season_filter and str(ep["season"]) != str(season_filter):
-                continue
-            if any(
-                i.get("source_id") == source_id
-                and i.get("stream_id") == ep["stream_id"]
-                and i.get("status") in ("queued", "downloading")
-                for i in cart._download_cart
-            ):
-                continue
-            item = {
-                "id": str(uuid.uuid4()),
-                "stream_id": ep["stream_id"],
-                "source_id": source_id,
-                "content_type": "series",
-                "name": ep.get("title", "") or f"Episode {ep['episode_num']}",
-                # Prefer the caller-supplied series_name (display/user name) over
-                # the stream's series_name which may contain provider-specific tags.
-                "series_name": series_name or ep.get("series_name", ""),
-                "series_id": series_id,
-                "season": ep["season"],
-                "episode_num": ep.get("episode_num", 0),
-                "episode_title": ep.get("title", ""),
-                "icon": data.get("icon", ""),
-                "group": data.get("group", ""),
-                "container_extension": ep.get("container_extension", "mp4"),
-                "added_at": datetime.now().isoformat(),
-                "status": "queued",
-                "progress": 0,
-                "error": None,
-                "file_path": None,
-                "file_size": None,
-            }
-            cart._download_cart.append(item)
-            added_items.append(item)
-    else:
-        source_id = data.get("source_id", "")
-        stream_id = data.get("stream_id", "")
-        if any(
-            i.get("source_id") == source_id
-            and i.get("stream_id") == stream_id
-            and i.get("status") in ("queued", "downloading")
-            for i in cart._download_cart
-        ):
-            return JSONResponse(status_code=409, content={"error": "Item already in cart"})
-        item = {
-            "id": str(uuid.uuid4()),
-            "stream_id": stream_id,
-            "source_id": source_id,
-            "content_type": content_type,
-            "name": data.get("name", ""),
-            "series_name": data.get("series_name"),
-            "series_id": data.get("series_id"),
-            "season": data.get("season"),
-            "episode_num": data.get("episode_num"),
-            "episode_title": data.get("episode_title"),
-            "icon": data.get("icon", ""),
-            "group": data.get("group", ""),
-            "container_extension": data.get("container_extension", "mp4"),
-            "added_at": datetime.now().isoformat(),
-            "status": "queued",
-            "progress": 0,
-            "error": None,
-            "file_path": None,
-            "file_size": None,
-        }
-        cart._download_cart.append(item)
-        added_items.append(item)
-
-    cart.save_cart()
-    return {"status": "ok", "added": len(added_items), "items": added_items}
+@router.post("/api/cart/batch")
+async def add_to_cart_batch(
+    request: Request,
+    cart: CartService = Depends(get_cart_service),
+):
+    """Add selected Browse titles and series scopes in one cart operation."""
+    data = await request.json()
+    selections = data.get("selections") if isinstance(data, dict) else None
+    if (
+        not isinstance(selections, list)
+        or not selections
+        or len(selections) > 200
+        or any(not isinstance(selection, dict) for selection in selections)
+    ):
+        return JSONResponse(status_code=400, content={"error": "Selections must contain 1 to 200 items"})
+    result = await cart.add_to_cart_batch(selections)
+    return {"status": "ok", **result}
 
 
 @router.delete("/api/cart/{item_id}")

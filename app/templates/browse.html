@@ -61,6 +61,9 @@
          .stats-info { color: #888; font-size: 0.9em; }
          .stats-info strong { color: #00d4ff; }
          .stats-actions { display: flex; gap: 8px; align-items: center; }
+         .per-page-control { display: inline-flex; align-items: center; gap: 6px; color: #888; font-size: 0.8em; text-transform: uppercase; }
+         .per-page-control select { padding: 6px 8px; color: #fff; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.14); border-radius: 6px; color-scheme: dark; text-transform: none; }
+         .per-page-control select:focus { outline: none; border-color: #00d4ff; }
          .page-select-all { display: none; }
          body.selection-mode .page-select-all { display: inline-block; }
          .page-select-all:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -449,6 +452,12 @@
         <div class="stats-bar">
             <div class="stats-info">Showing <strong id="showing-count">0</strong> of <strong id="total-count">0</strong> items</div>
             <div class="stats-actions">
+                <label class="per-page-control">Results <select id="per-page" onchange="changeBrowsePerPage(this.value)">
+                    <option value="25">25 / page</option>
+                    <option value="50" selected>50 / page</option>
+                    <option value="100">100 / page</option>
+                    <option value="200">200 / page</option>
+                </select></label>
                 <button id="page-select-all" class="btn btn-secondary btn-small page-select-all" onclick="toggleSelectAllDisplayed()">☑ Select all shown</button>
                 <button id="selection-toggle" class="btn btn-secondary btn-small selection-toggle" onclick="toggleBrowseSelectionMode()">☑ Select</button>
             </div>
@@ -840,6 +849,7 @@
             minRating: '0',
             maxAddedDays: '0',
             downloadStatus: 'all',
+            perPage: '50',
             categoryId: null
         };
         function loadBrowseFilters() {
@@ -864,6 +874,7 @@
                     minRating: document.getElementById('min-rating').value,
                     maxAddedDays: document.getElementById('max-added-days').value,
                     downloadStatus: document.getElementById('download-status').value,
+                    perPage: document.getElementById('per-page').value,
                     categoryId: selectedCategoryId
                 };
                 localStorage.setItem(BROWSE_FILTERS_KEY, JSON.stringify(f));
@@ -882,7 +893,9 @@
             document.getElementById('min-rating').value = BROWSE_FILTERS_DEFAULTS.minRating;
             document.getElementById('max-added-days').value = BROWSE_FILTERS_DEFAULTS.maxAddedDays;
             document.getElementById('download-status').value = BROWSE_FILTERS_DEFAULTS.downloadStatus;
+            document.getElementById('per-page').value = BROWSE_FILTERS_DEFAULTS.perPage;
             if (selectedCategoryId !== null) selectScope(null);
+            saveBrowseFilters();
             loadSources();
             loadGroups();
             currentPage = 1;
@@ -892,6 +905,20 @@
             document.getElementById('empty-state').style.display = 'block';
             document.getElementById('loading-state').style.display = 'none';
             if (typeof showToast === 'function') showToast('Filters reset', 'info');
+        }
+
+        function changeBrowsePerPage(value) {
+            const allowed = ['25', '50', '100', '200'];
+            if (!allowed.includes(String(value))) value = BROWSE_FILTERS_DEFAULTS.perPage;
+            document.getElementById('per-page').value = String(value);
+            currentPage = 1;
+            saveBrowseFilters();
+            applyFilters();
+        }
+
+        function getBrowsePerPage() {
+            const value = document.getElementById('per-page').value;
+            return ['25', '50', '100', '200'].includes(value) ? value : BROWSE_FILTERS_DEFAULTS.perPage;
         }
 
         // VOD transcode seeking state
@@ -1436,6 +1463,7 @@
             document.getElementById('min-rating').value = _saved.minRating;
             document.getElementById('max-added-days').value = _saved.maxAddedDays;
             document.getElementById('download-status').value = _saved.downloadStatus || 'all';
+            document.getElementById('per-page').value = ['25', '50', '100', '200'].includes(String(_saved.perPage)) ? String(_saved.perPage) : '50';
 
             // Stash saved source/group/category so the loaders can re-apply once the dropdowns are populated
             _pendingSourceId = _saved.sourceId;
@@ -1665,10 +1693,10 @@
                 let url;
                 if (selectedCategoryId) {
                     // Category view: don't send type — API returns all types
-                    url = '/api/browse?page=' + currentPage + '&per_page=50&category_id=' + selectedCategoryId;
+                    url = '/api/browse?page=' + currentPage + '&per_page=' + getBrowsePerPage() + '&category_id=' + selectedCategoryId;
                     if (useSourceFilters) url += '&use_source_filters=true';
                 } else {
-                    url = '/api/browse?type=' + contentType + '&page=' + currentPage + '&per_page=50';
+                    url = '/api/browse?type=' + contentType + '&page=' + currentPage + '&per_page=' + getBrowsePerPage();
                     if (searchQuery) url += '&search=' + encodeURIComponent(searchQuery);
                     if (sourceId) url += '&source=' + sourceId;
                     if (group) url += '&group=' + encodeURIComponent(group);

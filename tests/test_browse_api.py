@@ -339,6 +339,24 @@ def test_browse_pagination(client, data_dir):
     assert len(data["items"]) == 5
 
 
+def test_browse_all_page_size_returns_all_results(client, data_dir):
+    _seed_streams(data_dir, [
+        {"stream_id": str(i), "name": f"Movie {i}", "category_id": "10"}
+        for i in range(1, 4)
+    ], "vod")
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+
+    response = client.get("/api/browse?type=vod&per_page=0")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["per_page"] == 0
+    assert data["total"] == 3
+    assert len(data["items"]) == 3
+    assert data["total_pages"] == 1
+
+
 def test_browse_uses_sql_pagination_for_large_live_catalog(client, data_dir, monkeypatch):
     _seed_categories(data_dir, [{"category_id": "10", "category_name": "News"}], "live")
     _seed_streams(data_dir, [

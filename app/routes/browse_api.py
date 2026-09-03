@@ -225,7 +225,7 @@ async def api_browse(
     cart: CartService = Depends(get_cart_service),
 ):
     page = max(1, page)
-    per_page = min(max(1, per_page), 200)
+    per_page = 0 if per_page == 0 else min(max(1, per_page), 200)
     search_lower = search.lower()
 
     # Handle tmdb:XXXX search prefix
@@ -333,7 +333,7 @@ async def api_browse(
                     page=page,
                     per_page=per_page,
                 )
-                items_are_paginated = True
+                items_are_paginated = per_page > 0
         else:
             result = await asyncio.to_thread(
                 cache.browse_streams_db,
@@ -341,7 +341,7 @@ async def api_browse(
                 page=page,
                 per_page=per_page,
             )
-            items_are_paginated = True
+            items_are_paginated = per_page > 0
 
         items.extend(result["items"])
         total_from_db = result["total"]
@@ -412,7 +412,7 @@ async def api_browse(
                         page=page,
                         per_page=per_page,
                     )
-                    items_are_paginated = True
+                    items_are_paginated = per_page > 0
             else:
                 result = await asyncio.to_thread(
                     cache.browse_streams_db,
@@ -422,7 +422,7 @@ async def api_browse(
                     page=page,
                     per_page=per_page,
                 )
-                items_are_paginated = True
+                items_are_paginated = per_page > 0
             items.extend(result["items"])
             total_from_db = result["total"]
             group_counts.update(result["group_counts"])
@@ -451,6 +451,7 @@ async def api_browse(
             matched_keys: list[tuple[str, str, str]] = []
             window_keys: list[tuple[str, str, str]] = []
             smallset_keys: list[tuple[str, str, str]] = []
+            all_keys: list[tuple[str, str, str]] = []
             filtered_total = 0
             raw_page = 1
             raw_total = None
@@ -477,14 +478,16 @@ async def api_browse(
                     key = (str(item.get("id", "")), item.get("source_id", ""), item.get("content_type", ""))
                     if filtered_total <= _GROUP_THRESHOLD:
                         smallset_keys.append(key)
+                    if per_page == 0:
+                        all_keys.append(key)
                     if requested_start <= filtered_total < requested_start + per_page:
                         window_keys.append(key)
                     filtered_total += 1
                 raw_page += 1
 
-            matched_keys = smallset_keys if filtered_total <= _GROUP_THRESHOLD else window_keys
+            matched_keys = all_keys if per_page == 0 else (smallset_keys if filtered_total <= _GROUP_THRESHOLD else window_keys)
             items = await asyncio.to_thread(cache.hydrate_browse_items, matched_keys)
-            items_are_paginated = filtered_total > _GROUP_THRESHOLD
+            items_are_paginated = filtered_total > _GROUP_THRESHOLD and per_page > 0
             total_from_db = filtered_total
             source_filters_applied = True
     # Apply source filters in Python (can't express in SQL)
@@ -551,12 +554,12 @@ async def api_browse(
         total = len(grouped_items)
         grouped = True
         start = (page - 1) * per_page
-        paginated = grouped_items[start : start + per_page]
+        paginated = grouped_items if per_page == 0 else grouped_items[start : start + per_page]
     elif should_group and total > _GROUP_THRESHOLD:
         # Large result set: paginate first, then group only the current page
         # to avoid O(n²) fuzzy comparison on the full set.
         start = (page - 1) * per_page
-        page_items = items if items_are_paginated else items[start : start + per_page]
+        page_items = items if items_are_paginated or per_page == 0 else items[start : start + per_page]
         loop = asyncio.get_event_loop()
         grouped_page = await loop.run_in_executor(
             None, functools.partial(group_similar_items, page_items, 85)
@@ -574,7 +577,7 @@ async def api_browse(
         paginated = grouped_page
     else:
         start = (page - 1) * per_page
-        paginated = items if items_are_paginated else items[start : start + per_page]
+        paginated = items if items_are_paginated or per_page == 0 else items[start : start + per_page]
 
     # Build category membership for paginated items only (not the full table).
     # Collect the unique (stream_id, source_id, content_type) triples from
@@ -641,7 +644,7 @@ async def api_browse(
         "total": total,
         "page": page,
         "per_page": per_page,
-        "total_pages": (total + per_page - 1) // per_page if total > 0 else 0,
+        "total_pages": (1 if total > 0 else 0) if per_page == 0 else (total + per_page - 1) // per_page if total > 0 else 0,
         "content_type": type,
     }
 

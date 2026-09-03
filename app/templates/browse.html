@@ -457,6 +457,7 @@
                     <option value="50" selected>50 / page</option>
                     <option value="100">100 / page</option>
                     <option value="200">200 / page</option>
+                    <option value="0">All</option>
                 </select></label>
                 <button id="page-select-all" class="btn btn-secondary btn-small page-select-all" onclick="toggleSelectAllDisplayed()">☑ Select all shown</button>
                 <button id="selection-toggle" class="btn btn-secondary btn-small selection-toggle" onclick="toggleBrowseSelectionMode()">☑ Select</button>
@@ -908,7 +909,7 @@
         }
 
         function changeBrowsePerPage(value) {
-            const allowed = ['25', '50', '100', '200'];
+            const allowed = ['0', '25', '50', '100', '200'];
             if (!allowed.includes(String(value))) value = BROWSE_FILTERS_DEFAULTS.perPage;
             document.getElementById('per-page').value = String(value);
             currentPage = 1;
@@ -918,7 +919,7 @@
 
         function getBrowsePerPage() {
             const value = document.getElementById('per-page').value;
-            return ['25', '50', '100', '200'].includes(value) ? value : BROWSE_FILTERS_DEFAULTS.perPage;
+            return ['0', '25', '50', '100', '200'].includes(value) ? value : BROWSE_FILTERS_DEFAULTS.perPage;
         }
 
         // VOD transcode seeking state
@@ -1463,7 +1464,7 @@
             document.getElementById('min-rating').value = _saved.minRating;
             document.getElementById('max-added-days').value = _saved.maxAddedDays;
             document.getElementById('download-status').value = _saved.downloadStatus || 'all';
-            document.getElementById('per-page').value = ['25', '50', '100', '200'].includes(String(_saved.perPage)) ? String(_saved.perPage) : '50';
+            document.getElementById('per-page').value = ['0', '25', '50', '100', '200'].includes(String(_saved.perPage)) ? String(_saved.perPage) : '50';
 
             // Stash saved source/group/category so the loaders can re-apply once the dropdowns are populated
             _pendingSourceId = _saved.sourceId;

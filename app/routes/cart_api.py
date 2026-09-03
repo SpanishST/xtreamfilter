@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 from datetime import datetime
@@ -49,6 +50,45 @@ async def get_download_history(
     for item in result["items"]:
         item["source_name"] = source_names.get(item["source_id"], "Unknown")
     return result
+
+
+@router.get("/api/download-history/item")
+async def get_item_download_history(
+    keys: str = Query(""),
+    limit: int = Query(3, ge=1, le=3),
+    cart: CartService = Depends(get_cart_service),
+    cfg: ConfigService = Depends(get_config_service),
+):
+    """Return the newest history events for one browse card or group."""
+    try:
+        raw_keys = json.loads(keys) if keys else []
+    except (TypeError, json.JSONDecodeError):
+        return JSONResponse(status_code=400, content={"error": "Invalid history keys"})
+    if not isinstance(raw_keys, list) or len(raw_keys) > 500:
+        return JSONResponse(status_code=400, content={"error": "Invalid history keys"})
+
+    browse_keys: list[tuple[str, str, str]] = []
+    for item in raw_keys:
+        if not isinstance(item, dict):
+            return JSONResponse(status_code=400, content={"error": "Invalid history key"})
+        source_id = str(item.get("source_id", ""))
+        content_type = str(item.get("content_type", ""))
+        stream_id = str(item.get("stream_id", ""))
+        if not source_id or content_type not in ("vod", "series") or not stream_id:
+            return JSONResponse(status_code=400, content={"error": "Invalid history key"})
+        key = (source_id, content_type, stream_id)
+        if key not in browse_keys:
+            browse_keys.append(key)
+
+    items = await asyncio.to_thread(cart.get_download_history_for_keys, browse_keys, limit)
+    source_names = {
+        str(item.get("id")): item.get("name", str(item.get("id")))
+        for item in cfg.config.get("sources", [])
+        if item.get("id")
+    }
+    for item in items:
+        item["source_name"] = source_names.get(item["source_id"], "Unknown")
+    return {"items": items}
 
 
 @router.get("/api/cart/active-source-downloads")

@@ -75,3 +75,28 @@ def test_init_db_backfills_completed_cart_items_and_history_survives_cart_cleanu
         assert row["file_size"] == 456
     finally:
         conn.close()
+
+
+def test_history_key_lookup_matches_series_parent_and_returns_recent_events(tmp_path):
+    db_path = os.path.join(tmp_path, DB_NAME)
+    init_db(db_path)
+    cart = CartService.__new__(CartService)
+    cart.db_path = db_path
+    for index in range(4):
+        cart.record_download_history({
+            "id": f"episode-{index}",
+            "stream_id": f"episode-stream-{index}",
+            "source_id": "src1",
+            "content_type": "series",
+            "series_id": "series-1",
+            "season": "1",
+            "episode_num": index + 1,
+            "name": f"Episode {index + 1}",
+            "file_path": f"/downloads/episode-{index}.mkv",
+            "file_size": index + 1,
+        })
+
+    history = cart.get_download_history_for_keys([("src1", "series", "series-1")])
+
+    assert len(history) == 3
+    assert {row["series_id"] for row in history} == {"series-1"}

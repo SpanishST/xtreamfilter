@@ -788,6 +788,8 @@ def test_index_page(client):
 def test_browse_page(client):
     r = client.get("/browse")
     assert r.status_code == 200
+    assert "download-history-badge" in r.text
+    assert "/api/download-history/item" in r.text
 
 
 def test_cart_page(client):

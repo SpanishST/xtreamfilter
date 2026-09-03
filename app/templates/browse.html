@@ -62,6 +62,7 @@
         .stats-info strong { color: #00d4ff; }
         .content-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 20px; margin-bottom: 30px; }
         .content-card { background: rgba(255, 255, 255, 0.05); border-radius: 12px; overflow: hidden; border: 1px solid rgba(255, 255, 255, 0.08); transition: all 0.3s; position: relative; }
+        .content-card.history-popup-open { overflow: visible; z-index: 30; }
         .content-card:hover { transform: translateY(-5px); border-color: rgba(0, 212, 255, 0.3); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3); }
         .card-poster { width: 100%; aspect-ratio: 2/3; object-fit: cover; background: rgba(0, 0, 0, 0.3); display: block; }
         .card-poster-live { aspect-ratio: 16/9; }
@@ -83,7 +84,17 @@
         .card-rating .star { color: #ffa502; }
         .card-categories { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
         .card-cat-badge { font-size: 0.65em; padding: 2px 6px; border-radius: 3px; background: rgba(46, 213, 115, 0.2); color: #2ed573; }
-        .download-history-badge { position: absolute; bottom: 10px; left: 10px; z-index: 5; display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 5px; background: rgba(46, 213, 115, 0.92); color: #071b10; font-size: 0.7em; font-weight: 700; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35); }
+        .download-history-wrap { position: absolute; top: 10px; left: 10px; z-index: 20; }
+        .download-history-badge { display: inline-flex; align-items: center; justify-content: center; gap: 3px; min-width: 32px; height: 30px; padding: 4px 8px; border: 1px solid rgba(255, 214, 102, 0.7); border-radius: 7px; background: linear-gradient(135deg, rgba(255, 165, 2, 0.98), rgba(255, 71, 87, 0.98)); color: #fff; font-size: 0.78em; font-weight: 800; line-height: 1; cursor: help; box-shadow: 0 3px 10px rgba(0, 0, 0, 0.45); }
+        .download-history-badge:hover, .download-history-badge:focus-visible { outline: 2px solid rgba(255, 214, 102, 0.95); outline-offset: 2px; }
+        .download-history-popup { position: absolute; top: 38px; left: 0; width: 290px; padding: 10px; border: 1px solid rgba(255, 165, 2, 0.5); border-radius: 9px; background: rgba(20, 20, 40, 0.98); box-shadow: 0 12px 35px rgba(0, 0, 0, 0.6); color: #ddd; display: none; }
+        .download-history-wrap.open .download-history-popup { display: block; }
+        .download-history-loading, .download-history-empty { padding: 8px 4px; color: #999; font-size: 0.8em; }
+        .download-history-entry { padding: 8px 4px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+        .download-history-entry:last-child { border-bottom: none; }
+        .download-history-entry-title { color: #fff; font-size: 0.8em; line-height: 1.3; word-break: break-word; }
+        .download-history-entry-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; color: #aaa; font-size: 0.7em; }
+        .download-history-entry-meta span { padding: 2px 5px; border-radius: 3px; background: rgba(255, 255, 255, 0.08); }
         .add-category-btn { position: absolute; top: 10px; right: 10px; width: 36px; height: 36px; border-radius: 50%; background: rgba(0, 0, 0, 0.6); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.2em; transition: all 0.2s; color: rgba(255, 255, 255, 0.7); z-index: 4; }
         .add-category-btn:hover { transform: scale(1.1); background: rgba(0, 0, 0, 0.8); color: #00d4ff; }
         .add-category-btn.has-categories { color: #2ed573; }
@@ -95,6 +106,7 @@
         .category-dropdown-item.in-category { color: #2ed573; }
         .category-dropdown-item .cat-check { width: 18px; text-align: center; }
         .new-badge { position: absolute; top: 10px; left: 10px; background: linear-gradient(135deg, #2ed573, #1abc9c); color: #000; font-size: 0.7em; font-weight: 600; padding: 4px 10px; border-radius: 4px; text-transform: uppercase; z-index: 4; }
+        .content-card.has-download-history .new-badge { left: 52px; }
         .pagination { display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 30px; flex-wrap: wrap; }
         .pagination button { padding: 10px 20px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; color: #fff; cursor: pointer; transition: all 0.2s; }
         .pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -1645,6 +1657,7 @@
                 const single = (grouped && item.items) ? item.items[0] : item;
                 return renderSingleCard(single);
             }).join('');
+            bindDownloadHistoryPopups();
         }
 
         const typeLabels = { live: 'Live', vod: 'Film', series: 'Series' };
@@ -1653,15 +1666,98 @@
             return '<span class="type-badge type-badge-' + ct + '">' + (typeLabels[ct] || ct) + '</span>';
         }
 
-        function downloadHistoryBadgeHtml(ct, downloaded, episodeCount) {
+        function downloadHistoryBadgeHtml(ct, downloaded, episodeCount, historyKeys) {
+            const keys = escapeAttr(JSON.stringify(historyKeys || []));
             if (ct === 'vod' && downloaded) {
-                return '<span class="download-history-badge" title="Downloaded">✓ Downloaded</span>';
+                return '<span class="download-history-wrap" data-history-keys="' + keys + '">' +
+                    '<button type="button" class="download-history-badge" aria-label="Show recent downloads" title="Show recent downloads" onclick="event.stopPropagation()">⬇</button>' +
+                    '<div class="download-history-popup" role="tooltip"><div class="download-history-loading">Loading recent downloads...</div></div>' +
+                    '</span>';
             }
             if (ct === 'series' && Number(episodeCount) > 0) {
-                const label = Number(episodeCount) === 1 ? 'episode' : 'episodes';
-                return '<span class="download-history-badge" title="' + episodeCount + ' ' + label + ' downloaded">✓ ' + episodeCount + ' ' + label + '</span>';
+                const count = Number(episodeCount);
+                const label = count === 1 ? 'episode' : 'episodes';
+                return '<span class="download-history-wrap" data-history-keys="' + keys + '">' +
+                    '<button type="button" class="download-history-badge" aria-label="Show recent downloads" title="' + count + ' ' + label + ' downloaded. Show recent downloads" onclick="event.stopPropagation()">⬇ ' + count + '</button>' +
+                    '<div class="download-history-popup" role="tooltip"><div class="download-history-loading">Loading recent downloads...</div></div>' +
+                    '</span>';
             }
             return '';
+        }
+
+        function bindDownloadHistoryPopups() {
+            document.querySelectorAll('.download-history-wrap').forEach(wrapper => {
+                const card = wrapper.closest('.content-card');
+                const open = () => {
+                    wrapper.classList.add('open');
+                    if (card) card.classList.add('history-popup-open');
+                    loadDownloadHistoryPopup(wrapper);
+                };
+                const close = () => {
+                    wrapper.classList.remove('open');
+                    if (card) card.classList.remove('history-popup-open');
+                };
+                wrapper.addEventListener('mouseenter', open);
+                wrapper.addEventListener('mouseleave', close);
+                wrapper.querySelector('.download-history-badge').addEventListener('focus', open);
+                wrapper.querySelector('.download-history-badge').addEventListener('blur', event => {
+                    if (!wrapper.contains(event.relatedTarget)) close();
+                });
+            });
+        }
+
+        async function loadDownloadHistoryPopup(wrapper) {
+            if (wrapper.dataset.loaded === 'true' || wrapper.dataset.loading === 'true') return;
+            wrapper.dataset.loading = 'true';
+            const popup = wrapper.querySelector('.download-history-popup');
+            try {
+                const keys = JSON.parse(wrapper.dataset.historyKeys || '[]');
+                const params = new URLSearchParams({ keys: JSON.stringify(keys), limit: '3' });
+                const response = await fetch('/api/download-history/item?' + params.toString());
+                if (!response.ok) throw new Error('History request failed');
+                const data = await response.json();
+                popup.innerHTML = renderDownloadHistoryPopup(data.items || []);
+                wrapper.dataset.loaded = 'true';
+            } catch (error) {
+                popup.innerHTML = '<div class="download-history-empty">Could not load download history.</div>';
+                console.error('Error loading card download history:', error);
+            } finally {
+                wrapper.dataset.loading = 'false';
+            }
+        }
+
+        function renderDownloadHistoryPopup(items) {
+            if (!items.length) return '<div class="download-history-empty">No recent downloads.</div>';
+            return items.map(item => {
+                const isSeries = item.content_type === 'series';
+                let title = item.name || 'Unknown download';
+                if (isSeries) {
+                    const season = String(item.season || 1).padStart(2, '0');
+                    const episode = String(item.episode_num || 0).padStart(2, '0');
+                    title = (item.series_name || 'Series') + ' S' + season + 'E' + episode;
+                    if (item.episode_title && item.episode_title !== item.name) title += ' - ' + item.episode_title;
+                }
+                return '<div class="download-history-entry">' +
+                    '<div class="download-history-entry-title">' + escapeHtml(title) + '</div>' +
+                    '<div class="download-history-entry-meta">' +
+                    '<span>' + escapeHtml(item.source_name || item.source_id || 'Unknown source') + '</span>' +
+                    '<span>' + escapeHtml(formatDownloadHistoryDate(item.completed_at)) + '</span>' +
+                    (item.file_size ? '<span>' + formatDownloadHistoryBytes(item.file_size) + '</span>' : '') +
+                    '</div>' +
+                    '</div>';
+            }).join('');
+        }
+
+        function formatDownloadHistoryDate(value) {
+            const date = new Date(value);
+            return Number.isNaN(date.getTime()) ? (value || '') : date.toLocaleString();
+        }
+
+        function formatDownloadHistoryBytes(bytes) {
+            if (!bytes) return '0 B';
+            const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+            return parseFloat((bytes / Math.pow(1024, index)).toFixed(1)) + ' ' + units[index];
         }
 
         function parseTmdbId(raw) {
@@ -1707,7 +1803,10 @@
 
             const tmdbHref = tmdbUrl(itemType, item.tmdb_id);
             const tmdbLink = tmdbHref ? '<a class="tmdb-link" href="' + tmdbHref + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="View on TMDB">TMDB ↗</a>' : '';
-            const downloadHistoryBadge = downloadHistoryBadgeHtml(itemType, item.downloaded, item.downloaded_episode_count);
+            const downloadHistoryKeys = itemType === 'vod' || itemType === 'series'
+                ? [{ source_id: item.source_id, content_type: itemType, stream_id: item.id }]
+                : [];
+            const downloadHistoryBadge = downloadHistoryBadgeHtml(itemType, item.downloaded, item.downloaded_episode_count, downloadHistoryKeys);
 
             const playExt = item.container_extension || (itemType === 'live' ? 'ts' : 'mp4');
             const playBtn = (itemType === 'series')
@@ -1716,7 +1815,8 @@
                     ? '<button class="play-btn" onclick="event.stopPropagation(); openPlayer(\'' + escapeAttr(itemType) + '\', \'' + escapeAttr(item.source_id) + '\', \'' + escapeAttr(item.id) + '\', \'' + jsEscape(item.name) + '\', \'' + escapeAttr(item.icon || '') + '\', \'' + escapeAttr(item.group || '') + '\', \'' + escapeAttr(playExt) + '\')" title="Play in browser">▶</button>'
                     : '');
 
-            return '<div class="content-card" ' + (itemType === 'series' ? 'onclick="_handleCartAdd(\'' + escapeAttr(item.source_id) + '\', \'' + escapeAttr(item.id) + '\', \'series\', \'' + jsEscape(item.name) + '\', \'' + escapeAttr(item.icon || '') + '\', \'' + escapeAttr(item.group || '') + '\', null, \'' + escapeAttr(playExt) + '\')" style="cursor:pointer"' : '') + '>' +
+            const cardClass = downloadHistoryBadge ? 'content-card has-download-history' : 'content-card';
+            return '<div class="' + cardClass + '" ' + (itemType === 'series' ? 'onclick="_handleCartAdd(\'' + escapeAttr(item.source_id) + '\', \'' + escapeAttr(item.id) + '\', \'series\', \'' + jsEscape(item.name) + '\', \'' + escapeAttr(item.icon || '') + '\', \'' + escapeAttr(item.group || '') + '\', null, \'' + escapeAttr(playExt) + '\')" style="cursor:pointer"' : '') + '>' +
                 (isNew ? '<div class="new-badge">NEW</div>' : '') +
                 cartBtn +
                 monitorBtn +
@@ -1853,9 +1953,19 @@
 
             const groupTmdbHref = tmdbUrl(groupType, group.tmdb_id);
             const groupTmdbLink = groupTmdbHref ? '<a class="tmdb-link" href="' + groupTmdbHref + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="View on TMDB">TMDB ↗</a>' : '';
-            const groupDownloadHistoryBadge = downloadHistoryBadgeHtml(groupType, group.downloaded, group.downloaded_episode_count);
+            const groupDownloadHistoryKeys = group.items
+                .filter(sub => (sub.content_type || groupType) === 'vod' || (sub.content_type || groupType) === 'series')
+                .map(sub => ({
+                    source_id: sub.source_id,
+                    content_type: sub.content_type || groupType,
+                    stream_id: sub.id
+                }));
+            const groupDownloadHistoryBadge = downloadHistoryBadgeHtml(groupType, group.downloaded, group.downloaded_episode_count, groupDownloadHistoryKeys);
 
-            return '<div class="content-card no-cat-btn">' +
+            const cardClass = groupDownloadHistoryBadge
+                ? 'content-card no-cat-btn has-download-history'
+                : 'content-card no-cat-btn';
+            return '<div class="' + cardClass + '">' +
                 (isNew ? '<div class="new-badge">NEW</div>' : '') +
                 groupCartBtn +
                 groupMonitorBtn +

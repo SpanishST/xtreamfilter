@@ -889,6 +889,46 @@ class CartService:
         finally:
             conn.close()
 
+    def get_download_history_for_keys(
+        self, keys: list[tuple[str, str, str]], limit: int = 3
+    ) -> list[dict]:
+        """Return the newest history events matching browse card keys."""
+        if not keys:
+            return []
+        limit = max(1, min(limit, 3))
+        conn = db_connect(self.db_path)
+        try:
+            matches: list[dict] = []
+            for start in range(0, len(keys), 300):
+                chunk = keys[start : start + 300]
+                values_sql = ",".join("(?, ?, ?)" for _ in chunk)
+                params: list[str | int] = []
+                for source_id, content_type, stream_id in chunk:
+                    params.extend([stream_id, source_id, content_type])
+                rows = conn.execute(
+                    f"""WITH browse_keys(stream_id, source_id, content_type) AS
+                           (VALUES {values_sql})
+                        SELECT h.id, h.cart_item_id, h.stream_id, h.source_id,
+                               h.content_type, h.name, h.series_name, h.series_id,
+                               h.season, h.episode_num, h.episode_title, h.icon,
+                               h.grp, h.container_extension, h.file_path,
+                               h.file_size, h.completed_at
+                        FROM download_history h
+                        JOIN browse_keys k
+                          ON k.source_id = h.source_id
+                         AND k.content_type = h.content_type
+                         AND ((h.content_type = 'vod' AND h.stream_id = k.stream_id)
+                              OR (h.content_type = 'series' AND h.series_id = k.stream_id))
+                        ORDER BY h.completed_at DESC, h.id DESC
+                        LIMIT ?""",
+                    params + [limit],
+                ).fetchall()
+                matches.extend(dict(row) for row in rows)
+            matches.sort(key=lambda row: (row.get("completed_at") or "", row.get("id", 0)), reverse=True)
+            return matches[:limit]
+        finally:
+            conn.close()
+
     # ------------------------------------------------------------------
     # Path helpers
     # ------------------------------------------------------------------

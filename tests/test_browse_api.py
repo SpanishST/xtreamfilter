@@ -600,6 +600,32 @@ def test_download_history_api_supports_filters_and_pagination(client, data_dir):
     assert data["has_more"] is False
 
 
+def test_download_history_item_api_returns_latest_three_matching_events(client, data_dir):
+    _seed_download_history(data_dir, [
+        {"cart_item_id": "movie-1", "stream_id": "1", "content_type": "vod", "name": "Movie One",
+         "completed_at": "2026-01-01T00:00:00+00:00"},
+        {"cart_item_id": "movie-2", "stream_id": "1", "content_type": "vod", "name": "Movie One",
+         "completed_at": "2026-01-02T00:00:00+00:00"},
+        {"cart_item_id": "movie-3", "stream_id": "1", "content_type": "vod", "name": "Movie One",
+         "completed_at": "2026-01-03T00:00:00+00:00"},
+        {"cart_item_id": "movie-4", "stream_id": "1", "content_type": "vod", "name": "Movie One",
+         "completed_at": "2026-01-04T00:00:00+00:00"},
+        {"cart_item_id": "other-movie", "stream_id": "2", "content_type": "vod", "name": "Other Movie",
+         "completed_at": "2026-01-05T00:00:00+00:00"},
+    ])
+
+    response = client.get(
+        "/api/download-history/item",
+        params={"keys": json.dumps([{"source_id": "src1", "content_type": "vod", "stream_id": "1"}])},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["items"]) == 3
+    assert [item["cart_item_id"] for item in data["items"]] == ["movie-4", "movie-3", "movie-2"]
+    assert all(item["source_id"] == "src1" for item in data["items"])
+
+
 def test_browse_counts_distinct_series_episodes(client, data_dir):
     _seed_streams(data_dir, [
         {"stream_id": "series-1", "name": "Example Series", "category_id": "10"},

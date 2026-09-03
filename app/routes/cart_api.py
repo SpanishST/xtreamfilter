@@ -1,11 +1,12 @@
 """Download cart API routes."""
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
 from app.dependencies import get_cart_service, get_config_service, get_log_service, get_xtream_service
@@ -20,6 +21,34 @@ router = APIRouter(tags=["cart"])
 @router.get("/api/cart")
 async def get_cart(cart: CartService = Depends(get_cart_service)):
     return {"items": cart._download_cart}
+
+
+@router.get("/api/download-history")
+async def get_download_history(
+    type: str = Query("", pattern="^(|vod|series)$"),
+    source: str = Query(""),
+    search: str = Query(""),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    cart: CartService = Depends(get_cart_service),
+    cfg: ConfigService = Depends(get_config_service),
+):
+    result = await asyncio.to_thread(
+        cart.get_download_history,
+        content_type=type,
+        source_id=source,
+        search=search.strip(),
+        limit=limit,
+        offset=offset,
+    )
+    source_names = {
+        str(item.get("id")): item.get("name", str(item.get("id")))
+        for item in cfg.config.get("sources", [])
+        if item.get("id")
+    }
+    for item in result["items"]:
+        item["source_name"] = source_names.get(item["source_id"], "Unknown")
+    return result
 
 
 @router.get("/api/cart/active-source-downloads")

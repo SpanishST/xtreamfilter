@@ -83,6 +83,7 @@
         .card-rating .star { color: #ffa502; }
         .card-categories { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
         .card-cat-badge { font-size: 0.65em; padding: 2px 6px; border-radius: 3px; background: rgba(46, 213, 115, 0.2); color: #2ed573; }
+        .download-history-badge { position: absolute; bottom: 10px; left: 10px; z-index: 5; display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 5px; background: rgba(46, 213, 115, 0.92); color: #071b10; font-size: 0.7em; font-weight: 700; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35); }
         .add-category-btn { position: absolute; top: 10px; right: 10px; width: 36px; height: 36px; border-radius: 50%; background: rgba(0, 0, 0, 0.6); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.2em; transition: all 0.2s; color: rgba(255, 255, 255, 0.7); z-index: 4; }
         .add-category-btn:hover { transform: scale(1.1); background: rgba(0, 0, 0, 0.8); color: #00d4ff; }
         .add-category-btn.has-categories { color: #2ed573; }
@@ -301,6 +302,7 @@
                 <a href="/browse" class="top-nav-link active">🔍 Browse</a>
                 <a href="/cart" class="top-nav-link">🛒 Cart<span class="nav-cart-badge" id="cart-badge" style="display:none">0</span></a>
                 <a href="/monitor" class="top-nav-link">📡 Monitor</a>
+                <a href="/history" class="top-nav-link">📥 History</a>
                 <a href="/logs" class="top-nav-link">📝 Logs</a>
             </div>
         </nav>
@@ -343,6 +345,14 @@
                 </div>
             </div>
             <div class="controls-row" id="sort-filter-row" style="margin-top: 12px; display: none;">
+                <div class="control-group">
+                    <label>Download Status</label>
+                    <select id="download-status" onchange="currentPage=1;saveBrowseFilters();applyFilters()">
+                        <option value="all">All</option>
+                        <option value="downloaded">Already downloaded</option>
+                        <option value="not_downloaded">Not downloaded yet</option>
+                    </select>
+                </div>
                 <div class="control-group">
                     <label>Sort By</label>
                     <select id="sort-by" onchange="currentPage=1;saveBrowseFilters();applyFilters()">
@@ -751,6 +761,7 @@
             sortOrder: 'desc',
             minRating: '0',
             maxAddedDays: '0',
+            downloadStatus: 'all',
             categoryId: null
         };
         function loadBrowseFilters() {
@@ -774,6 +785,7 @@
                     sortOrder: document.getElementById('sort-order').value,
                     minRating: document.getElementById('min-rating').value,
                     maxAddedDays: document.getElementById('max-added-days').value,
+                    downloadStatus: document.getElementById('download-status').value,
                     categoryId: selectedCategoryId
                 };
                 localStorage.setItem(BROWSE_FILTERS_KEY, JSON.stringify(f));
@@ -791,6 +803,7 @@
             document.getElementById('sort-order').value = BROWSE_FILTERS_DEFAULTS.sortOrder;
             document.getElementById('min-rating').value = BROWSE_FILTERS_DEFAULTS.minRating;
             document.getElementById('max-added-days').value = BROWSE_FILTERS_DEFAULTS.maxAddedDays;
+            document.getElementById('download-status').value = BROWSE_FILTERS_DEFAULTS.downloadStatus;
             if (selectedCategoryId !== null) selectScope(null);
             loadSources();
             loadGroups();
@@ -1338,6 +1351,7 @@
             document.getElementById('sort-order').value = _saved.sortOrder;
             document.getElementById('min-rating').value = _saved.minRating;
             document.getElementById('max-added-days').value = _saved.maxAddedDays;
+            document.getElementById('download-status').value = _saved.downloadStatus || 'all';
 
             // Stash saved source/group/category so the loaders can re-apply once the dropdowns are populated
             _pendingSourceId = _saved.sourceId;
@@ -1455,6 +1469,7 @@
             // Hide main controls row in category view, but keep sort/filter visible
             document.querySelector('#controls-bar > .controls-row:first-child').style.display = selectedCategoryId ? 'none' : 'flex';
             document.getElementById('sort-filter-row').style.display = selectedCategoryId ? 'flex' : ((contentType === 'vod' || contentType === 'series') ? 'flex' : 'none');
+            updateDownloadStatusControl();
             document.getElementById('controls-bar').style.display = 'block';
             renderBrowseNav();
             currentPage = 1;
@@ -1470,10 +1485,19 @@
             // Show sort/filter row for vod and series only
             const sortFilterRow = document.getElementById('sort-filter-row');
             sortFilterRow.style.display = (type === 'vod' || type === 'series') ? 'flex' : 'none';
+            updateDownloadStatusControl();
             currentPage = 1;
             loadGroups();
             saveBrowseFilters();
             // Don't auto-search - user will click Search button
+        }
+
+        function updateDownloadStatusControl() {
+            const select = document.getElementById('download-status');
+            if (!select) return;
+            const disabled = !selectedCategoryId && contentType === 'live';
+            select.disabled = disabled;
+            if (disabled) select.value = 'all';
         }
 
         async function loadGroups() {
@@ -1559,6 +1583,8 @@
                 if (sortOrder !== 'desc') url += '&sort_order=' + sortOrder;
                 if (minRating !== '0') url += '&min_rating=' + minRating;
                 if (maxAddedDays !== '0') url += '&max_added_days=' + maxAddedDays;
+                const downloadStatus = document.getElementById('download-status').value;
+                if (downloadStatus !== 'all') url += '&download_status=' + downloadStatus;
 
                 if (url === _lastBrowseUrl) {
                     // Identical request already in flight — skip duplicate.
@@ -1627,6 +1653,17 @@
             return '<span class="type-badge type-badge-' + ct + '">' + (typeLabels[ct] || ct) + '</span>';
         }
 
+        function downloadHistoryBadgeHtml(ct, downloaded, episodeCount) {
+            if (ct === 'vod' && downloaded) {
+                return '<span class="download-history-badge" title="Downloaded">✓ Downloaded</span>';
+            }
+            if (ct === 'series' && Number(episodeCount) > 0) {
+                const label = Number(episodeCount) === 1 ? 'episode' : 'episodes';
+                return '<span class="download-history-badge" title="' + episodeCount + ' ' + label + ' downloaded">✓ ' + episodeCount + ' ' + label + '</span>';
+            }
+            return '';
+        }
+
         function parseTmdbId(raw) {
             if (!raw) return null;
             const s = String(raw).trim();
@@ -1670,6 +1707,7 @@
 
             const tmdbHref = tmdbUrl(itemType, item.tmdb_id);
             const tmdbLink = tmdbHref ? '<a class="tmdb-link" href="' + tmdbHref + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="View on TMDB">TMDB ↗</a>' : '';
+            const downloadHistoryBadge = downloadHistoryBadgeHtml(itemType, item.downloaded, item.downloaded_episode_count);
 
             const playExt = item.container_extension || (itemType === 'live' ? 'ts' : 'mp4');
             const playBtn = (itemType === 'series')
@@ -1697,6 +1735,8 @@
                 '</div>' +
                 catBadges +
                 (item.added ? '<div class="card-date">Added: ' + formatDate(item.added) + '</div>' : '') +
+                '</div>' +
+                downloadHistoryBadge +
                 '</div></div></div>';
         }
 
@@ -1813,6 +1853,7 @@
 
             const groupTmdbHref = tmdbUrl(groupType, group.tmdb_id);
             const groupTmdbLink = groupTmdbHref ? '<a class="tmdb-link" href="' + groupTmdbHref + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="View on TMDB">TMDB ↗</a>' : '';
+            const groupDownloadHistoryBadge = downloadHistoryBadgeHtml(groupType, group.downloaded, group.downloaded_episode_count);
 
             return '<div class="content-card no-cat-btn">' +
                 (isNew ? '<div class="new-badge">NEW</div>' : '') +
@@ -1832,6 +1873,7 @@
                 catBadges +
                 (group.added ? '<div class="card-date">Added: ' + formatDate(group.added) + '</div>' : '') +
                 '</div>' +
+                groupDownloadHistoryBadge +
                 '</div>' +
                 '<div class="sources-toggle" onclick="toggleSourcesList(this, \'' + groupId + '\')">' +
                 '<span class="arrow">▼</span> Show ' + group.count + ' sources' +

@@ -348,6 +348,16 @@ def test_move_route_reuses_finalize_completed_download(client, monkeypatch):
     assert finalized == ["move-1"]
     assert cart._download_cart[0]["status"] == "completed"
     assert os.path.exists(cart._download_cart[0]["file_path"])
+    conn = db_connect(os.path.join(client.app.state.config_service.data_dir, DB_NAME))
+    try:
+        history = conn.execute(
+            "SELECT cart_item_id, file_path FROM download_history WHERE cart_item_id = ?",
+            ("move-1",),
+        ).fetchone()
+        assert history["cart_item_id"] == "move-1"
+        assert history["file_path"] == cart._download_cart[0]["file_path"]
+    finally:
+        conn.close()
 
 
 def test_queue_complete_helper_triggers_jellyfin_queue(client, monkeypatch):
@@ -789,6 +799,12 @@ def test_cart_page(client):
 def test_monitor_page(client):
     r = client.get("/monitor")
     assert r.status_code == 200
+
+
+def test_history_page(client):
+    r = client.get("/history")
+    assert r.status_code == 200
+    assert "Download History" in r.text
 
 
 # -------------------------------------------------------------------

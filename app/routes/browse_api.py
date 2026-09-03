@@ -9,12 +9,14 @@ from fastapi import APIRouter, Depends, Query, Request
 from app.database import db_connect
 from app.dependencies import (
     get_cache_service,
+    get_cart_service,
     get_category_service,
     get_config_service,
     get_http_client,
     get_m3u_service,
 )
 from app.services.cache_service import CacheService
+from app.services.cart_service import CartService
 from app.services.category_service import CategoryService
 from app.services.config_service import ConfigService
 from app.services.filter_service import (
@@ -27,6 +29,103 @@ from app.services.http_client import HttpClientService
 from app.services.m3u_service import M3uService
 
 router = APIRouter(tags=["browse"])
+
+
+async def _annotate_download_history(
+    items: list[dict], cart: CartService, default_type: str
+) -> tuple[set[tuple[str, str, str]], dict[tuple[str, str, str], set[tuple[str, str]]]]:
+    """Annotate catalog items and return lookup sets for grouped results."""
+    keys: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in items:
+        key = (
+            str(item.get("source_id", "")),
+            item.get("content_type", default_type),
+            str(item.get("id", "")),
+        )
+        if key not in seen and key[1] in ("vod", "series"):
+            seen.add(key)
+            keys.append(key)
+
+    rows = await asyncio.to_thread(cart.get_download_history_for_browse, keys)
+    downloaded_movies: set[tuple[str, str, str]] = set()
+    downloaded_episodes: dict[tuple[str, str, str], set[tuple[str, str]]] = {}
+    for row in rows:
+        key = (str(row["source_id"]), row["content_type"], str(row["stream_id"]))
+        if row["content_type"] == "vod":
+            downloaded_movies.add(key)
+        elif row["content_type"] == "series":
+            downloaded_episodes.setdefault(key, set()).add(
+                (
+                    str(row["season"]) if row["season"] is not None else "",
+                    str(row["episode_num"]) if row["episode_num"] is not None else "",
+                )
+            )
+
+    for item in items:
+        key = (
+            str(item.get("source_id", "")),
+            item.get("content_type", default_type),
+            str(item.get("id", "")),
+        )
+        if key[1] == "vod":
+            item["downloaded"] = key in downloaded_movies
+        elif key[1] == "series":
+            item["downloaded_episode_count"] = len(downloaded_episodes.get(key, set()))
+    return downloaded_movies, downloaded_episodes
+
+
+def _annotate_download_history_groups(
+    groups: list[dict],
+    downloaded_movies: set[tuple[str, str, str]],
+    downloaded_episodes: dict[tuple[str, str, str], set[tuple[str, str]]],
+    default_type: str,
+) -> None:
+    """Add aggregate download state to grouped browse cards."""
+    for group in groups:
+        group_type = group["items"][0].get("content_type", default_type)
+        if group_type == "vod":
+            group["downloaded"] = any(
+                (
+                    str(item.get("source_id", "")),
+                    item.get("content_type", group_type),
+                    str(item.get("id", "")),
+                )
+                in downloaded_movies
+                for item in group["items"]
+            )
+        elif group_type == "series":
+            episodes: set[tuple[str, str]] = set()
+            for item in group["items"]:
+                episodes.update(
+                    downloaded_episodes.get(
+                        (
+                            str(item.get("source_id", "")),
+                            item.get("content_type", group_type),
+                            str(item.get("id", "")),
+                        ),
+                        set(),
+                    )
+                )
+            group["downloaded_episode_count"] = len(episodes)
+
+
+def _group_matches_download_status(group: dict, download_status: str) -> bool:
+    """Apply logical grouped-title semantics to a download status filter."""
+    if download_status == "all":
+        return True
+    has_downloadable_content = any(
+        item.get("content_type") in ("vod", "series") for item in group["items"]
+    )
+    if not has_downloadable_content:
+        return False
+    group_type = group["items"][0].get("content_type")
+    is_downloaded = (
+        bool(group.get("downloaded"))
+        if group_type == "vod"
+        else int(group.get("downloaded_episode_count", 0)) > 0
+    )
+    return is_downloaded if download_status == "downloaded" else not is_downloaded
 
 
 @router.get("/groups")
@@ -117,11 +216,13 @@ async def api_browse(
     sort_order: str = Query("desc"),
     min_rating: float = Query(0),
     max_added_days: int = Query(0),
+    download_status: str = Query("all", pattern="^(all|downloaded|not_downloaded)$"),
     page: int = Query(1),
     per_page: int = Query(50),
     cfg: ConfigService = Depends(get_config_service),
     cache: CacheService = Depends(get_cache_service),
     cat_svc: CategoryService = Depends(get_category_service),
+    cart: CartService = Depends(get_cart_service),
 ):
     page = max(1, page)
     per_page = min(max(1, per_page), 200)
@@ -175,6 +276,7 @@ async def api_browse(
     total_from_db: int | None = None
     items_are_paginated = False
     source_filters_applied = False
+    group_download_filter_exact = False
 
     if not sources_config:
         query_content_type: str | list[str]
@@ -194,6 +296,7 @@ async def api_browse(
             "sort_by": sort_by,
             "sort_order": sort_order,
             "tmdb_search_id": tmdb_search_id,
+            "download_status": download_status,
         }
         if category_fast_path:
             browse_kwargs["category_id"] = category_id
@@ -203,17 +306,23 @@ async def api_browse(
         # sets the existing contract groups the current raw page, so fetch only
         # that page after a bounded count probe.
         if should_group:
+            probe_kwargs = (
+                {**browse_kwargs, "download_status": "all"}
+                if download_status != "all"
+                else browse_kwargs
+            )
             probe = await asyncio.to_thread(
                 cache.browse_streams_db,
-                **browse_kwargs,
+                **probe_kwargs,
                 page=1,
                 per_page=1,
             )
             raw_total = probe["total"]
             if raw_total <= _GROUP_THRESHOLD:
+                group_download_filter_exact = download_status != "all"
                 result = await asyncio.to_thread(
                     cache.browse_streams_db,
-                    **browse_kwargs,
+                    **probe_kwargs,
                     page=1,
                     per_page=0,
                 )
@@ -256,6 +365,7 @@ async def api_browse(
             "sort_by": sort_by,
             "sort_order": sort_order,
             "tmdb_search_id": tmdb_search_id,
+            "download_status": download_status,
         }
         if category_fast_path:
             browse_kwargs["category_id"] = category_id
@@ -269,9 +379,14 @@ async def api_browse(
             # Fast path: every active rule translated to SQL — paginate in the
             # database exactly like the unfiltered flow.
             if should_group:
+                probe_kwargs = (
+                    {**browse_kwargs, "download_status": "all"}
+                    if download_status != "all"
+                    else browse_kwargs
+                )
                 probe = await asyncio.to_thread(
                     cache.browse_streams_db,
-                    **browse_kwargs,
+                    **probe_kwargs,
                     extra_where_sql=rules_sql,
                     extra_where_params=rules_params,
                     page=1,
@@ -279,9 +394,10 @@ async def api_browse(
                 )
                 raw_total = probe["total"]
                 if raw_total <= _GROUP_THRESHOLD:
+                    group_download_filter_exact = download_status != "all"
                     result = await asyncio.to_thread(
                         cache.browse_streams_db,
-                        **browse_kwargs,
+                        **probe_kwargs,
                         extra_where_sql=rules_sql,
                         extra_where_params=rules_params,
                         page=1,
@@ -389,6 +505,13 @@ async def api_browse(
             filtered.append(item)
         items = filtered
 
+    # Annotate the complete in-memory result before grouping. Small grouped
+    # results can then apply download status to the logical title rather than
+    # to only one of its source variants.
+    _downloaded_movies, _downloaded_episodes = await _annotate_download_history(
+        items, cart, type
+    )
+
     total = total_from_db if total_from_db is not None else len(items)
     reverse = sort_order == "desc"
     if sort_by == "added":
@@ -409,6 +532,15 @@ async def api_browse(
         grouped_items = await loop.run_in_executor(
             None, functools.partial(group_similar_items, items, 85)
         )
+        _annotate_download_history_groups(
+            grouped_items, _downloaded_movies, _downloaded_episodes, type
+        )
+        if group_download_filter_exact:
+            grouped_items = [
+                group_item
+                for group_item in grouped_items
+                if _group_matches_download_status(group_item, download_status)
+            ]
         # Re-sort grouped items by group-level rating/added if sort requested
         if sort_by == "added":
             grouped_items.sort(key=lambda x: x["added"], reverse=reverse)
@@ -428,6 +560,9 @@ async def api_browse(
         loop = asyncio.get_event_loop()
         grouped_page = await loop.run_in_executor(
             None, functools.partial(group_similar_items, page_items, 85)
+        )
+        _annotate_download_history_groups(
+            grouped_page, _downloaded_movies, _downloaded_episodes, type
         )
         if sort_by == "added":
             grouped_page.sort(key=lambda x: x["added"], reverse=reverse)

@@ -146,6 +146,39 @@ def _seed_categories(data_dir: str, categories: list[dict], content_type: str, s
         conn.close()
 
 
+def _seed_download_history(data_dir: str, rows: list[dict]):
+    """Insert completed download records directly into the history ledger."""
+    db_path = os.path.join(data_dir, DB_NAME)
+    conn = db_connect(db_path)
+    try:
+        for index, row in enumerate(rows):
+            conn.execute(
+                """INSERT INTO download_history
+                   (cart_item_id, stream_id, source_id, content_type, name,
+                    series_name, series_id, season, episode_num, episode_title,
+                    file_path, file_size, completed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    row.get("cart_item_id", f"history-{index}"),
+                    str(row.get("stream_id", "")),
+                    row.get("source_id", "src1"),
+                    row.get("content_type", "vod"),
+                    row.get("name", ""),
+                    row.get("series_name"),
+                    row.get("series_id"),
+                    row.get("season"),
+                    row.get("episode_num"),
+                    row.get("episode_title"),
+                    row.get("file_path", f"/downloads/{index}.mp4"),
+                    row.get("file_size", 1),
+                    row.get("completed_at", "2026-01-01T00:00:00+00:00"),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _seed_config(data_dir: str, sources: list[dict] | None = None):
     """Write a minimal config.json with the given sources."""
     config = {
@@ -508,6 +541,137 @@ def test_browse_vod_groups_by_tmdb(client, data_dir):
     assert data["total"] == 2
     group_names = {item["name"] for item in data["items"]}
     assert "Inception" in group_names or "Inception (2010)" in group_names
+
+
+def test_browse_marks_downloaded_movie(client, data_dir):
+    _seed_streams(data_dir, [
+        {"stream_id": "1", "name": "Downloaded Movie", "category_id": "10"},
+        {"stream_id": "2", "name": "Pending Movie", "category_id": "10"},
+    ], "vod")
+    _seed_download_history(data_dir, [
+        {"stream_id": "1", "content_type": "vod"},
+    ])
+
+    client.app.state.cache_service.load_cache_from_disk()
+    response = client.get("/api/browse?type=vod")
+
+    assert response.status_code == 200
+    items = {item["name"]: item for item in response.json()["items"]}
+    assert items["Downloaded Movie"]["downloaded"] is True
+    assert items["Pending Movie"]["downloaded"] is False
+
+
+def test_browse_download_status_filter(client, data_dir):
+    _seed_streams(data_dir, [
+        {"stream_id": "1", "name": "Downloaded Movie", "category_id": "10"},
+        {"stream_id": "2", "name": "Pending Movie", "category_id": "10"},
+    ], "vod")
+    _seed_download_history(data_dir, [{"stream_id": "1", "content_type": "vod"}])
+
+    client.app.state.cache_service.load_cache_from_disk()
+    downloaded = client.get("/api/browse?type=vod&download_status=downloaded").json()
+    not_downloaded = client.get("/api/browse?type=vod&download_status=not_downloaded").json()
+    all_items = client.get("/api/browse?type=vod&download_status=all").json()
+
+    assert downloaded["total"] == 1
+    assert downloaded["items"][0]["name"] == "Downloaded Movie"
+    assert not_downloaded["total"] == 1
+    assert not_downloaded["items"][0]["name"] == "Pending Movie"
+    assert all_items["total"] == 2
+
+
+def test_download_history_api_supports_filters_and_pagination(client, data_dir):
+    _seed_download_history(data_dir, [
+        {"cart_item_id": "movie-1", "stream_id": "1", "content_type": "vod", "name": "Movie One",
+         "completed_at": "2026-01-01T00:00:00+00:00"},
+        {"cart_item_id": "episode-1", "stream_id": "episode-1", "content_type": "series",
+         "series_id": "series-1", "series_name": "Series One", "episode_title": "Pilot",
+         "season": "1", "episode_num": 1, "completed_at": "2026-01-02T00:00:00+00:00"},
+    ])
+
+    page = client.get("/api/download-history?type=series&search=pilot&limit=1&offset=0")
+
+    assert page.status_code == 200
+    data = page.json()
+    assert data["total"] == 1
+    assert len(data["items"]) == 1
+    assert data["items"][0]["source_name"] == "Source 1"
+    assert data["items"][0]["series_name"] == "Series One"
+    assert data["has_more"] is False
+
+
+def test_browse_counts_distinct_series_episodes(client, data_dir):
+    _seed_streams(data_dir, [
+        {"stream_id": "series-1", "name": "Example Series", "category_id": "10"},
+    ], "series")
+    _seed_download_history(data_dir, [
+        {"cart_item_id": "episode-1", "stream_id": "episode-stream-1", "content_type": "series",
+         "series_id": "series-1", "season": "1", "episode_num": 1},
+        {"cart_item_id": "episode-1-redownload", "stream_id": "episode-stream-1", "content_type": "series",
+         "series_id": "series-1", "season": "1", "episode_num": 1},
+        {"cart_item_id": "episode-2", "stream_id": "episode-stream-2", "content_type": "series",
+         "series_id": "series-1", "season": "1", "episode_num": 2},
+    ])
+
+    client.app.state.cache_service.load_cache_from_disk()
+    response = client.get("/api/browse?type=series")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["downloaded_episode_count"] == 2
+    assert client.get(
+        "/api/browse?type=series&download_status=not_downloaded"
+    ).json()["total"] == 0
+
+
+def test_browse_category_includes_download_history(client, data_dir):
+    _seed_streams(data_dir, [
+        {"stream_id": "1", "name": "Category Movie", "category_id": "10"},
+    ], "vod")
+    client.app.state.category_service.save_categories({
+        "categories": [{
+            "id": "favorites",
+            "name": "Favorites",
+            "mode": "manual",
+            "content_types": ["vod"],
+            "items": [{"id": "1", "source_id": "src1", "content_type": "vod"}],
+        }],
+    })
+    _seed_download_history(data_dir, [
+        {"stream_id": "1", "content_type": "vod"},
+    ])
+
+    client.app.state.cache_service.load_cache_from_disk()
+    response = client.get("/api/browse?category_id=favorites")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["items"][0]["downloaded"] is True
+
+
+def test_browse_grouped_series_deduplicates_episodes_across_sources(client, data_dir):
+    _seed_streams(data_dir, [
+        {"stream_id": "series-1", "name": "Example Series", "category_id": "10", "tmdb_id": "42"},
+    ], "series", source_id="src1")
+    _seed_streams(data_dir, [
+        {"stream_id": "series-2", "name": "Example Series", "category_id": "10", "tmdb_id": "42"},
+    ], "series", source_id="src2")
+    _seed_download_history(data_dir, [
+        {"cart_item_id": "src1-episode-1", "source_id": "src1", "stream_id": "episode-1",
+         "content_type": "series", "series_id": "series-1", "season": "1", "episode_num": 1},
+        {"cart_item_id": "src2-episode-1", "source_id": "src2", "stream_id": "episode-1-copy",
+         "content_type": "series", "series_id": "series-2", "season": "1", "episode_num": 1},
+        {"cart_item_id": "src2-episode-2", "source_id": "src2", "stream_id": "episode-2",
+         "content_type": "series", "series_id": "series-2", "season": "1", "episode_num": 2},
+    ])
+
+    client.app.state.cache_service.load_cache_from_disk()
+    response = client.get("/api/browse?type=series")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["downloaded_episode_count"] == 2
+    not_downloaded = client.get(
+        "/api/browse?type=series&download_status=not_downloaded"
+    ).json()
+    assert not_downloaded["total"] == 0
 
 
 def test_browse_news_days_filter(client, data_dir):

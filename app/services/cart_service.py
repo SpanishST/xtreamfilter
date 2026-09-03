@@ -12,7 +12,7 @@ import subprocess
 import time
 import unicodedata
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Optional
 from xml.dom import minidom
 from xml.etree.ElementTree import Element, SubElement, tostring
@@ -744,6 +744,148 @@ class CartService:
             conn.commit()
         except Exception as e:
             logger.error(f"Error saving cart to DB: {e}")
+        finally:
+            conn.close()
+
+    def record_download_history(self, item: dict) -> None:
+        """Persist a completed file independently from the download queue."""
+        file_path = item.get("file_path")
+        if not file_path:
+            return
+        conn = db_connect(self.db_path)
+        try:
+            conn.execute(
+                """INSERT OR IGNORE INTO download_history
+                   (cart_item_id, stream_id, source_id, content_type, name,
+                    series_name, series_id, season, episode_num, episode_title,
+                    icon, grp, container_extension, file_path, file_size,
+                    completed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    item.get("id", ""),
+                    item.get("stream_id", ""),
+                    item.get("source_id", ""),
+                    item.get("content_type", ""),
+                    item.get("name"),
+                    item.get("series_name"),
+                    item.get("series_id"),
+                    item.get("season"),
+                    item.get("episode_num"),
+                    item.get("episode_title"),
+                    item.get("icon"),
+                    item.get("group"),
+                    item.get("container_extension"),
+                    file_path,
+                    item.get("file_size") or 0,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            conn.commit()
+        except Exception as exc:
+            logger.error("Error recording download history for %s: %s", item.get("id"), exc)
+        finally:
+            conn.close()
+
+    def get_download_history_for_browse(self, keys: list[tuple[str, str, str]]) -> list[dict]:
+        """Return history rows matching the displayed movie/series keys.
+
+        A series browse key is its parent series ID, while a history row's
+        stream_id is the individual episode ID. The series_id column bridges
+        those two representations.
+        """
+        if not keys:
+            return []
+        conn = db_connect(self.db_path)
+        try:
+            matches: list[dict] = []
+            for start in range(0, len(keys), 300):
+                chunk = keys[start : start + 300]
+                values_sql = ",".join("(?, ?, ?)" for _ in chunk)
+                params: list[str] = []
+                for source_id, content_type, stream_id in chunk:
+                    params.extend([stream_id, source_id, content_type])
+                rows = conn.execute(
+                    f"""WITH browse_keys(stream_id, source_id, content_type) AS
+                           (VALUES {values_sql})
+                        SELECT k.stream_id AS browse_stream_id,
+                               k.source_id AS browse_source_id,
+                               k.content_type AS browse_content_type,
+                               h.season, h.episode_num
+                        FROM download_history h
+                        JOIN browse_keys k
+                          ON k.source_id = h.source_id
+                         AND k.content_type = h.content_type
+                         AND ((h.content_type = 'vod' AND h.stream_id = k.stream_id)
+                              OR (h.content_type = 'series' AND h.series_id = k.stream_id))""",
+                    params,
+                ).fetchall()
+                matches.extend(
+                    {
+                        "source_id": row["browse_source_id"],
+                        "content_type": row["browse_content_type"],
+                        "stream_id": row["browse_stream_id"],
+                        "season": row["season"],
+                        "episode_num": row["episode_num"],
+                    }
+                    for row in rows
+                )
+            return matches
+        finally:
+            conn.close()
+
+    def get_download_history(
+        self,
+        content_type: str = "",
+        source_id: str = "",
+        search: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        """Return paginated completed download events for the history page."""
+        conditions = ["1 = 1"]
+        params: list = []
+        if content_type in ("vod", "series"):
+            conditions.append("content_type = ?")
+            params.append(content_type)
+        if source_id:
+            conditions.append("source_id = ?")
+            params.append(source_id)
+        if search:
+            conditions.append(
+                "(lower(COALESCE(name, '')) LIKE lower(?) OR "
+                "lower(COALESCE(series_name, '')) LIKE lower(?) OR "
+                "lower(COALESCE(episode_title, '')) LIKE lower(?))"
+            )
+            search_pattern = f"%{search}%"
+            params.extend([search_pattern, search_pattern, search_pattern])
+        where_clause = " AND ".join(conditions)
+        limit = max(1, min(limit, 200))
+        offset = max(0, offset)
+
+        conn = db_connect(self.db_path)
+        try:
+            total = conn.execute(
+                f"SELECT COUNT(*) AS cnt FROM download_history WHERE {where_clause}",
+                params,
+            ).fetchone()["cnt"]
+            rows = conn.execute(
+                f"""SELECT id, cart_item_id, stream_id, source_id, content_type,
+                           name, series_name, series_id, season, episode_num,
+                           episode_title, icon, grp, container_extension,
+                           file_path, file_size, completed_at
+                    FROM download_history
+                    WHERE {where_clause}
+                    ORDER BY completed_at DESC, id DESC
+                    LIMIT ? OFFSET ?""",
+                params + [limit, offset],
+            ).fetchall()
+            return {
+                "items": [dict(row) for row in rows],
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "has_more": offset + len(rows) < total,
+            }
         finally:
             conn.close()
 
@@ -1790,6 +1932,7 @@ class CartService:
         item["file_size"] = dest_size
         item["file_path"] = file_path
         item.pop("temp_path", None)
+        self.record_download_history(item)
         self.save_cart()
         logger.info(f"[MOVE] ✅ Completed: '{item_name}' -> {file_path} ({dest_size / 1024 / 1024:.1f} MB)")
         return True

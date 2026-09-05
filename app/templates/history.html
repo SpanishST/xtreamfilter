@@ -48,8 +48,9 @@
         .empty-state { text-align: center; padding: 70px 20px; color: #666; background: rgba(255, 255, 255, 0.03); border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.07); }
         .empty-state-icon { font-size: 4em; margin-bottom: 20px; opacity: 0.3; }
         .empty-state h3 { color: #888; margin-bottom: 10px; }
-        .load-more { width: 100%; margin-top: 15px; display: none; }
-        .load-more.visible { display: block; }
+        .history-pagination { display: none; justify-content: center; align-items: center; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+        .history-pagination.visible { display: flex; }
+        .history-pagination-info { color: #888; font-size: 0.9em; min-width: 110px; text-align: center; }
         @media (max-width: 768px) {
             .top-nav { gap: 10px; padding: 10px 14px; }
             .top-nav-links { margin-left: 0; width: 100%; }
@@ -97,14 +98,18 @@
             <button class="btn btn-secondary" onclick="loadHistory()">↻ Refresh</button>
         </div>
 
-        <div class="history-summary">Showing <strong id="history-count">0</strong> of <strong id="history-total">0</strong> downloads</div>
+        <div class="history-summary">Showing <strong id="history-range">0</strong> of <strong id="history-total">0</strong> downloads</div>
         <div class="history-list" id="history-list"></div>
         <div class="empty-state" id="history-empty" style="display:none;">
             <div class="empty-state-icon">📥</div>
             <h3>No downloads found</h3>
             <p>Completed downloads will appear here.</p>
         </div>
-        <button class="btn btn-secondary load-more" id="history-load-more" onclick="loadMoreHistory()">Load more</button>
+        <div class="history-pagination" id="history-pagination" aria-label="Download history pagination">
+            <button class="btn btn-secondary" id="history-prev-page" onclick="goToHistoryPage(historyPage - 1)">Previous</button>
+            <span class="history-pagination-info">Page <strong id="history-page">1</strong> of <strong id="history-total-pages">1</strong></span>
+            <button class="btn btn-secondary" id="history-next-page" onclick="goToHistoryPage(historyPage + 1)">Next</button>
+        </div>
     </div>
 
     <footer style="text-align:center; padding: 20px; margin-top: 40px; color: #555; font-size: 0.85em; border-top: 1px solid rgba(255,255,255,0.07);">
@@ -113,7 +118,8 @@
 
     <script>
         const HISTORY_PAGE_SIZE = 50;
-        let historyOffset = 0;
+        let historyPage = 1;
+        let historyTotal = 0;
         let historyLoading = false;
 
         function escapeHtml(value) {
@@ -182,9 +188,9 @@
             if (historyLoading) return;
             historyLoading = true;
             if (reset) {
-                historyOffset = 0;
-                document.getElementById('history-list').innerHTML = '';
+                historyPage = 1;
             }
+            const historyOffset = (historyPage - 1) * HISTORY_PAGE_SIZE;
             const params = new URLSearchParams({
                 limit: String(HISTORY_PAGE_SIZE),
                 offset: String(historyOffset),
@@ -196,12 +202,20 @@
                 const response = await fetch('/api/download-history?' + params.toString());
                 if (!response.ok) throw new Error('History request failed');
                 const data = await response.json();
-                document.getElementById('history-list').insertAdjacentHTML('beforeend', (data.items || []).map(createHistoryEntry).join(''));
-                historyOffset += (data.items || []).length;
-                document.getElementById('history-count').textContent = historyOffset;
-                document.getElementById('history-total').textContent = data.total || 0;
-                document.getElementById('history-empty').style.display = data.total === 0 ? 'block' : 'none';
-                document.getElementById('history-load-more').classList.toggle('visible', !!data.has_more);
+                const items = data.items || [];
+                historyTotal = data.total || 0;
+                const totalPages = Math.max(1, Math.ceil(historyTotal / HISTORY_PAGE_SIZE));
+                document.getElementById('history-list').innerHTML = items.map(createHistoryEntry).join('');
+                document.getElementById('history-range').textContent = historyTotal
+                    ? (historyOffset + 1) + '-' + (historyOffset + items.length)
+                    : '0';
+                document.getElementById('history-total').textContent = historyTotal;
+                document.getElementById('history-page').textContent = historyPage;
+                document.getElementById('history-total-pages').textContent = totalPages;
+                document.getElementById('history-prev-page').disabled = historyPage === 1;
+                document.getElementById('history-next-page').disabled = historyPage === totalPages;
+                document.getElementById('history-pagination').classList.toggle('visible', totalPages > 1);
+                document.getElementById('history-empty').style.display = historyTotal === 0 ? 'block' : 'none';
             } catch (error) {
                 console.error('Error loading history:', error);
                 document.getElementById('history-empty').style.display = 'block';
@@ -210,7 +224,12 @@
             }
         }
 
-        function loadMoreHistory() { loadHistory(false); }
+        function goToHistoryPage(page) {
+            const totalPages = Math.max(1, Math.ceil(historyTotal / HISTORY_PAGE_SIZE));
+            if (historyLoading || page < 1 || page > totalPages || page === historyPage) return;
+            historyPage = page;
+            loadHistory(false);
+        }
 
         async function updateCartBadge() {
             try {

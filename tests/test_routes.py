@@ -1038,6 +1038,8 @@ def test_history_page(client):
     r = client.get("/history")
     assert r.status_code == 200
     assert "Download History" in r.text
+    assert 'id="history-pagination"' in r.text
+    assert "goToHistoryPage" in r.text
 
 
 # -------------------------------------------------------------------

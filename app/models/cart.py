@@ -42,6 +42,7 @@ class CartItem(BaseModel):
     file_path: Optional[str] = None
     file_size: Optional[int] = None
     temp_path: Optional[str] = None
+    destination: str = ""
 
 
 class CartData(BaseModel):

@@ -5,9 +5,47 @@ import copy
 import json
 import logging
 import os
+import re
 import uuid
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_download_destination(value: str | None, *, allow_root: bool = True) -> str:
+    """Normalize a destination relative to the configured download root.
+
+    Destinations intentionally cannot be absolute or escape the library root.
+    Slash normalization also makes values copied from Windows clients safe for
+    the Linux container filesystem.
+    """
+    if value is not None and not isinstance(value, str):
+        raise ValueError("Destination must be a string")
+    text = str(value or "").strip().replace("\\", "/")
+    if not text or text == ".":
+        if allow_root:
+            return ""
+        raise ValueError("Destination cannot be empty")
+    if "\x00" in text or text.startswith("/") or re.match(r"^[A-Za-z]:($|/)", text):
+        raise ValueError("Destination must be relative to the download root")
+
+    parts = [part for part in text.split("/") if part and part != "."]
+    if not parts or any(part == ".." for part in parts):
+        raise ValueError("Destination cannot contain parent-directory segments")
+    return "/".join(parts)
+
+
+def resolve_download_destination(root: str, destination: str | None) -> tuple[str, str]:
+    """Return ``(normalized_relative_path, absolute_path)`` under *root*."""
+    normalized = normalize_download_destination(destination, allow_root=True)
+    root_real = os.path.realpath(root)
+    target = os.path.realpath(os.path.join(root_real, *normalized.split("/"))) if normalized else root_real
+    try:
+        inside_root = os.path.commonpath((root_real, target)) == root_real
+    except ValueError:
+        inside_root = False
+    if not inside_root:
+        raise ValueError("Destination resolves outside the download root")
+    return normalized, target
 
 
 class ConfigService:
@@ -72,6 +110,8 @@ class ConfigService:
                 "proxy_streams": True,
                 "telegram": cls._default_telegram_config(),
                 "jellyfin": cls._default_jellyfin_config(),
+                "download_movie_destination": "Films",
+                "download_series_destination": "Series",
             },
             "database": {
                 "use_async": True,
@@ -241,6 +281,30 @@ class ConfigService:
         return self._config.get("options", {}).get("download_temp_path", "/downloads/.tmp")
 
     download_temp_path = property(get_download_temp_path)
+
+    def get_download_destination(self, content_type: str) -> str:
+        """Return the configured relative destination for a content type."""
+        key = (
+            "download_series_destination"
+            if content_type == "series"
+            else "download_movie_destination"
+        )
+        default = "Series" if content_type == "series" else "Films"
+        try:
+            normalized, _ = resolve_download_destination(
+                self.get_download_path(),
+                self._config.get("options", {}).get(key, default),
+            )
+            return normalized
+        except ValueError:
+            logger.warning("Invalid %s setting; using %s", key, default)
+            return default
+
+    def get_download_destinations(self) -> dict[str, str]:
+        return {
+            "movie": self.get_download_destination("vod"),
+            "series": self.get_download_destination("series"),
+        }
 
     def get_download_throttle_settings(self) -> dict:
         opts = self._config.get("options", {})

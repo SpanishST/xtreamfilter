@@ -133,6 +133,27 @@ async def add_to_cart_batch(
     return {"status": "ok", **result}
 
 
+@router.patch("/api/cart/{item_id}/destination")
+async def update_cart_item_destination(
+    item_id: str,
+    request: Request,
+    cart: CartService = Depends(get_cart_service),
+    log_service: LogService = Depends(get_log_service),
+):
+    data = await request.json()
+    result = await cart.update_item_destination(item_id, data.get("destination"))
+    if result.get("error"):
+        status_code = 404 if result["error"] == "Item not found" else 400
+        return JSONResponse(status_code=status_code, content=result)
+    await log_service.log(
+        "cart",
+        "info",
+        f"Updated download destination: {result['item'].get('name', '')}",
+        {"item_id": item_id, "destination": result["item"].get("destination", "")},
+    )
+    return {"status": "ok", **result}
+
+
 @router.post("/api/cart/reorder")
 async def reorder_cart(
     request: Request,

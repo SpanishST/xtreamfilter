@@ -155,6 +155,101 @@ def test_options_get(client):
     assert r.status_code == 200
 
 
+def test_download_destinations_are_root_scoped_and_persisted(client, tmp_path):
+    cfg = client.app.state.config_service
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    cfg.config["options"]["download_path"] = str(library_root)
+    cfg.save()
+
+    response = client.get("/api/options/download_destinations")
+    assert response.status_code == 200
+    assert response.json()["movie"] == "Films"
+    assert response.json()["series"] == "Series"
+
+    response = client.post(
+        "/api/options/download_destinations",
+        json={"movie_destination": "Movies", "series_destination": "Television/Series"},
+    )
+    assert response.status_code == 200
+    assert response.json()["movie"] == "Movies"
+    assert response.json()["series"] == "Television/Series"
+
+    (library_root / "Movies").mkdir()
+    response = client.get("/api/options/download_folders")
+    assert response.status_code == 200
+    assert response.json()["folders"][0]["path"] == "Movies"
+
+    response = client.post("/api/options/download_folders", json={"path": "Kids/Movies"})
+    assert response.status_code == 200
+    assert response.json()["path"] == "Kids/Movies"
+    assert (library_root / "Kids" / "Movies").is_dir()
+
+    assert client.get("/api/options/download_folders", params={"path": "../outside"}).status_code == 400
+    assert client.post(
+        "/api/options/download_destinations",
+        json={"movie_destination": "/outside"},
+    ).status_code == 400
+
+
+def test_cart_items_capture_and_update_destination(client, tmp_path):
+    cfg = client.app.state.config_service
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    cfg.config["options"]["download_path"] = str(library_root)
+    cfg.config["options"]["download_movie_destination"] = "Movies"
+    cfg.save()
+
+    response = client.post(
+        "/api/cart",
+        json={
+            "source_id": "source-1",
+            "stream_id": "movie-1",
+            "content_type": "vod",
+            "name": "Test Movie",
+            "container_extension": "mp4",
+        },
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["destination"] == "Movies"
+
+    cart = client.app.state.cart_service
+    assert cart.build_download_filepath(item) == str(library_root / "Movies" / "Test Movie" / "Test Movie.mp4")
+
+    series_item = {
+        "content_type": "series",
+        "destination": "Television/Series",
+        "name": "Pilot",
+        "series_name": "Test Show",
+        "season": "1",
+        "episode_num": 1,
+        "episode_title": "Pilot",
+        "container_extension": "mkv",
+    }
+    assert cart.build_download_filepath(series_item) == str(
+        library_root / "Television" / "Series" / "Test Show" / "S01" / "Test Show S01E01.mkv"
+    )
+
+    response = client.patch(
+        f"/api/cart/{item['id']}/destination",
+        json={"destination": "Kids/Movies"},
+    )
+    assert response.status_code == 200
+    assert response.json()["item"]["destination"] == "Kids/Movies"
+    assert cart.build_download_filepath(response.json()["item"]) == str(
+        library_root / "Kids" / "Movies" / "Test Movie" / "Test Movie.mp4"
+    )
+    cart.load_cart()
+    assert cart._download_cart[0]["destination"] == "Kids/Movies"
+
+    cart._download_cart[0]["status"] = "downloading"
+    assert client.patch(
+        f"/api/cart/{item['id']}/destination",
+        json={"destination": "Other"},
+    ).status_code == 400
+
+
 def test_options_proxy_toggle(client):
     r = client.post("/api/options/proxy", json={"enabled": False})
     assert r.status_code == 200

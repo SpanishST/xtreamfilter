@@ -93,7 +93,7 @@
         .item-progress-fill { height: 100%; background: #00d4ff; border-radius: 2px; transition: width 0.5s ease; }
         .item-progress-text { font-size: 0.75em; color: #888; text-align: center; margin-top: 2px; }
         .item-error { font-size: 0.75em; color: #ff4757; max-width: 200px; word-break: break-word; }
-        .item-actions { display: flex; align-items: center; justify-content: flex-end; gap: 2px; min-width: 40px; }
+         .item-actions { display: flex; align-items: center; justify-content: flex-end; gap: 2px; min-width: 120px; }
         .drag-handle { width: 28px; flex: 0 0 28px; color: #666; cursor: grab; font-size: 1.1em; line-height: 1; text-align: center; user-select: none; touch-action: none; }
         .drag-handle:active { cursor: grabbing; }
         .drag-handle.disabled { visibility: hidden; pointer-events: none; }
@@ -112,9 +112,26 @@
         .toast-info { background: rgba(0, 212, 255, 0.9); color: #000; font-weight: 500; }
         .toast-error { background: rgba(255, 71, 87, 0.9); color: #fff; font-weight: 500; }
 
-        .cart-section { background: rgba(255, 255, 255, 0.03); border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.08); overflow: hidden; }
+         .cart-section { background: rgba(255, 255, 255, 0.03); border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.08); overflow: hidden; }
 
-        /* Schedule grid */
+         /* Server-side folder picker */
+         .folder-picker-modal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 20px; background: rgba(0, 0, 0, 0.72); z-index: 1000; }
+         .folder-picker-modal.show { display: flex; }
+         .folder-picker { width: min(620px, 100%); max-height: min(720px, 90vh); overflow: hidden; display: flex; flex-direction: column; background: linear-gradient(135deg, #1a1a2e, #16213e); border: 1px solid rgba(255,255,255,0.18); border-radius: 14px; box-shadow: 0 20px 70px rgba(0,0,0,0.5); }
+         .folder-picker-header, .folder-picker-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; border-bottom: 1px solid rgba(255,255,255,0.1); }
+         .folder-picker-footer { border-top: 1px solid rgba(255,255,255,0.1); border-bottom: none; justify-content: flex-end; }
+         .folder-picker-header h3 { color: #00d4ff; font-size: 1.05em; }
+         .folder-picker-close { background: none; border: none; color: #888; font-size: 1.4em; cursor: pointer; }
+         .folder-picker-close:hover { color: #fff; }
+         .folder-picker-body { padding: 16px 20px; overflow-y: auto; }
+         .folder-picker-path { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; color: #bbb; font-size: 0.85em; }
+         .folder-picker-path button { border: none; background: none; color: #00d4ff; cursor: pointer; padding: 0; }
+         .folder-picker-list { display: flex; flex-direction: column; gap: 6px; }
+         .folder-picker-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: rgba(255,255,255,0.04); color: #eee; text-align: left; cursor: pointer; }
+         .folder-picker-row:hover { border-color: rgba(0,212,255,0.5); background: rgba(0,212,255,0.1); }
+         .folder-picker-empty { padding: 25px 10px; text-align: center; color: #777; }
+
+         /* Schedule grid */
         .schedule-grid { display: grid; grid-template-columns: 100px 50px 120px 30px 120px; gap: 8px 12px; align-items: center; margin-top: 10px; }
         .schedule-grid .day-label { font-size: 0.9em; font-weight: 500; color: #ccc; }
         .schedule-grid .day-label.disabled { color: #555; }
@@ -202,6 +219,23 @@
                         <button class="btn btn-primary btn-small" onclick="saveTempPath()" style="white-space:nowrap;">Save</button>
                         <button class="btn btn-secondary btn-small" onclick="testPath('download-temp-path')" style="white-space:nowrap;">🧪 Test</button>
                     </div>
+                </div>
+                <div class="settings-row" style="margin-top:14px;">
+                    <div class="setting-group" style="flex:1;">
+                        <label>Movies Destination <span style="font-size:0.8em;color:#888;">(relative to Download Path)</span></label>
+                        <div style="display:flex; gap:8px;">
+                            <input type="text" id="download-movie-destination" placeholder="Films" readonly onclick="openFolderPicker('movie-default')">
+                            <button class="btn btn-secondary btn-small" onclick="openFolderPicker('movie-default')" style="white-space:nowrap;">📁 Choose</button>
+                        </div>
+                    </div>
+                    <div class="setting-group" style="flex:1;">
+                        <label>Series Destination <span style="font-size:0.8em;color:#888;">(relative to Download Path)</span></label>
+                        <div style="display:flex; gap:8px;">
+                            <input type="text" id="download-series-destination" placeholder="Series" readonly onclick="openFolderPicker('series-default')">
+                            <button class="btn btn-secondary btn-small" onclick="openFolderPicker('series-default')" style="white-space:nowrap;">📁 Choose</button>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary btn-small" onclick="saveDownloadDestinations()" style="align-self:flex-end; white-space:nowrap;">Save Destinations</button>
                 </div>
             </div>
             <div class="settings-section-title">🛡️ Anti-Ban Throttle</div>
@@ -349,9 +383,10 @@
                     <tr>
                         <th style="width:45%">Item</th>
                         <th>Type</th>
+                        <th>Destination</th>
                         <th>Status</th>
                         <th>Progress</th>
-                        <th style="width:40px"></th>
+                        <th style="width:140px"></th>
                     </tr>
                 </thead>
                 <tbody id="cart-body">
@@ -364,6 +399,24 @@
             <h3>Your cart is empty</h3>
             <p>Go to <a href="/browse">Custom categories & Downloads</a> to add films and series to your download cart.</p>
         </div>
+
+        <div class="folder-picker-modal" id="folder-picker-modal" onclick="if(event.target===this) closeFolderPicker()">
+            <div class="folder-picker">
+                <div class="folder-picker-header">
+                    <h3>📁 Choose Download Folder</h3>
+                    <button class="folder-picker-close" onclick="closeFolderPicker()">✕</button>
+                </div>
+                <div class="folder-picker-body">
+                    <div class="folder-picker-path" id="folder-picker-path"></div>
+                    <div class="folder-picker-list" id="folder-picker-list"></div>
+                </div>
+                <div class="folder-picker-footer">
+                    <button class="btn btn-secondary btn-small" onclick="createFolderFromPicker()">＋ New folder</button>
+                    <button class="btn btn-secondary btn-small" onclick="closeFolderPicker()">Cancel</button>
+                    <button class="btn btn-primary btn-small" onclick="selectFolderFromPicker()">Select this folder</button>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -375,10 +428,13 @@
         let draggingRow = null;
         let draggingOrder = null;
         let reorderInProgress = false;
+        let destinationDefaults = { movie: 'Films', series: 'Series' };
+        let folderPickerState = { target: '', itemId: null, path: '' };
 
         document.addEventListener('DOMContentLoaded', function() {
             loadSources();
             loadDownloadPath();
+            loadDownloadDestinations();
             loadThrottleSettings();
             loadNotifySettings();
             loadSchedule();
@@ -407,6 +463,151 @@
                 const data = await resp.json();
                 document.getElementById('download-temp-path').value = data.download_temp_path || '/downloads/.tmp';
             } catch (e) { console.error('Error loading temp path:', e); }
+        }
+
+        async function loadDownloadDestinations() {
+            try {
+                const resp = await fetch('/api/options/download_destinations');
+                const data = await resp.json();
+                destinationDefaults = {
+                    movie: data.movie || '',
+                    series: data.series || ''
+                };
+                document.getElementById('download-movie-destination').value = data.movie || '';
+                document.getElementById('download-series-destination').value = data.series || '';
+            } catch (e) { console.error('Error loading download destinations:', e); }
+        }
+
+        async function saveDownloadDestinations() {
+            const movie = document.getElementById('download-movie-destination').value;
+            const series = document.getElementById('download-series-destination').value;
+            try {
+                const resp = await fetch('/api/options/download_destinations', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ movie_destination: movie, series_destination: series })
+                });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    showToast(data.error || 'Failed to save destinations', 'error');
+                    return;
+                }
+                destinationDefaults = { movie: data.movie || '', series: data.series || '' };
+                document.getElementById('download-movie-destination').value = destinationDefaults.movie;
+                document.getElementById('download-series-destination').value = destinationDefaults.series;
+                showToast('Download destinations saved', 'success');
+            } catch (e) { showToast('Error saving destinations', 'error'); }
+        }
+
+        async function loadFolderPicker(path) {
+            const list = document.getElementById('folder-picker-list');
+            const pathEl = document.getElementById('folder-picker-path');
+            list.innerHTML = '<div class="folder-picker-empty">Loading folders...</div>';
+            try {
+                const resp = await fetch('/api/options/download_folders?path=' + encodeURIComponent(path || ''));
+                const data = await resp.json();
+                if (!resp.ok) {
+                    if (path) {
+                        folderPickerState.path = '';
+                        await loadFolderPicker('');
+                        return;
+                    }
+                    list.innerHTML = '<div class="folder-picker-empty">' + escapeHtml(data.error || 'Could not read folder') + '</div>';
+                    return;
+                }
+                folderPickerState.path = data.path || '';
+                const parts = folderPickerState.path ? folderPickerState.path.split('/') : [];
+                pathEl.innerHTML = '<button onclick="navigateFolder(\'\')">Library root</button>' +
+                    parts.map((part, index) => {
+                        const partPath = parts.slice(0, index + 1).join('/');
+                        return '<span>/</span><button onclick="navigateFolder(' + jsArg(partPath) + ')">' + escapeHtml(part) + '</button>';
+                    }).join('');
+                if (!data.folders || data.folders.length === 0) {
+                    list.innerHTML = '<div class="folder-picker-empty">No subfolders here</div>';
+                    return;
+                }
+                list.innerHTML = data.folders.map(folder =>
+                    '<button class="folder-picker-row" onclick="navigateFolder(' + jsArg(folder.path) + ')">📁 <span>' +
+                    escapeHtml(folder.name) + '</span>' + (folder.writable ? '' : '<span style="margin-left:auto;color:#ff4757;font-size:.8em;">read-only</span>') + '</button>'
+                ).join('');
+            } catch (e) {
+                list.innerHTML = '<div class="folder-picker-empty">Error loading folders</div>';
+            }
+        }
+
+        function openFolderPicker(target, itemId) {
+            folderPickerState = { target: target, itemId: itemId || null, path: '' };
+            if (target === 'movie-default') {
+                folderPickerState.path = document.getElementById('download-movie-destination').value || '';
+            } else if (target === 'series-default') {
+                folderPickerState.path = document.getElementById('download-series-destination').value || '';
+            } else if (itemId) {
+                const item = cartItems.find(entry => String(entry.id) === String(itemId));
+                if (item) {
+                    const defaultPath = item.content_type === 'series' ? destinationDefaults.series : destinationDefaults.movie;
+                    folderPickerState.path = item.destination !== null && item.destination !== undefined
+                        ? item.destination
+                        : (defaultPath || '');
+                }
+            }
+            document.getElementById('folder-picker-modal').classList.add('show');
+            loadFolderPicker(folderPickerState.path);
+        }
+
+        function closeFolderPicker() {
+            document.getElementById('folder-picker-modal').classList.remove('show');
+        }
+
+        function navigateFolder(path) {
+            loadFolderPicker(path);
+        }
+
+        async function createFolderFromPicker() {
+            const name = window.prompt('New folder name:');
+            if (!name || !name.trim()) return;
+            const path = folderPickerState.path ? folderPickerState.path + '/' + name.trim() : name.trim();
+            try {
+                const resp = await fetch('/api/options/download_folders', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: path })
+                });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    showToast(data.error || 'Could not create folder', 'error');
+                    return;
+                }
+                await loadFolderPicker(data.path || '');
+            } catch (e) { showToast('Error creating folder', 'error'); }
+        }
+
+        async function selectFolderFromPicker() {
+            const selectedPath = folderPickerState.path || '';
+            if (folderPickerState.target === 'movie-default' || folderPickerState.target === 'series-default') {
+                const inputId = folderPickerState.target === 'movie-default'
+                    ? 'download-movie-destination'
+                    : 'download-series-destination';
+                document.getElementById(inputId).value = selectedPath;
+                closeFolderPicker();
+                return;
+            }
+            if (folderPickerState.itemId) {
+                try {
+                    const resp = await fetch('/api/cart/' + encodeURIComponent(folderPickerState.itemId) + '/destination', {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ destination: selectedPath })
+                    });
+                    const data = await resp.json();
+                    if (!resp.ok) {
+                        showToast(data.error || 'Could not update destination', 'error');
+                        return;
+                    }
+                    showToast('Item destination updated', 'success');
+                    closeFolderPicker();
+                    await loadCart();
+                } catch (e) { showToast('Error updating destination', 'error'); }
+            }
         }
 
         async function saveDownloadPath() {
@@ -729,6 +930,14 @@
                 }
 
                 const canRemove = item.status !== 'downloading';
+                const destination = item.destination !== null && item.destination !== undefined
+                    ? item.destination
+                    : ((item.content_type === 'series' ? destinationDefaults.series : destinationDefaults.movie) || '');
+                const destinationLabel = destination || 'Library root';
+                const canEditDestination = ['queued', 'failed', 'cancelled', 'move_failed'].includes(item.status);
+                const destinationBtn = canEditDestination
+                    ? '<button class="remove-btn" onclick="openFolderPicker(\'item\', \'' + item.id + '\')" title="Choose destination" style="color:#00d4ff;">📁</button>'
+                    : '';
                 const moveBtn = (item.status === 'move_failed' && item.temp_path)
                     ? '<button class="remove-btn" onclick="moveItem(\'' + item.id + '\')" title="Move to destination" style="color:#00d4ff;">📂</button>'
                     : '';
@@ -748,9 +957,10 @@
                     '<td><div class="item-info">' + dragHandle + icon +
                     '<div class="item-details"><div class="item-name">' + displayName + '</div>' + metaInfo + '</div></div></td>' +
                     '<td data-label="Type">' + typeBadge + '</td>' +
+                    '<td data-label="Destination"><span style="font-size:0.8em;color:#aaa;word-break:break-word;">' + escapeHtml(destinationLabel) + '</span></td>' +
                     '<td data-label="Status">' + statusBadge + '</td>' +
                     '<td data-label="Progress">' + progressHtml + '</td>' +
-                    '<td><div class="item-actions">' + moveBtn + retryBtn + removeBtn + '</div></td>' +
+                    '<td><div class="item-actions">' + destinationBtn + moveBtn + retryBtn + removeBtn + '</div></td>' +
                     '</tr>';
             }).join('');
         }
@@ -1022,6 +1232,10 @@
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+
+        function jsArg(text) {
+            return escapeHtml(JSON.stringify(String(text || '')));
         }
 
         function showToast(message, type) {

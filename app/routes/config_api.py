@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import os
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
 from app.dependencies import get_config_service, get_http_client, get_jellyfin_service, get_notification_service
 from app.models.xtream import PLAYER_PROFILES
-from app.services.config_service import ConfigService
+from app.services.config_service import ConfigService, resolve_download_destination
 from app.services.http_client import HttpClientService
 from app.services.jellyfin_service import JellyfinService
 from app.services.notification_service import NotificationService
@@ -237,6 +237,95 @@ async def test_jellyfin_connection(
 
 
 # ---- Download paths ----
+
+@router.get("/api/options/download_destinations")
+async def get_download_destinations_api(cfg: ConfigService = Depends(get_config_service)):
+    return {
+        "download_path": cfg.download_path,
+        **cfg.get_download_destinations(),
+    }
+
+
+@router.post("/api/options/download_destinations")
+async def set_download_destinations_api(request: Request, cfg: ConfigService = Depends(get_config_service)):
+    data = await request.json()
+    updates = {
+        "movie": data.get("movie_destination") if "movie_destination" in data else None,
+        "series": data.get("series_destination") if "series_destination" in data else None,
+    }
+    normalized: dict[str, str] = {}
+    for content_type, value in updates.items():
+        if value is None:
+            continue
+        try:
+            normalized[content_type], _ = resolve_download_destination(cfg.download_path, value)
+        except (TypeError, ValueError) as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    if "options" not in cfg.config:
+        cfg.config["options"] = {}
+    if "movie" in normalized:
+        cfg.config["options"]["download_movie_destination"] = normalized["movie"]
+    if "series" in normalized:
+        cfg.config["options"]["download_series_destination"] = normalized["series"]
+    cfg.save()
+    return {"status": "ok", **cfg.get_download_destinations()}
+
+
+@router.get("/api/options/download_folders")
+async def list_download_folders_api(
+    path: str = Query("", max_length=1000),
+    cfg: ConfigService = Depends(get_config_service),
+):
+    try:
+        normalized, target = resolve_download_destination(cfg.download_path, path)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    if not os.path.isdir(target):
+        return JSONResponse(status_code=404, content={"error": "Folder does not exist"})
+
+    folders = []
+    try:
+        entries = sorted(os.scandir(target), key=lambda entry: entry.name.casefold())
+        for entry in entries:
+            if entry.name.startswith(".") or not entry.is_dir(follow_symlinks=False):
+                continue
+            child_path = f"{normalized}/{entry.name}" if normalized else entry.name
+            try:
+                _, child_target = resolve_download_destination(cfg.download_path, child_path)
+            except ValueError:
+                continue
+            folders.append({
+                "name": entry.name,
+                "path": child_path,
+                "writable": os.access(child_target, os.W_OK),
+            })
+    except OSError as exc:
+        return JSONResponse(status_code=400, content={"error": f"Cannot read folder: {exc}"})
+
+    return {
+        "path": normalized,
+        "folders": folders,
+        "writable": os.access(target, os.W_OK),
+    }
+
+
+@router.post("/api/options/download_folders")
+async def create_download_folder_api(request: Request, cfg: ConfigService = Depends(get_config_service)):
+    data = await request.json()
+    try:
+        _, target = resolve_download_destination(cfg.download_path, data.get("path", ""))
+        os.makedirs(target, exist_ok=True)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    except OSError as exc:
+        return JSONResponse(status_code=400, content={"error": f"Cannot create folder: {exc}"})
+    relative_path = (
+        os.path.relpath(target, os.path.realpath(cfg.download_path)).replace(os.sep, "/")
+        if target != os.path.realpath(cfg.download_path)
+        else ""
+    )
+    return {"status": "ok", "path": relative_path}
 
 @router.get("/api/options/download_path")
 async def get_download_path_api(cfg: ConfigService = Depends(get_config_service)):

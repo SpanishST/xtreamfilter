@@ -21,6 +21,7 @@ import httpx
 
 from app.database import DB_NAME, db_connect
 from app.models.xtream import PLAYER_PROFILES
+from app.services.config_service import resolve_download_destination
 from app.services.monitor_service import _normalize_imdb_id, _normalize_tmdb_id
 from app.services.xtream_service import compact_episode_info
 
@@ -645,7 +646,7 @@ class CartService:
                 "SELECT id, stream_id, source_id, content_type, name, series_name, "
                 "series_id, season, episode_num, episode_title, icon, grp, container_extension, "
                 "added_at, queue_order, status, progress, error, file_path, file_size, temp_path, "
-                "monitor_canonical, expected_size, retried_once "
+                "monitor_canonical, expected_size, retried_once, destination "
                 "FROM cart_items ORDER BY COALESCE(queue_order, 2147483647), added_at, id"
             ).fetchall()
             logger.info(f"load_cart: loaded {len(rows)} items from DB")
@@ -675,6 +676,9 @@ class CartService:
                     "monitor_canonical": r["monitor_canonical"],
                     "expected_size": r["expected_size"],
                     "retried_once": bool(r["retried_once"]),
+                    # NULL is a legacy row with no captured destination;
+                    # an empty string is an intentional library-root choice.
+                    "destination": r["destination"],
                 }
                 for r in rows
             ]
@@ -731,6 +735,7 @@ class CartService:
                     i.get("monitor_canonical"),
                     i.get("expected_size"),
                     int(bool(i.get("retried_once", False))),
+                    i.get("destination", ""),
                     queue_order,
                 )
                 for queue_order, i in enumerate(self._download_cart)
@@ -743,8 +748,8 @@ class CartService:
                     "series_id, season, episode_num, episode_title, icon, grp, "
                     "container_extension, added_at, status, progress, "
                     "error, file_path, file_size, temp_path, monitor_canonical, "
-                    "expected_size, retried_once, queue_order) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "expected_size, retried_once, destination, queue_order) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     rows,
                 )
             conn.commit()
@@ -1058,11 +1063,21 @@ class CartService:
 
     def build_download_filepath(self, item: dict, ext_override: str | None = None) -> str:
         base_path = self.config_service.get_download_path()
+        content_type = item.get("content_type", "vod")
+        configured_destination = self.config_service.get_download_destination(content_type)
+        try:
+            _, destination_root = resolve_download_destination(
+                base_path,
+                configured_destination if item.get("destination") is None else item.get("destination"),
+            )
+        except ValueError:
+            logger.warning("Invalid cart destination; falling back to the configured default")
+            _, destination_root = resolve_download_destination(base_path, configured_destination)
         ext = ext_override or item.get("container_extension", "mp4")
         name = sanitize_filename(item.get("name", "untitled"))
-        if item.get("content_type") == "vod":
-            return os.path.join(base_path, "Films", name, f"{name}.{ext}")
-        elif item.get("content_type") == "series":
+        if content_type == "vod":
+            return os.path.join(destination_root, name, f"{name}.{ext}")
+        elif content_type == "series":
             series_name = sanitize_filename(item.get("series_name", name))
             season = item.get("season", "1")
             episode = item.get("episode_num", 1)
@@ -1074,7 +1089,7 @@ class CartService:
                 filename = f"{series_name} {season_str}{episode_str} - {ep_title_clean}.{ext}"
             else:
                 filename = f"{series_name} {season_str}{episode_str}.{ext}"
-            full_path = os.path.join(base_path, "Series", series_name, season_str, filename)
+            full_path = os.path.join(destination_root, series_name, season_str, filename)
             logger.debug(
                 f"[PATH] Series folder='{series_name}' "
                 f"(monitor_canonical={item.get('monitor_canonical')!r}), "
@@ -1136,12 +1151,30 @@ class CartService:
         async with self._cart_mutation_lock:
             return await self._add_to_cart(data)
 
+    def _resolve_item_destination(self, content_type: str, requested: str | None = None) -> str:
+        """Validate and capture a cart item's relative destination."""
+        destination = (
+            self.config_service.get_download_destination(content_type)
+            if requested is None
+            else requested
+        )
+        normalized, _ = resolve_download_destination(
+            self.config_service.get_download_path(),
+            destination,
+        )
+        return normalized
+
     async def _add_to_cart(self, data: dict, save: bool = True) -> dict:
         """Build cart items from one request, optionally deferring persistence."""
         content_type = data.get("content_type", "vod")
         add_mode = data.get("add_mode", "episode")
         added_items: list[dict] = []
         skipped_count = 0
+
+        try:
+            destination = self._resolve_item_destination(content_type, data.get("destination"))
+        except (TypeError, ValueError) as exc:
+            return {"error": str(exc)}
 
         # Resolve monitor canonical name for series items so the folder name
         # is always the monitor title, even for manual additions.
@@ -1200,6 +1233,7 @@ class CartService:
                     group=data.get("group", ""),
                     container_extension=ep.get("container_extension", "mp4"),
                     monitor_canonical=series_monitor_canon,
+                    destination=destination,
                 )
                 self._download_cart.append(item)
                 added_items.append(item)
@@ -1236,6 +1270,7 @@ class CartService:
                 group=data.get("group", ""),
                 container_extension=data.get("container_extension", "mp4"),
                 monitor_canonical=series_monitor_canon,
+                destination=destination,
             )
             self._download_cart.append(item)
             added_items.append(item)
@@ -1317,6 +1352,27 @@ class CartService:
                     await self.log_service.log("cart", "info", f"Added {len(added_items)} item(s) to cart in batch")
             return {"added": len(added_items), "skipped": skipped, "errors": errors, "items": added_items}
 
+    async def update_item_destination(self, item_id: str, requested: str | None) -> dict:
+        """Update a non-active cart item's destination and persist it."""
+        async with self._cart_mutation_lock:
+            for item in self._download_cart:
+                if item.get("id") != item_id:
+                    continue
+                if item.get("status") == "downloading":
+                    return {"error": "Cannot change the destination of an active download"}
+                try:
+                    item["destination"] = self._resolve_item_destination(
+                        item.get("content_type", "vod"),
+                        requested,
+                    )
+                except (TypeError, ValueError) as exc:
+                    return {"error": str(exc)}
+                if item.get("status") != "completed":
+                    item["file_path"] = None
+                self.save_cart()
+                return {"item": item}
+            return {"error": "Item not found"}
+
     async def reorder_queued_items(self, item_ids: list[str]) -> dict:
         """Reorder queued items while leaving active and finished rows in place."""
         async with self._cart_mutation_lock:
@@ -1370,6 +1426,7 @@ class CartService:
             "monitor_canonical": kwargs.get("monitor_canonical"),
             "expected_size": kwargs.get("expected_size"),
             "retried_once": kwargs.get("retried_once", False),
+            "destination": kwargs.get("destination", ""),
         }
 
     def cancel_download(self) -> bool:
@@ -2238,11 +2295,9 @@ class CartService:
             f.write(nfo_content)
         logger.info(f"[META] Wrote episode NFO: {nfo_path}")
 
-        # Series-level metadata (tvshow.nfo + poster in the series root folder)
-        # Series root = <download_path>/Series/<SeriesName>/
-        series_name = sanitize_filename(item.get("series_name", item.get("name", "")))
-        base_path = self.config_service.get_download_path()
-        series_root = os.path.join(base_path, "Series", series_name)
+        # Series-level metadata belongs beside the season directories, so it
+        # follows a custom cart destination automatically.
+        series_root = os.path.dirname(os.path.dirname(file_path))
         tvshow_nfo_path = os.path.join(series_root, "tvshow.nfo")
 
         if not os.path.exists(tvshow_nfo_path):
@@ -2253,6 +2308,7 @@ class CartService:
                 series_info = await self.xtream_service.fetch_series_info(source_id, series_id)
             if series_info:
                 safe_makedirs(series_root)
+                series_name = sanitize_filename(item.get("series_name", item.get("name", "")))
                 tvshow_content = generate_tvshow_nfo(series_info, name=series_name)
                 with open(tvshow_nfo_path, "w", encoding="utf-8") as f:
                     f.write(tvshow_content)

@@ -115,6 +115,8 @@ class Options(BaseModel):
     jellyfin: JellyfinConfig = Field(default_factory=JellyfinConfig)
     download_path: str = "/downloads"
     download_temp_path: str = "/downloads/.tmp"
+    download_movie_destination: str = "Films"
+    download_series_destination: str = "Series"
     download_bandwidth_limit: int = 0
     download_pause_interval: int = 0
     download_pause_duration: int = 0

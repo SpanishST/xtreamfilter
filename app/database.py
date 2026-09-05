@@ -353,7 +353,8 @@ CREATE TABLE IF NOT EXISTS cart_items (
     file_path           TEXT,
     file_size           INTEGER,
     temp_path           TEXT,
-    series_id           TEXT
+    series_id           TEXT,
+    destination         TEXT
 );
 
 -- Durable record of files that reached their final destination. This is
@@ -605,6 +606,7 @@ def _backfill_streams_denormalized(conn: sqlite3.Connection) -> None:
 _COLUMN_UPGRADES: list[tuple[str, str, str]] = [
     # (table, column, definition)
     ("cart_items", "series_id", "TEXT"),
+    ("cart_items", "destination", "TEXT"),
     ("monitor_sources", "series_name", "TEXT"),
     ("monitored_series", "canonical_name", "TEXT"),
     ("monitored_series", "custom_category_ids", "TEXT"),

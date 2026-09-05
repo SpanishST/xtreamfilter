@@ -133,6 +133,24 @@ async def add_to_cart_batch(
     return {"status": "ok", **result}
 
 
+@router.post("/api/cart/reorder")
+async def reorder_cart(
+    request: Request,
+    cart: CartService = Depends(get_cart_service),
+    log_service: LogService = Depends(get_log_service),
+):
+    data = await request.json()
+    item_ids = data.get("item_ids") if isinstance(data, dict) else None
+    if not isinstance(item_ids, list) or any(not isinstance(item_id, str) for item_id in item_ids):
+        return JSONResponse(status_code=400, content={"error": "item_ids must be a list of strings"})
+
+    result = await cart.reorder_queued_items(item_ids)
+    if result.get("error"):
+        return JSONResponse(status_code=409, content=result)
+    await log_service.log("cart", "info", "Reordered queued downloads", {"item_ids": item_ids})
+    return result
+
+
 @router.delete("/api/cart/{item_id}")
 async def remove_from_cart(
     item_id: str,

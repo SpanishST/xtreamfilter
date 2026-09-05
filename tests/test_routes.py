@@ -716,6 +716,39 @@ def test_cart_pause_and_resume(client):
     assert client.get("/api/cart/status").json()["queue_paused"] is False
 
 
+def test_cart_reorder_persists_queued_order_and_keeps_nonqueued_rows_fixed(client):
+    cart = client.app.state.cart_service
+    cart.cart[:] = [
+        {"id": "queued-1", "stream_id": "1", "source_id": "source-1", "content_type": "vod", "name": "One", "status": "queued", "progress": 0},
+        {"id": "active", "stream_id": "2", "source_id": "source-1", "content_type": "vod", "name": "Active", "status": "downloading", "progress": 50},
+        {"id": "queued-2", "stream_id": "3", "source_id": "source-1", "content_type": "vod", "name": "Two", "status": "queued", "progress": 0},
+        {"id": "finished", "stream_id": "4", "source_id": "source-1", "content_type": "vod", "name": "Finished", "status": "completed", "progress": 100},
+    ]
+    cart.save_cart()
+
+    response = client.post("/api/cart/reorder", json={"item_ids": ["queued-2", "queued-1"]})
+
+    assert response.status_code == 200
+    assert [item["id"] for item in cart.cart] == ["queued-2", "active", "queued-1", "finished"]
+
+    cart.load_cart()
+    assert [item["id"] for item in cart.cart] == ["queued-2", "active", "queued-1", "finished"]
+
+
+def test_cart_reorder_rejects_stale_or_invalid_order(client):
+    cart = client.app.state.cart_service
+    cart.cart[:] = [
+        {"id": "queued-1", "stream_id": "1", "source_id": "source-1", "content_type": "vod", "name": "One", "status": "queued", "progress": 0},
+        {"id": "queued-2", "stream_id": "2", "source_id": "source-1", "content_type": "vod", "name": "Two", "status": "queued", "progress": 0},
+    ]
+    cart.save_cart()
+
+    response = client.post("/api/cart/reorder", json={"item_ids": ["queued-1", "queued-1"]})
+
+    assert response.status_code == 409
+    assert "duplicates" in response.json()["error"]
+
+
 def test_cart_batch_adds_movies_from_multiple_sources_and_reports_duplicates(client):
     selections = [
         {
@@ -897,6 +930,8 @@ def test_cart_page(client):
     r = client.get("/cart")
     assert r.status_code == 200
     assert "Jellyfin Refresh" not in r.text
+    assert "/api/cart/reorder" in r.text
+    assert "drag-handle" in r.text
 
 
 def test_monitor_page(client):

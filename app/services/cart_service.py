@@ -644,9 +644,9 @@ class CartService:
             rows = conn.execute(
                 "SELECT id, stream_id, source_id, content_type, name, series_name, "
                 "series_id, season, episode_num, episode_title, icon, grp, container_extension, "
-                "added_at, status, progress, error, file_path, file_size, temp_path, "
+                "added_at, queue_order, status, progress, error, file_path, file_size, temp_path, "
                 "monitor_canonical, expected_size, retried_once "
-                "FROM cart_items ORDER BY added_at"
+                "FROM cart_items ORDER BY COALESCE(queue_order, 2147483647), added_at, id"
             ).fetchall()
             logger.info(f"load_cart: loaded {len(rows)} items from DB")
             self._download_cart = [
@@ -665,6 +665,7 @@ class CartService:
                     "group": r["grp"],
                     "container_extension": r["container_extension"],
                     "added_at": r["added_at"],
+                    "queue_order": r["queue_order"],
                     "status": r["status"],
                     "progress": r["progress"],
                     "error": r["error"],
@@ -702,6 +703,9 @@ class CartService:
             else:
                 conn.execute("DELETE FROM cart_items")
 
+            for queue_order, item in enumerate(self._download_cart):
+                item["queue_order"] = queue_order
+
             rows = [
                 (
                     i["id"],
@@ -727,8 +731,9 @@ class CartService:
                     i.get("monitor_canonical"),
                     i.get("expected_size"),
                     int(bool(i.get("retried_once", False))),
+                    queue_order,
                 )
-                for i in self._download_cart
+                for queue_order, i in enumerate(self._download_cart)
                 if i.get("id")
             ]
             if rows:
@@ -738,8 +743,8 @@ class CartService:
                     "series_id, season, episode_num, episode_title, icon, grp, "
                     "container_extension, added_at, status, progress, "
                     "error, file_path, file_size, temp_path, monitor_canonical, "
-                    "expected_size, retried_once) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "expected_size, retried_once, queue_order) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     rows,
                 )
             conn.commit()
@@ -1311,6 +1316,33 @@ class CartService:
                 if getattr(self, "log_service", None):
                     await self.log_service.log("cart", "info", f"Added {len(added_items)} item(s) to cart in batch")
             return {"added": len(added_items), "skipped": skipped, "errors": errors, "items": added_items}
+
+    async def reorder_queued_items(self, item_ids: list[str]) -> dict:
+        """Reorder queued items while leaving active and finished rows in place."""
+        async with self._cart_mutation_lock:
+            queued_items = [item for item in self._download_cart if item.get("status") == "queued"]
+            queued_ids = [str(item.get("id", "")) for item in queued_items]
+            requested_ids = [str(item_id) for item_id in item_ids]
+
+            if len(requested_ids) != len(set(requested_ids)):
+                return {"error": "Queued item order contains duplicates"}
+            if set(requested_ids) != set(queued_ids) or len(requested_ids) != len(queued_ids):
+                return {"error": "Queued item order is out of date; reload the cart"}
+
+            items_by_id = {str(item["id"]): item for item in queued_items}
+            reordered_queued = [items_by_id[item_id] for item_id in requested_ids]
+            queued_index = 0
+            reordered_cart = []
+            for item in self._download_cart:
+                if item.get("status") == "queued":
+                    reordered_cart.append(reordered_queued[queued_index])
+                    queued_index += 1
+                else:
+                    reordered_cart.append(item)
+
+            self._download_cart[:] = reordered_cart
+            self.save_cart()
+            return {"status": "ok", "item_ids": requested_ids}
 
     @staticmethod
     def _build_cart_item(**kwargs) -> dict:

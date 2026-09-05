@@ -346,6 +346,7 @@ CREATE TABLE IF NOT EXISTS cart_items (
     grp                 TEXT,
     container_extension TEXT,
     added_at            TEXT,
+    queue_order         INTEGER,
     status              TEXT NOT NULL DEFAULT 'queued',
     progress            REAL NOT NULL DEFAULT 0,
     error               TEXT,
@@ -517,6 +518,7 @@ def init_db(db_path: str) -> None:
         conn.executescript(_SCHEMA)
         # Idempotent column additions for databases that pre-date the column.
         _apply_column_upgrades(conn)
+        _backfill_cart_order(conn)
         _backfill_download_history(conn)
         _create_denormalized_browse_indexes(conn)
         _backfill_streams_denormalized(conn)
@@ -617,6 +619,7 @@ _COLUMN_UPGRADES: list[tuple[str, str, str]] = [
     ("cart_items", "monitor_canonical", "TEXT"),
     ("cart_items", "expected_size", "INTEGER"),
     ("cart_items", "retried_once", "INTEGER NOT NULL DEFAULT 0"),
+    ("cart_items", "queue_order", "INTEGER"),
     # Browse denormalization: lets sorting/filtering use plain indexes
     # instead of joining source_categories and parsing JSON per row.
     ("streams", "group_name", "TEXT"),
@@ -635,6 +638,20 @@ def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             logger.info(f"Schema upgrade: added {table}.{column}")
+
+
+def _backfill_cart_order(conn: sqlite3.Connection) -> None:
+    """Give existing cart rows a stable order matching their old FIFO order."""
+    rows = conn.execute(
+        "SELECT id FROM cart_items WHERE queue_order IS NULL ORDER BY added_at, id"
+    ).fetchall()
+    if not rows:
+        return
+    conn.executemany(
+        "UPDATE cart_items SET queue_order = ? WHERE id = ?",
+        [(index, row[0]) for index, row in enumerate(rows)],
+    )
+    logger.info(f"Schema upgrade: backfilled queue order for {len(rows)} cart item(s)")
 
 
 def _backfill_download_history(conn: sqlite3.Connection) -> None:

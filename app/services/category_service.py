@@ -107,6 +107,47 @@ class CategoryService:
         self.cache_service = cache_service
         self.notification_service = notification_service
         self.db_path = os.path.join(config_service.data_dir, DB_NAME)
+        self.autodownload_service = None
+
+    @staticmethod
+    def _default_autodownload() -> dict:
+        return {
+            "enabled": False,
+            "movies_enabled": True,
+            "series_enabled": True,
+            "source_priority": [],
+            "series_seasons": [],
+            "baseline_initialized": False,
+            "last_run": None,
+            "last_queued": 0,
+            "last_error": None,
+        }
+
+    def _get_autodownload_policy(self, conn, category_id: str) -> dict:
+        row = conn.execute(
+            "SELECT enabled, movies_enabled, series_enabled, source_priority, "
+            "series_seasons, baseline_initialized, last_run, last_queued, last_error "
+            "FROM category_autodownload WHERE category_id=?",
+            (category_id,),
+        ).fetchone()
+        policy = self._default_autodownload()
+        if not row:
+            return policy
+        for field in ("source_priority", "series_seasons"):
+            try:
+                policy[field] = json.loads(row[field] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                policy[field] = []
+        policy.update({
+            "enabled": bool(row["enabled"]),
+            "movies_enabled": bool(row["movies_enabled"]),
+            "series_enabled": bool(row["series_enabled"]),
+            "baseline_initialized": bool(row["baseline_initialized"]),
+            "last_run": row["last_run"],
+            "last_queued": row["last_queued"] or 0,
+            "last_error": row["last_error"],
+        })
+        return policy
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -165,6 +206,7 @@ class CategoryService:
             "recently_added_days": row["recently_added_days"],
             "cached_items": cached_items,
             "last_refresh": row["last_refresh"],
+            "autodownload": self._get_autodownload_policy(conn, cat_id),
         }
 
     def _upsert_category(self, conn, cat: dict, idx: int = 0) -> None:
@@ -185,6 +227,27 @@ class CategoryService:
                 int(cat.get("notify_telegram", False)),
                 int(cat.get("recently_added_days", 0)),
                 cat.get("last_refresh"), idx,
+            ),
+        )
+        policy = cat.get("autodownload") or {}
+        defaults = self._default_autodownload()
+        defaults.update(policy)
+        conn.execute(
+            "INSERT OR REPLACE INTO category_autodownload "
+            "(category_id, enabled, movies_enabled, series_enabled, source_priority, "
+            "series_seasons, baseline_initialized, last_run, last_queued, last_error) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                cat_id,
+                int(bool(defaults["enabled"])),
+                int(bool(defaults["movies_enabled"])),
+                int(bool(defaults["series_enabled"])),
+                json.dumps(defaults["source_priority"] or []),
+                json.dumps(defaults["series_seasons"] or []),
+                int(bool(defaults["baseline_initialized"])),
+                defaults["last_run"],
+                int(defaults["last_queued"] or 0),
+                defaults["last_error"],
             ),
         )
         conn.execute("DELETE FROM category_patterns WHERE category_id = ?", (cat_id,))
@@ -251,6 +314,7 @@ class CategoryService:
                         "items": [], "patterns": [], "pattern_logic": "and",
                         "use_source_filters": False, "notify_telegram": False,
                         "recently_added_days": 0, "cached_items": [], "last_refresh": None,
+                        "autodownload": self._default_autodownload(),
                     }]
                 }
 
@@ -306,6 +370,7 @@ class CategoryService:
                     "recently_added_days": row["recently_added_days"],
                     "cached_items": all_cached.get(cat_id, []),
                     "last_refresh": row["last_refresh"],
+                    "autodownload": self._get_autodownload_policy(conn, cat_id),
                 })
 
             return {"categories": categories}
@@ -386,6 +451,7 @@ class CategoryService:
                     "patterns": all_patterns.get(cat_id, []),
                     "items": items,
                     "item_count": count,
+                    "autodownload": self._get_autodownload_policy(conn, cat_id),
                 })
             return result
         except Exception as e:
@@ -470,6 +536,7 @@ class CategoryService:
                 "notify_telegram": bool(row["notify_telegram"]),
                 "recently_added_days": row["recently_added_days"],
                 "last_refresh": row["last_refresh"],
+                "autodownload": self._get_autodownload_policy(conn, category_id),
             }
         except Exception as e:
             logger.error(f"Error fetching category definition {category_id}: {e}")
@@ -826,6 +893,8 @@ class CategoryService:
         notifications = await asyncio.to_thread(self._refresh_pattern_categories_internal)
         for category_name, new_items in notifications:
             await self.notification_service.send_category_notification(category_name, new_items)
+        if self.autodownload_service is not None:
+            await self.autodownload_service.reconcile_all()
 
     def refresh_pattern_categories(self) -> None:
         self._refresh_pattern_categories_internal()
@@ -834,6 +903,8 @@ class CategoryService:
         notifications = await asyncio.to_thread(self._refresh_single_pattern_category_by_id, category_id)
         for category_name, new_items in notifications:
             await self.notification_service.send_category_notification(category_name, new_items)
+        if self.autodownload_service is not None:
+            await self.autodownload_service.reconcile_category(category_id)
 
     def refresh_single_pattern_category(self, category_id: str) -> None:
         self._refresh_single_pattern_category_by_id(category_id)

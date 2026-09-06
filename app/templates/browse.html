@@ -599,6 +599,23 @@
                         </label>
                     </div>
                 </div>
+                <div class="form-group" style="margin-top: 16px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 16px;">
+                    <label class="checkbox-option">
+                        <input type="checkbox" id="autodownload-enabled" onchange="toggleAutodownloadOptions()">
+                        <span>⬇ Enable automatic downloads for new category items</span>
+                    </label>
+                    <div id="autodownload-options" style="display:none; margin-top:12px;">
+                        <div style="display:flex; gap:16px; flex-wrap:wrap;">
+                            <label class="checkbox-option"><input type="checkbox" id="autodownload-movies"><span>Films</span></label>
+                            <label class="checkbox-option"><input type="checkbox" id="autodownload-series"><span>Series episodes</span></label>
+                        </div>
+                        <label style="display:block; margin-top:12px;">Preferred sources <small style="color:#888;">(top to bottom, other enabled sources remain fallback)</small></label>
+                        <div id="autodownload-source-list" style="margin-top:7px;"></div>
+                        <div style="color:#888; font-size:0.8em; margin-top:8px;">The first scan establishes the current category as the baseline. Only items discovered afterwards are queued.</div>
+                        <button type="button" class="btn btn-secondary" style="margin-top:12px;" onclick="backfillCategoryAutodownload()">⬇ Download current content now</button>
+                        <div style="color:#888; font-size:0.8em; margin-top:6px;">Queues current movies and episodes that are not already in history or the download queue.</div>
+                    </div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeCategoryModal()">Cancel</button>
@@ -2352,6 +2369,41 @@
             }
         }
 
+        function renderAutodownloadSources(priority = []) {
+            const container = document.getElementById('autodownload-source-list');
+            const enabledSources = sources.filter(s => s.enabled !== false);
+            const preferred = (priority || []).map(String);
+            const ordered = [
+                ...preferred.map(id => enabledSources.find(s => String(s.id) === id)).filter(Boolean),
+                ...enabledSources.filter(s => !preferred.includes(String(s.id)))
+            ];
+            container.innerHTML = ordered.length ? ordered.map((source, index) =>
+                '<div class="autodownload-source-row" data-source-id="' + escapeAttr(source.id) + '" style="display:flex;align-items:center;gap:8px;margin:4px 0;">' +
+                '<span style="min-width:24px;color:#888;">' + (index + 1) + '.</span>' +
+                '<span style="flex:1;">' + escapeHtml(source.name || source.id) + '</span>' +
+                '<button type="button" class="btn btn-small btn-secondary" onclick="moveAutodownloadSource(this,-1)" title="Move up">↑</button>' +
+                '<button type="button" class="btn btn-small btn-secondary" onclick="moveAutodownloadSource(this,1)" title="Move down">↓</button>' +
+                '</div>'
+            ).join('') : '<span style="color:#888;">No enabled sources configured.</span>';
+        }
+
+        function moveAutodownloadSource(button, direction) {
+            const row = button.closest('.autodownload-source-row');
+            const list = row.parentElement;
+            const sibling = direction < 0 ? row.previousElementSibling : row.nextElementSibling;
+            if (!sibling) return;
+            if (direction < 0) list.insertBefore(row, sibling);
+            else list.insertBefore(sibling, row);
+            Array.from(list.querySelectorAll('.autodownload-source-row')).forEach((item, index) => {
+                item.querySelector('span').textContent = (index + 1) + '.';
+            });
+        }
+
+        function toggleAutodownloadOptions() {
+            const enabled = document.getElementById('autodownload-enabled').checked;
+            document.getElementById('autodownload-options').style.display = enabled ? 'block' : 'none';
+        }
+
         async function openCategoryModal(categoryId = null) {
             const modal = document.getElementById('category-modal');
             const title = document.getElementById('category-modal-title');
@@ -2389,6 +2441,11 @@
                     document.getElementById('recently-added-days').value = recentlyAddedDays > 0 ? recentlyAddedDays : '7';
                     document.getElementById('recently-added-days').disabled = recentlyAddedDays === 0;
                     renderPatterns(cat.patterns || []);
+                    const autodownload = cat.autodownload || {};
+                    document.getElementById('autodownload-enabled').checked = !!autodownload.enabled;
+                    document.getElementById('autodownload-movies').checked = autodownload.movies_enabled !== false;
+                    document.getElementById('autodownload-series').checked = autodownload.series_enabled !== false;
+                    renderAutodownloadSources(autodownload.source_priority || []);
                 }
             } else {
                 document.getElementById('category-name').value = '';
@@ -2404,7 +2461,12 @@
                 document.getElementById('recently-added-days').value = '7';
                 document.getElementById('recently-added-days').disabled = true;
                 renderPatterns([]);
+                document.getElementById('autodownload-enabled').checked = false;
+                document.getElementById('autodownload-movies').checked = true;
+                document.getElementById('autodownload-series').checked = true;
+                renderAutodownloadSources([]);
             }
+            toggleAutodownloadOptions();
             modal.classList.add('show');
         }
 
@@ -2447,6 +2509,32 @@
             if (container.children.length > 1) btn.parentElement.remove();
         }
 
+        async function backfillCategoryAutodownload() {
+            const categoryId = document.getElementById('category-edit-id').value;
+            if (!categoryId) {
+                alert('Save the category first, then start the initial download.');
+                return;
+            }
+            if (!document.getElementById('autodownload-enabled').checked) {
+                alert('Enable autodownload on this category first.');
+                return;
+            }
+            if (!confirm('Queue all current movies and episodes in this category that are not already downloaded?')) return;
+            try {
+                const response = await fetch('/api/categories/' + categoryId + '/autodownload/backfill', { method: 'POST' });
+                const result = await response.json();
+                if (!response.ok) {
+                    showToast(result.error || 'Failed to start initial download', 'error');
+                    return;
+                }
+                showToast('Queued ' + (result.queued || 0) + ' item(s); skipped ' + (result.skipped || 0), 'success');
+                await loadCategories();
+            } catch (error) {
+                console.error('Error starting category backfill:', error);
+                showToast('Failed to start initial download', 'error');
+            }
+        }
+
         async function saveCategory() {
             const editId = document.getElementById('category-edit-id').value;
             const name = document.getElementById('category-name').value.trim();
@@ -2463,8 +2551,16 @@
                 value: row.querySelector('input').value,
                 case_sensitive: false
             })).filter(p => p.value.trim());
+            const autodownload = {
+                enabled: document.getElementById('autodownload-enabled').checked,
+                movies_enabled: document.getElementById('autodownload-movies').checked,
+                series_enabled: document.getElementById('autodownload-series').checked,
+                source_priority: Array.from(document.querySelectorAll('#autodownload-source-list .autodownload-source-row'))
+                    .map(row => row.dataset.sourceId)
+                    .filter(Boolean)
+            };
 
-            const data = { name, icon, mode, content_types: contentTypes, patterns, pattern_logic: patternLogic, use_source_filters: useSourceFilters, notify_telegram: notifyTelegram, recently_added_days: recentlyAddedDays };
+            const data = { name, icon, mode, content_types: contentTypes, patterns, pattern_logic: patternLogic, use_source_filters: useSourceFilters, notify_telegram: notifyTelegram, recently_added_days: recentlyAddedDays, autodownload };
 
             // Show spinner on save button
             const saveBtn = document.querySelector('#category-modal .btn-primary');

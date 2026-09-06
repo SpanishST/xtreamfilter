@@ -486,6 +486,7 @@ class CartService:
         self.monitor_service: MonitorService | None = None
 
         self._download_cart: list[dict] = []
+        self.autodownload_service = None
         self._download_task: Optional[asyncio.Task] = None
         self._download_cancel_event: Optional[asyncio.Event] = None
         self._download_current_item: Optional[dict] = None
@@ -855,6 +856,9 @@ class CartService:
                 ),
             )
             conn.commit()
+            autodownload_service = getattr(self, "autodownload_service", None)
+            if autodownload_service is not None:
+                autodownload_service.mark_cart_item_completed(item.get("id", ""))
         except Exception as exc:
             logger.error("Error recording download history for %s: %s", item.get("id"), exc)
         finally:
@@ -1430,6 +1434,53 @@ class CartService:
                     await self.log_service.log("cart", "info", f"Added {len(added_items)} item(s) to cart in batch")
             return {"added": len(added_items), "skipped": skipped, "errors": errors, "items": added_items}
 
+    async def add_prebuilt_items(self, selections: list[dict]) -> dict:
+        """Queue already-resolved automatic-download items in one mutation."""
+        async with self._cart_mutation_lock:
+            added_items: list[dict] = []
+            skipped: list[dict] = []
+            for selection in selections:
+                candidate = {
+                    "content_type": selection.get("content_type", "vod"),
+                    "source_id": selection.get("source_id", ""),
+                    "stream_id": selection.get("stream_id", ""),
+                    "series_id": selection.get("series_id"),
+                    "season": selection.get("season"),
+                    "episode_num": selection.get("episode_num"),
+                }
+                if self._is_active_duplicate(candidate):
+                    skipped.append(selection)
+                    continue
+                item = self._build_cart_item(
+                    stream_id=selection.get("stream_id", ""),
+                    source_id=selection.get("source_id", ""),
+                    content_type=selection.get("content_type", "vod"),
+                    name=selection.get("name", ""),
+                    series_name=selection.get("series_name"),
+                    series_id=selection.get("series_id"),
+                    season=selection.get("season"),
+                    episode_num=selection.get("episode_num"),
+                    episode_title=selection.get("episode_title"),
+                    episode_info=selection.get("episode_info"),
+                    icon=selection.get("icon", ""),
+                    group=selection.get("group", ""),
+                    container_extension=selection.get("container_extension", "mp4"),
+                    monitor_canonical=selection.get("monitor_canonical"),
+                    destination=selection.get("destination"),
+                    media_tmdb_id=selection.get("media_tmdb_id"),
+                    media_imdb_id=selection.get("media_imdb_id"),
+                    media_title_key=selection.get("media_title_key"),
+                    media_year=selection.get("media_year"),
+                    autodownload_category_id=selection.get("autodownload_category_id"),
+                    autodownload_target_key=selection.get("autodownload_target_key"),
+                )
+                self._download_cart.append(item)
+                added_items.append(item)
+
+            if added_items:
+                self.save_cart()
+            return {"added": len(added_items), "skipped": skipped, "items": added_items}
+
     async def update_item_destination(self, item_id: str, requested: str | None) -> dict:
         """Update a non-active cart item's destination and persist it."""
         async with self._cart_mutation_lock:
@@ -1509,6 +1560,8 @@ class CartService:
             "media_imdb_id": kwargs.get("media_imdb_id"),
             "media_title_key": kwargs.get("media_title_key"),
             "media_year": kwargs.get("media_year"),
+            "autodownload_category_id": kwargs.get("autodownload_category_id"),
+            "autodownload_target_key": kwargs.get("autodownload_target_key"),
         }
 
     def cancel_download(self) -> bool:

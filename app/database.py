@@ -336,6 +336,48 @@ CREATE TABLE IF NOT EXISTS category_cached_items (
 -- Note: no separate idx_cached_items_category needed; the PK already
 -- covers lookups by category_id prefix.
 
+-- ── Category autodownload ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS category_autodownload (
+    category_id            TEXT PRIMARY KEY
+                           REFERENCES custom_categories(id) ON DELETE CASCADE,
+    enabled                INTEGER NOT NULL DEFAULT 0,
+    movies_enabled         INTEGER NOT NULL DEFAULT 1,
+    series_enabled         INTEGER NOT NULL DEFAULT 1,
+    source_priority        TEXT NOT NULL DEFAULT '[]',
+    series_seasons         TEXT NOT NULL DEFAULT '[]',
+    baseline_initialized   INTEGER NOT NULL DEFAULT 0,
+    last_run               TEXT,
+    last_queued            INTEGER NOT NULL DEFAULT 0,
+    last_error             TEXT
+);
+
+CREATE TABLE IF NOT EXISTS category_autodownload_targets (
+    category_id       TEXT NOT NULL
+                      REFERENCES custom_categories(id) ON DELETE CASCADE,
+    target_key        TEXT NOT NULL,
+    content_type      TEXT NOT NULL,
+    title             TEXT,
+    media_tmdb_id     TEXT,
+    media_imdb_id     TEXT,
+    media_title_key   TEXT,
+    media_year        TEXT,
+    series_id         TEXT,
+    season            TEXT,
+    episode_num       INTEGER,
+    source_id         TEXT,
+    stream_id         TEXT,
+    status            TEXT NOT NULL DEFAULT 'seen',
+    cart_item_id      TEXT,
+    first_seen        TEXT,
+    last_seen         TEXT,
+    completed_at      TEXT,
+    last_error        TEXT,
+    PRIMARY KEY (category_id, target_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_category_autodownload_targets_status
+    ON category_autodownload_targets (category_id, status);
+
 -- ── Cart ───────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS cart_items (

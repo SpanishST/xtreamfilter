@@ -13,6 +13,30 @@ from app.services.category_service import CategoryService
 router = APIRouter(prefix="/api/categories", tags=["categories"])
 
 
+def _normalize_autodownload(value: dict | None, current: dict | None = None) -> dict:
+    result = {
+        "enabled": False,
+        "movies_enabled": True,
+        "series_enabled": True,
+        "source_priority": [],
+        "series_seasons": [],
+        "baseline_initialized": False,
+        "last_run": None,
+        "last_queued": 0,
+        "last_error": None,
+    }
+    if current:
+        result.update(current)
+    if isinstance(value, dict):
+        for key in ("enabled", "movies_enabled", "series_enabled"):
+            if key in value:
+                result[key] = bool(value[key])
+        for key in ("source_priority", "series_seasons"):
+            if key in value and isinstance(value[key], list):
+                result[key] = [str(item) for item in value[key] if item]
+    return result
+
+
 @router.get("")
 async def get_categories(cat_svc: CategoryService = Depends(get_category_service)):
     data = cat_svc.load_categories()
@@ -61,6 +85,7 @@ async def create_category(request: Request, cat_svc: CategoryService = Depends(g
         "recently_added_days": body.get("recently_added_days", 0),
         "cached_items": [],
         "last_refresh": None,
+        "autodownload": _normalize_autodownload(body.get("autodownload")),
     }
 
     data = cat_svc.load_categories()
@@ -74,6 +99,8 @@ async def create_category(request: Request, cat_svc: CategoryService = Depends(g
             if cat["id"] == new_category["id"]:
                 new_category = cat
                 break
+    if cat_svc.autodownload_service is not None:
+        await cat_svc.autodownload_service.reconcile_category(new_category["id"])
 
     return {"status": "created", "category": new_category}
 
@@ -84,6 +111,20 @@ async def get_category(category_id: str, cat_svc: CategoryService = Depends(get_
     if cat is None:
         return JSONResponse({"error": "Category not found"}, status_code=404)
     return {"category": cat}
+
+
+@router.post("/{category_id}/autodownload/backfill")
+async def backfill_category_autodownload(
+    category_id: str,
+    cat_svc: CategoryService = Depends(get_category_service),
+):
+    if cat_svc.autodownload_service is None:
+        return JSONResponse({"error": "Autodownload service is not available"}, status_code=503)
+    result = await cat_svc.autodownload_service.backfill_category(category_id)
+    if result.get("error"):
+        status_code = 404 if result["error"] == "Category not found" else 400
+        return JSONResponse(result, status_code=status_code)
+    return {"status": "ok", **result}
 
 
 @router.put("/{category_id}")
@@ -122,6 +163,10 @@ async def update_category(category_id: str, request: Request, cat_svc: CategoryS
     for k in ("patterns", "pattern_logic", "use_source_filters", "notify_telegram", "recently_added_days"):
         if k in body:
             category[k] = body[k]
+    if "autodownload" in body:
+        category["autodownload"] = _normalize_autodownload(
+            body.get("autodownload"), category.get("autodownload")
+        )
 
     data["categories"][cat_index] = category
     cat_svc.save_categories(data)
@@ -130,6 +175,9 @@ async def update_category(category_id: str, request: Request, cat_svc: CategoryS
         cat_svc.refresh_single_pattern_category(category_id)
         data = cat_svc.load_categories()
         category = data["categories"][cat_index]
+
+    if cat_svc.autodownload_service is not None:
+        await cat_svc.autodownload_service.reconcile_category(category_id)
 
     return {"status": "updated", "category": category}
 
@@ -187,6 +235,8 @@ async def add_item_to_category(category_id: str, request: Request, cat_svc: Cate
     })
     data["categories"][cat_index] = category
     cat_svc.save_categories(data)
+    if cat_svc.autodownload_service is not None:
+        await cat_svc.autodownload_service.reconcile_category(category_id)
     return {"status": "added", "message": f"Added to {category['name']}"}
 
 
@@ -225,5 +275,5 @@ async def remove_item_from_category(
 
 @router.post("/refresh")
 async def refresh_categories(cat_svc: CategoryService = Depends(get_category_service)):
-    cat_svc.refresh_pattern_categories()
+    await cat_svc.refresh_pattern_categories_async()
     return {"status": "refreshed"}

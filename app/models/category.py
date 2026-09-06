@@ -48,6 +48,7 @@ class Category(BaseModel):
     recently_added_days: int = 0
     cached_items: list[dict] = Field(default_factory=list)  # auto-matched items
     last_refresh: Optional[str] = None
+    autodownload: dict = Field(default_factory=dict)
 
 
 class CategoriesData(BaseModel):

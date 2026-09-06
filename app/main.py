@@ -37,6 +37,7 @@ from app.routes import (
     xtream_source,
 )
 from app.services.cache_service import CacheService
+from app.services.autodownload_service import AutodownloadService
 from app.services.cart_service import CartService
 from app.services.category_service import CategoryService
 from app.services.config_service import ConfigService
@@ -185,12 +186,15 @@ async def lifespan(app: FastAPI):
     jellyfin = JellyfinService(cfg, http)
     cat = CategoryService(cfg, cache, notif)
     cart = CartService(cfg, http, notif, xtream, jellyfin)
+    autodownload = AutodownloadService(cfg, cat, cache, xtream, cart)
     monitor = MonitorService(cfg, cache, xtream, notif, cart)
     m3u = M3uService(cfg, cache)
 
     cache.log_service = log_svc
     cart.log_service = log_svc
     monitor.log_service = log_svc
+    cat.autodownload_service = autodownload
+    cart.autodownload_service = autodownload
 
     # --- attach to app.state for DI ---
     app.state.config_service = cfg
@@ -203,6 +207,7 @@ async def lifespan(app: FastAPI):
     app.state.jellyfin_service = jellyfin
     app.state.category_service = cat
     app.state.cart_service = cart
+    app.state.autodownload_service = autodownload
     app.state.monitor_service = monitor
     app.state.m3u_service = m3u
     app.state.log_service = log_svc

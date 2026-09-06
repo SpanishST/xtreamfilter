@@ -22,12 +22,14 @@ import json
 import logging
 import re
 import sqlite3
+import time
 
 from app.services.media_identity import build_media_identity
 
 logger = logging.getLogger(__name__)
 
 DB_NAME = "app.db"
+MEDIA_IDENTITY_MIGRATION_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +579,18 @@ def init_db(db_path: str) -> None:
         _apply_column_upgrades(conn)
         _backfill_cart_order(conn)
         _backfill_download_history(conn)
-        _backfill_media_identity(conn)
+        if _get_user_version(conn) < MEDIA_IDENTITY_MIGRATION_VERSION:
+            migration_started = time.monotonic()
+            logger.warning(
+                "Starting one-time media identity migration for the existing catalog. "
+                "This can take several minutes; browse will become available when startup completes."
+            )
+            _backfill_media_identity(conn)
+            conn.execute(f"PRAGMA user_version = {MEDIA_IDENTITY_MIGRATION_VERSION}")
+            logger.info(
+                "Media identity migration completed in %.1f seconds",
+                time.monotonic() - migration_started,
+            )
         _create_denormalized_browse_indexes(conn)
         _create_identity_indexes(conn)
         _backfill_streams_denormalized(conn)
@@ -620,6 +633,23 @@ def _create_identity_indexes(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_streams_media_identity "
         "ON streams (content_type, tmdb_id, imdb_id, title_key, release_year)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_history_media_tmdb "
+        "ON download_history (content_type, media_tmdb_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_history_media_imdb "
+        "ON download_history (content_type, media_imdb_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_history_media_title_year "
+        "ON download_history (content_type, media_title_key, media_year)"
+    )
+
+
+def _get_user_version(conn: sqlite3.Connection) -> int:
+    """Return SQLite's application schema version."""
+    return int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
 
 
 def backfill_streams_denormalized_sql() -> str:
@@ -756,66 +786,151 @@ def _backfill_download_history(conn: sqlite3.Connection) -> None:
 
 
 def _backfill_media_identity(conn: sqlite3.Connection) -> None:
-    """Populate provider-independent identity fields for existing rows."""
-    stream_identity: dict[tuple[str, str, str], dict] = {}
-    stream_rows = conn.execute(
-        "SELECT source_id, content_type, stream_id, name, data, tmdb_id, imdb_id, "
-        "title_key, release_year FROM streams "
-        "WHERE content_type IN ('vod', 'series')"
-    ).fetchall()
-    for row in stream_rows:
-        try:
-            data = json.loads(row["data"] or "{}")
-        except (TypeError, ValueError):
-            data = {}
-        identity = build_media_identity(row["content_type"], data, name=row["name"] or "")
-        values = {
-            "media_tmdb_id": identity["media_tmdb_id"] or row["tmdb_id"],
-            "media_imdb_id": identity["media_imdb_id"] or row["imdb_id"],
-            "media_title_key": identity["media_title_key"] or row["title_key"],
-            "media_year": identity["media_year"] or row["release_year"],
-        }
-        stream_identity[(row["source_id"], row["content_type"], row["stream_id"])] = values
-        conn.execute(
-            "UPDATE streams SET tmdb_id=?, imdb_id=?, title_key=?, release_year=? "
-            "WHERE source_id=? AND content_type=? AND stream_id=?",
-            (
-                values["media_tmdb_id"],
-                values["media_imdb_id"],
-                values["media_title_key"],
-                values["media_year"],
-                row["source_id"],
-                row["content_type"],
-                row["stream_id"],
-            ),
-        )
+    """Populate provider-independent identity fields for existing rows once.
 
-    for table in ("cart_items", "download_history"):
-        rows = conn.execute(
-            f"SELECT id AS identity_row_id, source_id, content_type, stream_id, series_id, name, "
-            f"series_name, media_tmdb_id, media_imdb_id, media_title_key, media_year "
-            f"FROM {table} WHERE content_type IN ('vod', 'series')"
-        ).fetchall()
-        for row in rows:
-            lookup_id = row["stream_id"] if row["content_type"] == "vod" else row["series_id"]
-            cached = stream_identity.get(
-                (row["source_id"], row["content_type"], str(lookup_id or "")),
-                {},
+    The migration deliberately keeps only one bounded batch in Python. It is
+    gated by ``PRAGMA user_version`` in ``init_db()``, so the expensive scan is
+    not repeated on later startups.
+    """
+    batch_size = 1000
+    progress_interval = 50_000
+    processed_streams = 0
+    processed_related = 0
+    stream_pending_where = """
+        content_type IN ('vod', 'series')
+        AND (
+            (COALESCE(name, '') <> '' AND title_key IS NULL)
+            OR (
+                json_valid(data)
+                AND tmdb_id IS NULL
+                AND COALESCE(NULLIF(json_extract(data, '$.tmdb_id'), ''),
+                             NULLIF(json_extract(data, '$.tmdb'), '')) IS NOT NULL
             )
-            fallback = build_media_identity(
-                row["content_type"],
-                {},
-                name=row["name"] or "",
-                series_name=row["series_name"] or "",
+            OR (
+                json_valid(data)
+                AND imdb_id IS NULL
+                AND COALESCE(NULLIF(json_extract(data, '$.imdb_id'), ''),
+                             NULLIF(json_extract(data, '$.imdb'), '')) IS NOT NULL
             )
-            values = (
-                row["media_tmdb_id"] or cached.get("media_tmdb_id") or fallback["media_tmdb_id"],
-                row["media_imdb_id"] or cached.get("media_imdb_id") or fallback["media_imdb_id"],
-                row["media_title_key"] or cached.get("media_title_key") or fallback["media_title_key"],
-                row["media_year"] or cached.get("media_year") or fallback["media_year"],
+            OR (
+                json_valid(data)
+                AND release_year IS NULL
+                AND COALESCE(
+                    NULLIF(json_extract(data, '$.releasedate'), ''),
+                    NULLIF(json_extract(data, '$.releaseDate'), ''),
+                    NULLIF(json_extract(data, '$.release_date'), ''),
+                    NULLIF(json_extract(data, '$.year'), ''),
+                    ''
+                ) <> ''
             )
-            conn.execute(
-                f"UPDATE {table} SET media_tmdb_id=?, media_imdb_id=?, "
-                f"media_title_key=?, media_year=? WHERE id=?",
-                (*values, row["identity_row_id"]),
-            )
+        )
+    """
+
+    last_stream_key: tuple[str, str, str] | None = None
+    if conn.execute(f"SELECT EXISTS(SELECT 1 FROM streams WHERE {stream_pending_where})").fetchone()[0]:
+        while True:
+            keyset = "" if last_stream_key is None else "AND (source_id, content_type, stream_id) > (?, ?, ?)"
+            params = () if last_stream_key is None else last_stream_key
+            stream_rows = conn.execute(
+                "SELECT source_id, content_type, stream_id, name, data, tmdb_id, imdb_id, "
+                "title_key, release_year FROM streams "
+                f"WHERE {stream_pending_where} {keyset} "
+                "ORDER BY source_id, content_type, stream_id LIMIT ?",
+                (*params, batch_size),
+            ).fetchall()
+            if not stream_rows:
+                break
+
+            processed_streams += len(stream_rows)
+            for row in stream_rows:
+                try:
+                    data = json.loads(row["data"] or "{}")
+                except (TypeError, ValueError):
+                    data = {}
+                identity = build_media_identity(row["content_type"], data, name=row["name"] or "")
+                values = (
+                    identity["media_tmdb_id"] or row["tmdb_id"],
+                    identity["media_imdb_id"] or row["imdb_id"],
+                    identity["media_title_key"] or row["title_key"],
+                    identity["media_year"] or row["release_year"],
+                )
+                current_values = (row["tmdb_id"], row["imdb_id"], row["title_key"], row["release_year"])
+                if values != current_values:
+                    conn.execute(
+                        "UPDATE streams SET tmdb_id=?, imdb_id=?, title_key=?, release_year=? "
+                        "WHERE source_id=? AND content_type=? AND stream_id=?",
+                        (*values, row["source_id"], row["content_type"], row["stream_id"]),
+                    )
+            last = stream_rows[-1]
+            last_stream_key = (last["source_id"], last["content_type"], last["stream_id"])
+            if processed_streams % progress_interval < batch_size:
+                logger.info("Media identity migration: processed %d catalog rows", processed_streams)
+
+    for table, id_column in (("cart_items", "id"), ("download_history", "id")):
+        last_id = "" if table == "cart_items" else 0
+        while True:
+            rows = conn.execute(
+                f"SELECT t.{id_column} AS identity_row_id, t.source_id, t.content_type, "
+                f"t.stream_id, t.series_id, t.name, t.series_name, t.media_tmdb_id, "
+                f"t.media_imdb_id, t.media_title_key, t.media_year, s.name AS stream_name, "
+                f"s.data AS stream_data, s.tmdb_id AS stream_tmdb_id, "
+                f"s.imdb_id AS stream_imdb_id, s.title_key AS stream_title_key, "
+                f"s.release_year AS stream_release_year "
+                f"FROM {table} t LEFT JOIN streams s ON s.source_id=t.source_id "
+                f"AND s.content_type=t.content_type AND s.stream_id="
+                f"CASE WHEN t.content_type='vod' THEN t.stream_id ELSE t.series_id END "
+                f"WHERE t.content_type IN ('vod', 'series') AND t.{id_column} > ? "
+                f"AND ("
+                f"(t.media_title_key IS NULL AND COALESCE(t.name, t.series_name, '') <> '') "
+                f"OR (t.media_tmdb_id IS NULL AND s.tmdb_id IS NOT NULL) "
+                f"OR (t.media_imdb_id IS NULL AND s.imdb_id IS NOT NULL) "
+                f"OR (t.media_year IS NULL AND s.release_year IS NOT NULL)"
+                f") "
+                f"ORDER BY t.{id_column} LIMIT ?",
+                (last_id, batch_size),
+            ).fetchall()
+            if not rows:
+                break
+
+            processed_related += len(rows)
+            for row in rows:
+                try:
+                    stream_data = json.loads(row["stream_data"] or "{}")
+                except (TypeError, ValueError):
+                    stream_data = {}
+                stream_identity = {
+                    "media_tmdb_id": row["stream_tmdb_id"],
+                    "media_imdb_id": row["stream_imdb_id"],
+                    "media_title_key": row["stream_title_key"],
+                    "media_year": row["stream_release_year"],
+                }
+                fallback = build_media_identity(
+                    row["content_type"],
+                    stream_data,
+                    name=row["name"] or row["stream_name"] or "",
+                    series_name=row["series_name"] or "",
+                )
+                values = (
+                    row["media_tmdb_id"] or stream_identity["media_tmdb_id"] or fallback["media_tmdb_id"],
+                    row["media_imdb_id"] or stream_identity["media_imdb_id"] or fallback["media_imdb_id"],
+                    row["media_title_key"] or stream_identity["media_title_key"] or fallback["media_title_key"],
+                    row["media_year"] or stream_identity["media_year"] or fallback["media_year"],
+                )
+                current_values = (
+                    row["media_tmdb_id"],
+                    row["media_imdb_id"],
+                    row["media_title_key"],
+                    row["media_year"],
+                )
+                if values != current_values:
+                    conn.execute(
+                        f"UPDATE {table} SET media_tmdb_id=?, media_imdb_id=?, "
+                        f"media_title_key=?, media_year=? WHERE {id_column}=?",
+                        (*values, row["identity_row_id"]),
+                    )
+            last_id = rows[-1]["identity_row_id"]
+            if processed_related % progress_interval < batch_size:
+                logger.info(
+                    "Media identity migration: processed %d cart/history rows",
+                    processed_related,
+                )

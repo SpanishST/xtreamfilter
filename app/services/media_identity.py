@@ -66,11 +66,15 @@ def history_match_sql(stream_alias: str = "s", history_alias: str = "dh") -> str
     """
     logical_match = f"""
         (
-            (COALESCE({stream_alias}.tmdb_id, '') <> ''
+            ({history_alias}.content_type = {stream_alias}.content_type
+             AND COALESCE({stream_alias}.tmdb_id, '') <> ''
              AND {history_alias}.media_tmdb_id = {stream_alias}.tmdb_id)
-            OR (COALESCE({stream_alias}.imdb_id, '') <> ''
+            OR ({history_alias}.content_type = {stream_alias}.content_type
+                AND COALESCE({stream_alias}.imdb_id, '') <> ''
                 AND {history_alias}.media_imdb_id = {stream_alias}.imdb_id)
             OR (
+                {history_alias}.content_type = {stream_alias}.content_type
+                AND
                 COALESCE({stream_alias}.title_key, '') <> ''
                 AND {history_alias}.media_title_key = {stream_alias}.title_key
                 AND NOT (
@@ -98,14 +102,14 @@ def history_match_sql(stream_alias: str = "s", history_alias: str = "dh") -> str
     """
     source_local = f"""
         (
-            {history_alias}.source_id = {stream_alias}.source_id
-            AND {history_alias}.content_type = {stream_alias}.content_type
-            AND (
-                ({stream_alias}.content_type = 'vod'
-                 AND {history_alias}.stream_id = {stream_alias}.stream_id)
-                OR ({stream_alias}.content_type = 'series'
-                    AND {history_alias}.series_id = {stream_alias}.stream_id)
-            )
+            ({stream_alias}.content_type = 'vod'
+             AND {history_alias}.source_id = {stream_alias}.source_id
+             AND {history_alias}.content_type = {stream_alias}.content_type
+             AND {history_alias}.stream_id = {stream_alias}.stream_id)
+            OR ({stream_alias}.content_type = 'series'
+                AND {history_alias}.source_id = {stream_alias}.source_id
+                AND {history_alias}.content_type = {stream_alias}.content_type
+                AND {history_alias}.series_id = {stream_alias}.stream_id)
         )
     """
     return f"(({logical_match}) OR ({source_local}))"

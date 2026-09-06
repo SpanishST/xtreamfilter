@@ -4,9 +4,7 @@ import json
 import os
 import tempfile
 
-import pytest
-
-from app.database import DB_NAME, db_connect, init_db
+from app.database import DB_NAME, MEDIA_IDENTITY_MIGRATION_VERSION, db_connect, init_db
 from app.migrate import run_migration_if_needed
 
 
@@ -276,6 +274,63 @@ class TestMigrationSentinel:
 
 
 class TestSchemaUpgrades:
+
+    def test_media_identity_backfill_runs_once(self):
+        """The beta identity backfill is skipped after its schema version is set."""
+        with tempfile.TemporaryDirectory() as d:
+            db_path = _setup_db(d)
+            conn = db_connect(db_path)
+            try:
+                conn.execute(
+                    "INSERT INTO streams "
+                    "(source_id, content_type, stream_id, name, data) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    ("src1", "vod", "movie-1", "Movie (2024)", '{"tmdb_id":"42"}'),
+                )
+                conn.execute(
+                    "INSERT INTO download_history "
+                    "(cart_item_id, stream_id, source_id, content_type, name, file_path, completed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    ("cart-1", "movie-1", "src1", "vod", "Movie (2024)", "/movie.mkv", "2026-01-01"),
+                )
+                conn.execute("PRAGMA user_version = 0")
+                conn.commit()
+            finally:
+                conn.close()
+
+            init_db(db_path)
+            conn = db_connect(db_path)
+            try:
+                stream = conn.execute(
+                    "SELECT tmdb_id, title_key, release_year FROM streams WHERE stream_id='movie-1'"
+                ).fetchone()
+                history = conn.execute(
+                    "SELECT media_tmdb_id, media_title_key, media_year FROM download_history WHERE cart_item_id='cart-1'"
+                ).fetchone()
+                assert conn.execute("PRAGMA user_version").fetchone()[0] == MEDIA_IDENTITY_MIGRATION_VERSION
+                assert stream["tmdb_id"] == "42"
+                assert stream["title_key"] == "movie"
+                assert stream["release_year"] == "2024"
+                assert history["media_tmdb_id"] == "42"
+                assert history["media_title_key"] == "movie"
+                assert history["media_year"] == "2024"
+
+                conn.execute(
+                    "UPDATE streams SET tmdb_id=NULL, data=? WHERE stream_id='movie-1'",
+                    ('{"tmdb_id":"99"}',),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            init_db(db_path)
+            conn = db_connect(db_path)
+            try:
+                assert conn.execute(
+                    "SELECT tmdb_id FROM streams WHERE stream_id='movie-1'"
+                ).fetchone()["tmdb_id"] is None
+            finally:
+                conn.close()
 
     def test_init_db_upgrades_legacy_refresh_progress_table(self):
         """Legacy refresh_progress rows upgrade cleanly without startup failures."""

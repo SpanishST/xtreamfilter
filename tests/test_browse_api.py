@@ -16,6 +16,7 @@ from app.services.http_client import HttpClientService
 from app.services.jellyfin_service import JellyfinService
 from app.services.log_service import LogService
 from app.services.m3u_service import M3uService
+from app.services.media_identity import build_media_identity
 from app.services.monitor_service import MonitorService
 from app.services.notification_service import NotificationService
 from app.services.xtream_service import XtreamService
@@ -104,10 +105,12 @@ def _seed_streams(data_dir: str, streams: list[dict], content_type: str, source_
     try:
         for s in streams:
             sid = str(s.get("stream_id") or s.get("series_id", ""))
+            identity = build_media_identity(content_type, s, name=str(s.get("name", "")))
             conn.execute(
                 "INSERT OR REPLACE INTO streams "
-                "(source_id, content_type, stream_id, name, category_id, added, data) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(source_id, content_type, stream_id, name, category_id, added, data, "
+                "tmdb_id, imdb_id, title_key, release_year) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     source_id,
                     content_type,
@@ -116,6 +119,10 @@ def _seed_streams(data_dir: str, streams: list[dict], content_type: str, source_
                     str(s.get("category_id", "")),
                     s.get("added", 0),
                     json.dumps(s, ensure_ascii=False),
+                    identity["media_tmdb_id"],
+                    identity["media_imdb_id"],
+                    identity["media_title_key"],
+                    identity["media_year"],
                 ),
             )
         conn.commit()
@@ -174,6 +181,34 @@ def _seed_download_history(data_dir: str, rows: list[dict]):
                     row.get("completed_at", "2026-01-01T00:00:00+00:00"),
                 ),
             )
+            lookup_id = row.get("stream_id", "") if row.get("content_type", "vod") == "vod" else row.get("series_id", "")
+            stream = conn.execute(
+                "SELECT name, data, tmdb_id, imdb_id, title_key, release_year "
+                "FROM streams WHERE source_id=? AND content_type=? AND stream_id=?",
+                (row.get("source_id", "src1"), row.get("content_type", "vod"), str(lookup_id)),
+            ).fetchone()
+            if stream:
+                try:
+                    stream_data = json.loads(stream["data"] or "{}")
+                except (TypeError, ValueError):
+                    stream_data = {}
+                identity = build_media_identity(
+                    row.get("content_type", "vod"),
+                    stream_data,
+                    name=row.get("name", "") or stream["name"] or "",
+                    series_name=row.get("series_name", "") or "",
+                )
+                conn.execute(
+                    "UPDATE download_history SET media_tmdb_id=?, media_imdb_id=?, "
+                    "media_title_key=?, media_year=? WHERE cart_item_id=?",
+                    (
+                        row.get("media_tmdb_id") or identity["media_tmdb_id"] or stream["tmdb_id"],
+                        row.get("media_imdb_id") or identity["media_imdb_id"] or stream["imdb_id"],
+                        row.get("media_title_key") or identity["media_title_key"] or stream["title_key"],
+                        row.get("media_year") or identity["media_year"] or stream["release_year"],
+                        row.get("cart_item_id", f"history-{index}"),
+                    ),
+                )
         conn.commit()
     finally:
         conn.close()

@@ -130,7 +130,11 @@ class CategoryService:
             "FROM category_autodownload WHERE category_id=?",
             (category_id,),
         ).fetchone()
-        policy = self._default_autodownload()
+        return self._autodownload_policy_from_row(row)
+
+    @classmethod
+    def _autodownload_policy_from_row(cls, row) -> dict:
+        policy = cls._default_autodownload()
         if not row:
             return policy
         for field in ("source_priority", "series_seasons"):
@@ -148,6 +152,18 @@ class CategoryService:
             "last_error": row["last_error"],
         })
         return policy
+
+    def _load_autodownload_policies(self, conn) -> dict[str, dict]:
+        """Load all category policies in one query for list endpoints."""
+        policies: dict[str, dict] = {}
+        rows = conn.execute(
+            "SELECT category_id, enabled, movies_enabled, series_enabled, source_priority, "
+            "series_seasons, baseline_initialized, last_run, last_queued, last_error "
+            "FROM category_autodownload"
+        ).fetchall()
+        for row in rows:
+            policies[row["category_id"]] = self._autodownload_policy_from_row(row)
+        return policies
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -319,6 +335,7 @@ class CategoryService:
                 }
 
             # --- Batch-load related data (3 queries instead of 3×N) ---
+            autodownload_policies = self._load_autodownload_policies(conn)
             all_patterns: dict[str, list] = {}
             for pr in conn.execute(
                 "SELECT category_id, match_type, value, case_sensitive "
@@ -370,7 +387,7 @@ class CategoryService:
                     "recently_added_days": row["recently_added_days"],
                     "cached_items": all_cached.get(cat_id, []),
                     "last_refresh": row["last_refresh"],
-                    "autodownload": self._get_autodownload_policy(conn, cat_id),
+                    "autodownload": autodownload_policies.get(cat_id, self._default_autodownload()),
                 })
 
             return {"categories": categories}
@@ -397,6 +414,7 @@ class CategoryService:
                 return []
 
             # Load patterns (lightweight, needed for frontend edit modal)
+            autodownload_policies = self._load_autodownload_policies(conn)
             all_patterns: dict[str, list] = {}
             for pr in conn.execute(
                 "SELECT category_id, match_type, value, case_sensitive "
@@ -451,7 +469,7 @@ class CategoryService:
                     "patterns": all_patterns.get(cat_id, []),
                     "items": items,
                     "item_count": count,
-                    "autodownload": self._get_autodownload_policy(conn, cat_id),
+                    "autodownload": autodownload_policies.get(cat_id, self._default_autodownload()),
                 })
             return result
         except Exception as e:

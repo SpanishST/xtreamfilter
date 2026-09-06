@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import hashlib
+import json
 import logging
 import os
 import re
@@ -22,6 +23,7 @@ import httpx
 from app.database import DB_NAME, db_connect
 from app.models.xtream import PLAYER_PROFILES
 from app.services.config_service import resolve_download_destination
+from app.services.media_identity import build_media_identity, history_match_sql
 from app.services.monitor_service import _normalize_imdb_id, _normalize_tmdb_id
 from app.services.xtream_service import compact_episode_info
 
@@ -646,7 +648,8 @@ class CartService:
                 "SELECT id, stream_id, source_id, content_type, name, series_name, "
                 "series_id, season, episode_num, episode_title, icon, grp, container_extension, "
                 "added_at, queue_order, status, progress, error, file_path, file_size, temp_path, "
-                "monitor_canonical, expected_size, retried_once, destination "
+                "monitor_canonical, expected_size, retried_once, destination, "
+                "media_tmdb_id, media_imdb_id, media_title_key, media_year "
                 "FROM cart_items ORDER BY COALESCE(queue_order, 2147483647), added_at, id"
             ).fetchall()
             logger.info(f"load_cart: loaded {len(rows)} items from DB")
@@ -679,6 +682,10 @@ class CartService:
                     # NULL is a legacy row with no captured destination;
                     # an empty string is an intentional library-root choice.
                     "destination": r["destination"],
+                    "media_tmdb_id": r["media_tmdb_id"],
+                    "media_imdb_id": r["media_imdb_id"],
+                    "media_title_key": r["media_title_key"],
+                    "media_year": r["media_year"],
                 }
                 for r in rows
             ]
@@ -690,6 +697,50 @@ class CartService:
             return self._download_cart
         finally:
             conn.close()
+
+    def _ensure_item_media_identity(self, item: dict) -> None:
+        """Capture logical media identity before a cart item is persisted."""
+        content_type = item.get("content_type", "")
+        if content_type not in ("vod", "series"):
+            return
+        identity_fields = ("media_tmdb_id", "media_imdb_id", "media_title_key", "media_year")
+        if all(item.get(field) for field in identity_fields):
+            return
+
+        lookup_id = item.get("stream_id") if content_type == "vod" else item.get("series_id")
+        conn = db_connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT name, data, tmdb_id, imdb_id, title_key, release_year "
+                "FROM streams WHERE source_id=? AND content_type=? AND stream_id=?",
+                (item.get("source_id", ""), content_type, str(lookup_id or "")),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        data: dict = {}
+        cached_identity: dict = {}
+        if row:
+            try:
+                data = json.loads(row["data"] or "{}")
+            except (TypeError, ValueError):
+                data = {}
+            cached_identity = {
+                "media_tmdb_id": row["tmdb_id"],
+                "media_imdb_id": row["imdb_id"],
+                "media_title_key": row["title_key"],
+                "media_year": row["release_year"],
+            }
+
+        identity = build_media_identity(
+            content_type,
+            data,
+            name=item.get("name", "") or (row["name"] if row else ""),
+            series_name=item.get("series_name", ""),
+        )
+        for field in ("media_tmdb_id", "media_imdb_id", "media_title_key", "media_year"):
+            if not item.get(field):
+                item[field] = cached_identity.get(field) or identity.get(field)
 
     def save_cart(self, items: list | None = None) -> None:
         if items is not None:
@@ -709,6 +760,7 @@ class CartService:
 
             for queue_order, item in enumerate(self._download_cart):
                 item["queue_order"] = queue_order
+                self._ensure_item_media_identity(item)
 
             rows = [
                 (
@@ -736,6 +788,10 @@ class CartService:
                     i.get("expected_size"),
                     int(bool(i.get("retried_once", False))),
                     i.get("destination", ""),
+                    i.get("media_tmdb_id"),
+                    i.get("media_imdb_id"),
+                    i.get("media_title_key"),
+                    i.get("media_year"),
                     queue_order,
                 )
                 for queue_order, i in enumerate(self._download_cart)
@@ -748,8 +804,9 @@ class CartService:
                     "series_id, season, episode_num, episode_title, icon, grp, "
                     "container_extension, added_at, status, progress, "
                     "error, file_path, file_size, temp_path, monitor_canonical, "
-                    "expected_size, retried_once, destination, queue_order) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "expected_size, retried_once, destination, media_tmdb_id, "
+                    "media_imdb_id, media_title_key, media_year, queue_order) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     rows,
                 )
             conn.commit()
@@ -763,6 +820,7 @@ class CartService:
         file_path = item.get("file_path")
         if not file_path:
             return
+        self._ensure_item_media_identity(item)
         conn = db_connect(self.db_path)
         try:
             conn.execute(
@@ -770,8 +828,9 @@ class CartService:
                    (cart_item_id, stream_id, source_id, content_type, name,
                     series_name, series_id, season, episode_num, episode_title,
                     icon, grp, container_extension, file_path, file_size,
-                    completed_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    completed_at, media_tmdb_id, media_imdb_id, media_title_key,
+                    media_year)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     item.get("id", ""),
                     item.get("stream_id", ""),
@@ -789,6 +848,10 @@ class CartService:
                     file_path,
                     item.get("file_size") or 0,
                     datetime.now(UTC).isoformat(),
+                    item.get("media_tmdb_id"),
+                    item.get("media_imdb_id"),
+                    item.get("media_title_key"),
+                    item.get("media_year"),
                 ),
             )
             conn.commit()
@@ -798,12 +861,7 @@ class CartService:
             conn.close()
 
     def get_download_history_for_browse(self, keys: list[tuple[str, str, str]]) -> list[dict]:
-        """Return history rows matching the displayed movie/series keys.
-
-        A series browse key is its parent series ID, while a history row's
-        stream_id is the individual episode ID. The series_id column bridges
-        those two representations.
-        """
+        """Return history rows matching displayed media across providers."""
         if not keys:
             return []
         conn = db_connect(self.db_path)
@@ -822,12 +880,22 @@ class CartService:
                                k.source_id AS browse_source_id,
                                k.content_type AS browse_content_type,
                                h.season, h.episode_num
-                        FROM download_history h
-                        JOIN browse_keys k
-                          ON k.source_id = h.source_id
-                         AND k.content_type = h.content_type
-                         AND ((h.content_type = 'vod' AND h.stream_id = k.stream_id)
-                              OR (h.content_type = 'series' AND h.series_id = k.stream_id))""",
+                         FROM browse_keys k
+                         LEFT JOIN streams s
+                           ON s.source_id = k.source_id
+                          AND s.content_type = k.content_type
+                          AND s.stream_id = k.stream_id
+                         JOIN download_history h
+                           ON (
+                               (s.stream_id IS NOT NULL
+                                AND h.content_type = s.content_type
+                                AND {history_match_sql('s', 'h')})
+                               OR (s.stream_id IS NULL
+                                   AND h.source_id = k.source_id
+                                   AND h.content_type = k.content_type
+                                   AND ((k.content_type = 'vod' AND h.stream_id = k.stream_id)
+                                        OR (k.content_type = 'series' AND h.series_id = k.stream_id)))
+                           )""",
                     params,
                 ).fetchall()
                 matches.extend(
@@ -903,7 +971,7 @@ class CartService:
     def get_download_history_for_keys(
         self, keys: list[tuple[str, str, str]], limit: int = 3
     ) -> list[dict]:
-        """Return the newest history events matching browse card keys."""
+        """Return newest history events matching browse cards across providers."""
         if not keys:
             return []
         limit = max(1, min(limit, 3))
@@ -919,19 +987,29 @@ class CartService:
                 rows = conn.execute(
                     f"""WITH browse_keys(stream_id, source_id, content_type) AS
                            (VALUES {values_sql})
-                        SELECT h.id, h.cart_item_id, h.stream_id, h.source_id,
-                               h.content_type, h.name, h.series_name, h.series_id,
-                               h.season, h.episode_num, h.episode_title, h.icon,
-                               h.grp, h.container_extension, h.file_path,
-                               h.file_size, h.completed_at
-                        FROM download_history h
-                        JOIN browse_keys k
-                          ON k.source_id = h.source_id
-                         AND k.content_type = h.content_type
-                         AND ((h.content_type = 'vod' AND h.stream_id = k.stream_id)
-                              OR (h.content_type = 'series' AND h.series_id = k.stream_id))
-                        ORDER BY h.completed_at DESC, h.id DESC
-                        LIMIT ?""",
+                         SELECT DISTINCT h.id, h.cart_item_id, h.stream_id, h.source_id,
+                                h.content_type, h.name, h.series_name, h.series_id,
+                                h.season, h.episode_num, h.episode_title, h.icon,
+                                h.grp, h.container_extension, h.file_path,
+                                h.file_size, h.completed_at
+                         FROM browse_keys k
+                         LEFT JOIN streams s
+                           ON s.source_id = k.source_id
+                          AND s.content_type = k.content_type
+                          AND s.stream_id = k.stream_id
+                         JOIN download_history h
+                           ON (
+                               (s.stream_id IS NOT NULL
+                                AND h.content_type = s.content_type
+                                AND {history_match_sql('s', 'h')})
+                               OR (s.stream_id IS NULL
+                                   AND h.source_id = k.source_id
+                                   AND h.content_type = k.content_type
+                                   AND ((k.content_type = 'vod' AND h.stream_id = k.stream_id)
+                                        OR (k.content_type = 'series' AND h.series_id = k.stream_id)))
+                           )
+                         ORDER BY h.completed_at DESC, h.id DESC
+                         LIMIT ?""",
                     params + [limit],
                 ).fetchall()
                 matches.extend(dict(row) for row in rows)
@@ -1427,6 +1505,10 @@ class CartService:
             "expected_size": kwargs.get("expected_size"),
             "retried_once": kwargs.get("retried_once", False),
             "destination": kwargs.get("destination", ""),
+            "media_tmdb_id": kwargs.get("media_tmdb_id"),
+            "media_imdb_id": kwargs.get("media_imdb_id"),
+            "media_title_key": kwargs.get("media_title_key"),
+            "media_year": kwargs.get("media_year"),
         }
 
     def cancel_download(self) -> bool:

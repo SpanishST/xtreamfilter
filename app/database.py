@@ -18,9 +18,12 @@ Async (category pattern-refresh hot-path):
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 import sqlite3
-import logging
+
+from app.services.media_identity import build_media_identity
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +173,9 @@ CREATE TABLE IF NOT EXISTS streams (
     rating       REAL,
     icon         TEXT,
     tmdb_id      TEXT,
+    imdb_id      TEXT,
+    title_key    TEXT,
+    release_year TEXT,
     container_ext TEXT,
     PRIMARY KEY (source_id, content_type, stream_id)
 );
@@ -354,7 +360,11 @@ CREATE TABLE IF NOT EXISTS cart_items (
     file_size           INTEGER,
     temp_path           TEXT,
     series_id           TEXT,
-    destination         TEXT
+    destination         TEXT,
+    media_tmdb_id       TEXT,
+    media_imdb_id       TEXT,
+    media_title_key     TEXT,
+    media_year          TEXT
 );
 
 -- Durable record of files that reached their final destination. This is
@@ -376,7 +386,11 @@ CREATE TABLE IF NOT EXISTS download_history (
     container_extension TEXT,
     file_path           TEXT NOT NULL,
     file_size           INTEGER NOT NULL DEFAULT 0,
-    completed_at        TEXT NOT NULL
+    completed_at        TEXT NOT NULL,
+    media_tmdb_id       TEXT,
+    media_imdb_id       TEXT,
+    media_title_key     TEXT,
+    media_year          TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_download_history_movie
@@ -521,7 +535,9 @@ def init_db(db_path: str) -> None:
         _apply_column_upgrades(conn)
         _backfill_cart_order(conn)
         _backfill_download_history(conn)
+        _backfill_media_identity(conn)
         _create_denormalized_browse_indexes(conn)
+        _create_identity_indexes(conn)
         _backfill_streams_denormalized(conn)
         conn.commit()
         logger.info(f"Database initialised at {db_path}")
@@ -550,6 +566,18 @@ def _create_denormalized_browse_indexes(conn: sqlite3.Connection) -> None:
         if name not in existing:
             conn.execute(statement)
             logger.info(f"Schema upgrade: created index {name}")
+
+
+def _create_identity_indexes(conn: sqlite3.Connection) -> None:
+    """Create indexes that depend on provider-independent identity columns."""
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_history_media_identity "
+        "ON download_history (content_type, media_tmdb_id, media_imdb_id, media_title_key, media_year)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_streams_media_identity "
+        "ON streams (content_type, tmdb_id, imdb_id, title_key, release_year)"
+    )
 
 
 def backfill_streams_denormalized_sql() -> str:
@@ -629,7 +657,18 @@ _COLUMN_UPGRADES: list[tuple[str, str, str]] = [
     # Item-card fields so browse pages never touch the wide JSON blob.
     ("streams", "icon", "TEXT"),
     ("streams", "tmdb_id", "TEXT"),
+    ("streams", "imdb_id", "TEXT"),
+    ("streams", "title_key", "TEXT"),
+    ("streams", "release_year", "TEXT"),
     ("streams", "container_ext", "TEXT"),
+    ("cart_items", "media_tmdb_id", "TEXT"),
+    ("cart_items", "media_imdb_id", "TEXT"),
+    ("cart_items", "media_title_key", "TEXT"),
+    ("cart_items", "media_year", "TEXT"),
+    ("download_history", "media_tmdb_id", "TEXT"),
+    ("download_history", "media_imdb_id", "TEXT"),
+    ("download_history", "media_title_key", "TEXT"),
+    ("download_history", "media_year", "TEXT"),
 ]
 
 
@@ -662,11 +701,79 @@ def _backfill_download_history(conn: sqlite3.Connection) -> None:
         """INSERT OR IGNORE INTO download_history
            (cart_item_id, stream_id, source_id, content_type, name, series_name,
             series_id, season, episode_num, episode_title, icon, grp,
-            container_extension, file_path, file_size, completed_at)
+            container_extension, file_path, file_size, completed_at,
+            media_tmdb_id, media_imdb_id, media_title_key, media_year)
            SELECT id, stream_id, source_id, content_type, name, series_name,
                   series_id, season, episode_num, episode_title, icon, grp,
                   container_extension, file_path, COALESCE(file_size, 0),
-                  COALESCE(added_at, datetime('now'))
+                  COALESCE(added_at, datetime('now')), media_tmdb_id,
+                  media_imdb_id, media_title_key, media_year
            FROM cart_items
            WHERE status = 'completed' AND file_path IS NOT NULL"""
     )
+
+
+def _backfill_media_identity(conn: sqlite3.Connection) -> None:
+    """Populate provider-independent identity fields for existing rows."""
+    stream_identity: dict[tuple[str, str, str], dict] = {}
+    stream_rows = conn.execute(
+        "SELECT source_id, content_type, stream_id, name, data, tmdb_id, imdb_id, "
+        "title_key, release_year FROM streams "
+        "WHERE content_type IN ('vod', 'series')"
+    ).fetchall()
+    for row in stream_rows:
+        try:
+            data = json.loads(row["data"] or "{}")
+        except (TypeError, ValueError):
+            data = {}
+        identity = build_media_identity(row["content_type"], data, name=row["name"] or "")
+        values = {
+            "media_tmdb_id": identity["media_tmdb_id"] or row["tmdb_id"],
+            "media_imdb_id": identity["media_imdb_id"] or row["imdb_id"],
+            "media_title_key": identity["media_title_key"] or row["title_key"],
+            "media_year": identity["media_year"] or row["release_year"],
+        }
+        stream_identity[(row["source_id"], row["content_type"], row["stream_id"])] = values
+        conn.execute(
+            "UPDATE streams SET tmdb_id=?, imdb_id=?, title_key=?, release_year=? "
+            "WHERE source_id=? AND content_type=? AND stream_id=?",
+            (
+                values["media_tmdb_id"],
+                values["media_imdb_id"],
+                values["media_title_key"],
+                values["media_year"],
+                row["source_id"],
+                row["content_type"],
+                row["stream_id"],
+            ),
+        )
+
+    for table in ("cart_items", "download_history"):
+        rows = conn.execute(
+            f"SELECT id AS identity_row_id, source_id, content_type, stream_id, series_id, name, "
+            f"series_name, media_tmdb_id, media_imdb_id, media_title_key, media_year "
+            f"FROM {table} WHERE content_type IN ('vod', 'series')"
+        ).fetchall()
+        for row in rows:
+            lookup_id = row["stream_id"] if row["content_type"] == "vod" else row["series_id"]
+            cached = stream_identity.get(
+                (row["source_id"], row["content_type"], str(lookup_id or "")),
+                {},
+            )
+            fallback = build_media_identity(
+                row["content_type"],
+                {},
+                name=row["name"] or "",
+                series_name=row["series_name"] or "",
+            )
+            values = (
+                row["media_tmdb_id"] or cached.get("media_tmdb_id") or fallback["media_tmdb_id"],
+                row["media_imdb_id"] or cached.get("media_imdb_id") or fallback["media_imdb_id"],
+                row["media_title_key"] or cached.get("media_title_key") or fallback["media_title_key"],
+                row["media_year"] or cached.get("media_year") or fallback["media_year"],
+            )
+            conn.execute(
+                f"UPDATE {table} SET media_tmdb_id=?, media_imdb_id=?, "
+                f"media_title_key=?, media_year=? WHERE id=?",
+                (*values, row["identity_row_id"]),
+            )

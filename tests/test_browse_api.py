@@ -579,6 +579,97 @@ def test_browse_marks_downloaded_movie(client, data_dir):
     assert items["Pending Movie"]["downloaded"] is False
 
 
+def test_browse_marks_equivalent_movie_downloaded_across_sources(client, data_dir):
+    _seed_streams(data_dir, [
+        {"stream_id": "src1-movie", "name": "Shared Movie (2026)", "tmdb_id": "12345"},
+    ], "vod", source_id="src1")
+    _seed_streams(data_dir, [
+        {"stream_id": "src2-movie", "name": "Shared Movie", "tmdb_id": "12345"},
+    ], "vod", source_id="src2")
+    _seed_download_history(data_dir, [
+        {"stream_id": "src1-movie", "source_id": "src1", "content_type": "vod"},
+    ])
+
+    # Directly seeded rows need the same identity backfill as a real cache refresh.
+    init_db(os.path.join(data_dir, DB_NAME))
+    client.app.state.cache_service.load_cache_from_disk()
+
+    source_view = client.get("/api/browse?type=vod&source=src2").json()
+    assert source_view["items"][0]["downloaded"] is True
+    assert client.get(
+        "/api/browse?type=vod&source=src2&download_status=downloaded"
+    ).json()["total"] == 1
+    assert client.get(
+        "/api/browse?type=vod&source=src2&download_status=not_downloaded"
+    ).json()["total"] == 0
+
+
+def test_browse_matches_source_independent_movie_by_title_and_year(client, data_dir):
+    _seed_streams(data_dir, [
+        {"stream_id": "src1-movie", "name": "Fallback Movie (2026)"},
+    ], "vod", source_id="src1")
+    _seed_streams(data_dir, [
+        {"stream_id": "src2-movie", "name": "Fallback Movie - 2026"},
+    ], "vod", source_id="src2")
+    _seed_download_history(data_dir, [
+        {"stream_id": "src1-movie", "source_id": "src1", "content_type": "vod"},
+    ])
+    init_db(os.path.join(data_dir, DB_NAME))
+    client.app.state.cache_service.load_cache_from_disk()
+
+    item = client.get("/api/browse?type=vod&source=src2").json()["items"][0]
+    assert item["downloaded"] is True
+
+
+def test_browse_history_popup_matches_equivalent_movie_across_sources(client, data_dir):
+    _seed_streams(data_dir, [
+        {"stream_id": "src1-movie", "name": "Shared Movie", "tmdb_id": "12345"},
+    ], "vod", source_id="src1")
+    _seed_streams(data_dir, [
+        {"stream_id": "src2-movie", "name": "Shared Movie", "tmdb_id": "12345"},
+    ], "vod", source_id="src2")
+    _seed_download_history(data_dir, [
+        {"cart_item_id": "download-src1", "stream_id": "src1-movie",
+         "source_id": "src1", "content_type": "vod", "name": "Shared Movie"},
+    ])
+    init_db(os.path.join(data_dir, DB_NAME))
+
+    response = client.get(
+        "/api/download-history/item",
+        params={"keys": json.dumps([{
+            "source_id": "src2",
+            "content_type": "vod",
+            "stream_id": "src2-movie",
+        }])},
+    )
+
+    assert response.status_code == 200
+    assert [item["cart_item_id"] for item in response.json()["items"]] == ["download-src1"]
+    assert response.json()["items"][0]["source_id"] == "src1"
+
+
+def test_browse_counts_equivalent_series_episode_across_sources(client, data_dir):
+    _seed_streams(data_dir, [
+        {"stream_id": "src1-series", "name": "Shared Series", "tmdb_id": "54321"},
+    ], "series", source_id="src1")
+    _seed_streams(data_dir, [
+        {"stream_id": "src2-series", "name": "Shared Series", "tmdb_id": "54321"},
+    ], "series", source_id="src2")
+    _seed_download_history(data_dir, [
+        {"cart_item_id": "episode-src1", "stream_id": "src1-episode",
+         "source_id": "src1", "content_type": "series", "series_id": "src1-series",
+         "season": "1", "episode_num": 2},
+    ])
+    init_db(os.path.join(data_dir, DB_NAME))
+    client.app.state.cache_service.load_cache_from_disk()
+
+    source_view = client.get("/api/browse?type=series&source=src2").json()
+    assert source_view["items"][0]["downloaded_episode_count"] == 1
+    assert client.get(
+        "/api/browse?type=series&source=src2&download_status=not_downloaded"
+    ).json()["total"] == 0
+
+
 def test_browse_download_status_filter(client, data_dir):
     _seed_streams(data_dir, [
         {"stream_id": "1", "name": "Downloaded Movie", "category_id": "10"},

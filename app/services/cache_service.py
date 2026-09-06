@@ -23,6 +23,7 @@ from app.database import (
     db_connect,
 )
 from app.services.filter_service import register_xf_norm
+from app.services.media_identity import build_media_identity, history_match_sql
 
 if TYPE_CHECKING:
     from app.services.cart_service import CartService
@@ -838,8 +839,10 @@ class CacheService:
                             (ct, str(stream.get("category_id", ""))), "Unknown"
                         )
                         icon = stream.get("stream_icon") or stream.get("cover") or ""
-                        raw_tmdb = stream.get("tmdb_id") or stream.get("tmdb")
-                        tmdb_value = str(raw_tmdb) if raw_tmdb else None
+                        media_identity = build_media_identity(
+                            ct, stream, name=str(stream.get("name", ""))
+                        )
+                        tmdb_value = media_identity["media_tmdb_id"]
                         container_ext = (
                             str(stream.get("container_extension") or "mp4") if ct == "vod" else ""
                         )
@@ -856,6 +859,9 @@ class CacheService:
                                 rating,
                                 icon,
                                 tmdb_value,
+                                media_identity["media_imdb_id"],
+                                media_identity["media_title_key"],
+                                media_identity["media_year"],
                                 container_ext,
                             )
                         )
@@ -863,8 +869,8 @@ class CacheService:
                     conn.executemany(
                         "INSERT OR IGNORE INTO streams "
                         "(source_id, content_type, stream_id, name, category_id, added, data, "
-                        "group_name, rating, icon, tmdb_id, container_ext) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "group_name, rating, icon, tmdb_id, imdb_id, title_key, release_year, container_ext) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         stream_rows,
                     )
 
@@ -988,8 +994,10 @@ class CacheService:
                             (ct, str(stream.get("category_id", ""))), "Unknown"
                         )
                         icon = stream.get("stream_icon") or stream.get("cover") or ""
-                        raw_tmdb = stream.get("tmdb_id") or stream.get("tmdb")
-                        tmdb_value = str(raw_tmdb) if raw_tmdb else None
+                        media_identity = build_media_identity(
+                            ct, stream, name=str(stream.get("name", ""))
+                        )
+                        tmdb_value = media_identity["media_tmdb_id"]
                         container_ext = (
                             str(stream.get("container_extension") or "mp4") if ct == "vod" else ""
                         )
@@ -1006,6 +1014,9 @@ class CacheService:
                                 rating,
                                 icon,
                                 tmdb_value,
+                                media_identity["media_imdb_id"],
+                                media_identity["media_title_key"],
+                                media_identity["media_year"],
                                 container_ext,
                             )
                         )
@@ -1013,8 +1024,8 @@ class CacheService:
                     await conn.executemany(
                         "INSERT OR IGNORE INTO streams "
                         "(source_id, content_type, stream_id, name, category_id, added, data, "
-                        "group_name, rating, icon, tmdb_id, container_ext) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "group_name, rating, icon, tmdb_id, imdb_id, title_key, release_year, container_ext) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         stream_rows,
                     )
 
@@ -1350,10 +1361,7 @@ class CacheService:
             conditions.append(
                 f"""{exists} (
                     SELECT 1 FROM download_history dh
-                    WHERE dh.source_id = s.source_id
-                      AND dh.content_type = s.content_type
-                      AND ((s.content_type = 'vod' AND dh.stream_id = s.stream_id)
-                           OR (s.content_type = 'series' AND dh.series_id = s.stream_id))
+                    WHERE {history_match_sql('s', 'dh')}
                 )"""
             )
 
@@ -1422,10 +1430,7 @@ class CacheService:
             exists = "EXISTS" if download_status == "downloaded" else "NOT EXISTS"
             sql += f""" AND {exists} (
                 SELECT 1 FROM download_history dh
-                WHERE dh.source_id = s.source_id
-                  AND dh.content_type = s.content_type
-                  AND ((s.content_type = 'vod' AND dh.stream_id = s.stream_id)
-                       OR (s.content_type = 'series' AND dh.series_id = s.stream_id))
+                WHERE {history_match_sql('s', 'dh')}
             )"""
         return conn.execute(sql, params).fetchone()["cnt"]
 
@@ -1702,10 +1707,7 @@ class CacheService:
                     conditions.append(
                         f"""{exists} (
                             SELECT 1 FROM download_history dh
-                            WHERE dh.source_id = s.source_id
-                              AND dh.content_type = s.content_type
-                              AND ((s.content_type = 'vod' AND dh.stream_id = s.stream_id)
-                                   OR (s.content_type = 'series' AND dh.series_id = s.stream_id))
+                            WHERE {history_match_sql('s', 'dh')}
                         )"""
                     )
                 if extra_where_sql:

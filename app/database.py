@@ -346,14 +346,45 @@ CREATE TABLE IF NOT EXISTS cart_items (
     grp                 TEXT,
     container_extension TEXT,
     added_at            TEXT,
+    queue_order         INTEGER,
     status              TEXT NOT NULL DEFAULT 'queued',
     progress            REAL NOT NULL DEFAULT 0,
     error               TEXT,
     file_path           TEXT,
     file_size           INTEGER,
     temp_path           TEXT,
-    series_id           TEXT
+    series_id           TEXT,
+    destination         TEXT
 );
+
+-- Durable record of files that reached their final destination. This is
+-- intentionally independent from cart_items and monitored-series state.
+CREATE TABLE IF NOT EXISTS download_history (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    cart_item_id        TEXT NOT NULL UNIQUE,
+    stream_id           TEXT NOT NULL,
+    source_id           TEXT NOT NULL,
+    content_type        TEXT NOT NULL,
+    name                TEXT,
+    series_name         TEXT,
+    series_id           TEXT,
+    season              TEXT,
+    episode_num         INTEGER,
+    episode_title       TEXT,
+    icon                TEXT,
+    grp                 TEXT,
+    container_extension TEXT,
+    file_path           TEXT NOT NULL,
+    file_size           INTEGER NOT NULL DEFAULT 0,
+    completed_at        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_download_history_movie
+    ON download_history (source_id, content_type, stream_id);
+CREATE INDEX IF NOT EXISTS idx_download_history_series
+    ON download_history (source_id, content_type, series_id, season, episode_num);
+CREATE INDEX IF NOT EXISTS idx_download_history_completed_at
+    ON download_history (completed_at DESC);
 
 -- ── Monitored series ──────────────────────────────────────────────────────
 
@@ -488,6 +519,8 @@ def init_db(db_path: str) -> None:
         conn.executescript(_SCHEMA)
         # Idempotent column additions for databases that pre-date the column.
         _apply_column_upgrades(conn)
+        _backfill_cart_order(conn)
+        _backfill_download_history(conn)
         _create_denormalized_browse_indexes(conn)
         _backfill_streams_denormalized(conn)
         conn.commit()
@@ -573,6 +606,7 @@ def _backfill_streams_denormalized(conn: sqlite3.Connection) -> None:
 _COLUMN_UPGRADES: list[tuple[str, str, str]] = [
     # (table, column, definition)
     ("cart_items", "series_id", "TEXT"),
+    ("cart_items", "destination", "TEXT"),
     ("monitor_sources", "series_name", "TEXT"),
     ("monitored_series", "canonical_name", "TEXT"),
     ("monitored_series", "custom_category_ids", "TEXT"),
@@ -587,6 +621,7 @@ _COLUMN_UPGRADES: list[tuple[str, str, str]] = [
     ("cart_items", "monitor_canonical", "TEXT"),
     ("cart_items", "expected_size", "INTEGER"),
     ("cart_items", "retried_once", "INTEGER NOT NULL DEFAULT 0"),
+    ("cart_items", "queue_order", "INTEGER"),
     # Browse denormalization: lets sorting/filtering use plain indexes
     # instead of joining source_categories and parsing JSON per row.
     ("streams", "group_name", "TEXT"),
@@ -605,3 +640,33 @@ def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             logger.info(f"Schema upgrade: added {table}.{column}")
+
+
+def _backfill_cart_order(conn: sqlite3.Connection) -> None:
+    """Give existing cart rows a stable order matching their old FIFO order."""
+    rows = conn.execute(
+        "SELECT id FROM cart_items WHERE queue_order IS NULL ORDER BY added_at, id"
+    ).fetchall()
+    if not rows:
+        return
+    conn.executemany(
+        "UPDATE cart_items SET queue_order = ? WHERE id = ?",
+        [(index, row[0]) for index, row in enumerate(rows)],
+    )
+    logger.info(f"Schema upgrade: backfilled queue order for {len(rows)} cart item(s)")
+
+
+def _backfill_download_history(conn: sqlite3.Connection) -> None:
+    """Import completed cart rows into the durable history ledger once."""
+    conn.execute(
+        """INSERT OR IGNORE INTO download_history
+           (cart_item_id, stream_id, source_id, content_type, name, series_name,
+            series_id, season, episode_num, episode_title, icon, grp,
+            container_extension, file_path, file_size, completed_at)
+           SELECT id, stream_id, source_id, content_type, name, series_name,
+                  series_id, season, episode_num, episode_title, icon, grp,
+                  container_extension, file_path, COALESCE(file_size, 0),
+                  COALESCE(added_at, datetime('now'))
+           FROM cart_items
+           WHERE status = 'completed' AND file_path IS NOT NULL"""
+    )

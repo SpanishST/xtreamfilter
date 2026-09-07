@@ -12,7 +12,7 @@ import subprocess
 import time
 import unicodedata
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Optional
 from xml.dom import minidom
 from xml.etree.ElementTree import Element, SubElement, tostring
@@ -21,6 +21,7 @@ import httpx
 
 from app.database import DB_NAME, db_connect
 from app.models.xtream import PLAYER_PROFILES
+from app.services.config_service import resolve_download_destination
 from app.services.monitor_service import _normalize_imdb_id, _normalize_tmdb_id
 from app.services.xtream_service import compact_episode_info
 
@@ -499,6 +500,7 @@ class CartService:
         self._download_resume_event.set()
         self._force_started: bool = False
         self.log_service = None  # set after init via attribute binding
+        self._cart_mutation_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Properties
@@ -643,9 +645,9 @@ class CartService:
             rows = conn.execute(
                 "SELECT id, stream_id, source_id, content_type, name, series_name, "
                 "series_id, season, episode_num, episode_title, icon, grp, container_extension, "
-                "added_at, status, progress, error, file_path, file_size, temp_path, "
-                "monitor_canonical, expected_size, retried_once "
-                "FROM cart_items ORDER BY added_at"
+                "added_at, queue_order, status, progress, error, file_path, file_size, temp_path, "
+                "monitor_canonical, expected_size, retried_once, destination "
+                "FROM cart_items ORDER BY COALESCE(queue_order, 2147483647), added_at, id"
             ).fetchall()
             logger.info(f"load_cart: loaded {len(rows)} items from DB")
             self._download_cart = [
@@ -664,6 +666,7 @@ class CartService:
                     "group": r["grp"],
                     "container_extension": r["container_extension"],
                     "added_at": r["added_at"],
+                    "queue_order": r["queue_order"],
                     "status": r["status"],
                     "progress": r["progress"],
                     "error": r["error"],
@@ -673,6 +676,9 @@ class CartService:
                     "monitor_canonical": r["monitor_canonical"],
                     "expected_size": r["expected_size"],
                     "retried_once": bool(r["retried_once"]),
+                    # NULL is a legacy row with no captured destination;
+                    # an empty string is an intentional library-root choice.
+                    "destination": r["destination"],
                 }
                 for r in rows
             ]
@@ -701,6 +707,9 @@ class CartService:
             else:
                 conn.execute("DELETE FROM cart_items")
 
+            for queue_order, item in enumerate(self._download_cart):
+                item["queue_order"] = queue_order
+
             rows = [
                 (
                     i["id"],
@@ -726,8 +735,10 @@ class CartService:
                     i.get("monitor_canonical"),
                     i.get("expected_size"),
                     int(bool(i.get("retried_once", False))),
+                    i.get("destination", ""),
+                    queue_order,
                 )
-                for i in self._download_cart
+                for queue_order, i in enumerate(self._download_cart)
                 if i.get("id")
             ]
             if rows:
@@ -737,13 +748,195 @@ class CartService:
                     "series_id, season, episode_num, episode_title, icon, grp, "
                     "container_extension, added_at, status, progress, "
                     "error, file_path, file_size, temp_path, monitor_canonical, "
-                    "expected_size, retried_once) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "expected_size, retried_once, destination, queue_order) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     rows,
                 )
             conn.commit()
         except Exception as e:
             logger.error(f"Error saving cart to DB: {e}")
+        finally:
+            conn.close()
+
+    def record_download_history(self, item: dict) -> None:
+        """Persist a completed file independently from the download queue."""
+        file_path = item.get("file_path")
+        if not file_path:
+            return
+        conn = db_connect(self.db_path)
+        try:
+            conn.execute(
+                """INSERT OR IGNORE INTO download_history
+                   (cart_item_id, stream_id, source_id, content_type, name,
+                    series_name, series_id, season, episode_num, episode_title,
+                    icon, grp, container_extension, file_path, file_size,
+                    completed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    item.get("id", ""),
+                    item.get("stream_id", ""),
+                    item.get("source_id", ""),
+                    item.get("content_type", ""),
+                    item.get("name"),
+                    item.get("series_name"),
+                    item.get("series_id"),
+                    item.get("season"),
+                    item.get("episode_num"),
+                    item.get("episode_title"),
+                    item.get("icon"),
+                    item.get("group"),
+                    item.get("container_extension"),
+                    file_path,
+                    item.get("file_size") or 0,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            conn.commit()
+        except Exception as exc:
+            logger.error("Error recording download history for %s: %s", item.get("id"), exc)
+        finally:
+            conn.close()
+
+    def get_download_history_for_browse(self, keys: list[tuple[str, str, str]]) -> list[dict]:
+        """Return history rows matching the displayed movie/series keys.
+
+        A series browse key is its parent series ID, while a history row's
+        stream_id is the individual episode ID. The series_id column bridges
+        those two representations.
+        """
+        if not keys:
+            return []
+        conn = db_connect(self.db_path)
+        try:
+            matches: list[dict] = []
+            for start in range(0, len(keys), 300):
+                chunk = keys[start : start + 300]
+                values_sql = ",".join("(?, ?, ?)" for _ in chunk)
+                params: list[str] = []
+                for source_id, content_type, stream_id in chunk:
+                    params.extend([stream_id, source_id, content_type])
+                rows = conn.execute(
+                    f"""WITH browse_keys(stream_id, source_id, content_type) AS
+                           (VALUES {values_sql})
+                        SELECT k.stream_id AS browse_stream_id,
+                               k.source_id AS browse_source_id,
+                               k.content_type AS browse_content_type,
+                               h.season, h.episode_num
+                        FROM download_history h
+                        JOIN browse_keys k
+                          ON k.source_id = h.source_id
+                         AND k.content_type = h.content_type
+                         AND ((h.content_type = 'vod' AND h.stream_id = k.stream_id)
+                              OR (h.content_type = 'series' AND h.series_id = k.stream_id))""",
+                    params,
+                ).fetchall()
+                matches.extend(
+                    {
+                        "source_id": row["browse_source_id"],
+                        "content_type": row["browse_content_type"],
+                        "stream_id": row["browse_stream_id"],
+                        "season": row["season"],
+                        "episode_num": row["episode_num"],
+                    }
+                    for row in rows
+                )
+            return matches
+        finally:
+            conn.close()
+
+    def get_download_history(
+        self,
+        content_type: str = "",
+        source_id: str = "",
+        search: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        """Return paginated completed download events for the history page."""
+        conditions = ["1 = 1"]
+        params: list = []
+        if content_type in ("vod", "series"):
+            conditions.append("content_type = ?")
+            params.append(content_type)
+        if source_id:
+            conditions.append("source_id = ?")
+            params.append(source_id)
+        if search:
+            conditions.append(
+                "(lower(COALESCE(name, '')) LIKE lower(?) OR "
+                "lower(COALESCE(series_name, '')) LIKE lower(?) OR "
+                "lower(COALESCE(episode_title, '')) LIKE lower(?))"
+            )
+            search_pattern = f"%{search}%"
+            params.extend([search_pattern, search_pattern, search_pattern])
+        where_clause = " AND ".join(conditions)
+        limit = max(1, min(limit, 200))
+        offset = max(0, offset)
+
+        conn = db_connect(self.db_path)
+        try:
+            total = conn.execute(
+                f"SELECT COUNT(*) AS cnt FROM download_history WHERE {where_clause}",
+                params,
+            ).fetchone()["cnt"]
+            rows = conn.execute(
+                f"""SELECT id, cart_item_id, stream_id, source_id, content_type,
+                           name, series_name, series_id, season, episode_num,
+                           episode_title, icon, grp, container_extension,
+                           file_path, file_size, completed_at
+                    FROM download_history
+                    WHERE {where_clause}
+                    ORDER BY completed_at DESC, id DESC
+                    LIMIT ? OFFSET ?""",
+                params + [limit, offset],
+            ).fetchall()
+            return {
+                "items": [dict(row) for row in rows],
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "has_more": offset + len(rows) < total,
+            }
+        finally:
+            conn.close()
+
+    def get_download_history_for_keys(
+        self, keys: list[tuple[str, str, str]], limit: int = 3
+    ) -> list[dict]:
+        """Return the newest history events matching browse card keys."""
+        if not keys:
+            return []
+        limit = max(1, min(limit, 3))
+        conn = db_connect(self.db_path)
+        try:
+            matches: list[dict] = []
+            for start in range(0, len(keys), 300):
+                chunk = keys[start : start + 300]
+                values_sql = ",".join("(?, ?, ?)" for _ in chunk)
+                params: list[str | int] = []
+                for source_id, content_type, stream_id in chunk:
+                    params.extend([stream_id, source_id, content_type])
+                rows = conn.execute(
+                    f"""WITH browse_keys(stream_id, source_id, content_type) AS
+                           (VALUES {values_sql})
+                        SELECT h.id, h.cart_item_id, h.stream_id, h.source_id,
+                               h.content_type, h.name, h.series_name, h.series_id,
+                               h.season, h.episode_num, h.episode_title, h.icon,
+                               h.grp, h.container_extension, h.file_path,
+                               h.file_size, h.completed_at
+                        FROM download_history h
+                        JOIN browse_keys k
+                          ON k.source_id = h.source_id
+                         AND k.content_type = h.content_type
+                         AND ((h.content_type = 'vod' AND h.stream_id = k.stream_id)
+                              OR (h.content_type = 'series' AND h.series_id = k.stream_id))
+                        ORDER BY h.completed_at DESC, h.id DESC
+                        LIMIT ?""",
+                    params + [limit],
+                ).fetchall()
+                matches.extend(dict(row) for row in rows)
+            matches.sort(key=lambda row: (row.get("completed_at") or "", row.get("id", 0)), reverse=True)
+            return matches[:limit]
         finally:
             conn.close()
 
@@ -870,11 +1063,21 @@ class CartService:
 
     def build_download_filepath(self, item: dict, ext_override: str | None = None) -> str:
         base_path = self.config_service.get_download_path()
+        content_type = item.get("content_type", "vod")
+        configured_destination = self.config_service.get_download_destination(content_type)
+        try:
+            _, destination_root = resolve_download_destination(
+                base_path,
+                configured_destination if item.get("destination") is None else item.get("destination"),
+            )
+        except ValueError:
+            logger.warning("Invalid cart destination; falling back to the configured default")
+            _, destination_root = resolve_download_destination(base_path, configured_destination)
         ext = ext_override or item.get("container_extension", "mp4")
         name = sanitize_filename(item.get("name", "untitled"))
-        if item.get("content_type") == "vod":
-            return os.path.join(base_path, "Films", name, f"{name}.{ext}")
-        elif item.get("content_type") == "series":
+        if content_type == "vod":
+            return os.path.join(destination_root, name, f"{name}.{ext}")
+        elif content_type == "series":
             series_name = sanitize_filename(item.get("series_name", name))
             season = item.get("season", "1")
             episode = item.get("episode_num", 1)
@@ -886,7 +1089,7 @@ class CartService:
                 filename = f"{series_name} {season_str}{episode_str} - {ep_title_clean}.{ext}"
             else:
                 filename = f"{series_name} {season_str}{episode_str}.{ext}"
-            full_path = os.path.join(base_path, "Series", series_name, season_str, filename)
+            full_path = os.path.join(destination_root, series_name, season_str, filename)
             logger.debug(
                 f"[PATH] Series folder='{series_name}' "
                 f"(monitor_canonical={item.get('monitor_canonical')!r}), "
@@ -916,53 +1119,111 @@ class CartService:
     # Cart CRUD (used by routes)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _cart_item_key(item: dict) -> tuple:
+        """Return the source-local identity used for active cart de-duplication."""
+        return (
+            item.get("content_type", ""),
+            str(item.get("source_id", "")),
+            str(item.get("stream_id", "")),
+        )
+
+    def _is_active_duplicate(self, candidate: dict) -> bool:
+        candidate_key = self._cart_item_key(candidate)
+        for item in self._download_cart:
+            if item.get("status") not in ("queued", "downloading"):
+                continue
+            if self._cart_item_key(item) == candidate_key:
+                return True
+            if (
+                candidate.get("content_type") == "series"
+                and item.get("content_type") == "series"
+                and item.get("source_id") == candidate.get("source_id")
+                and item.get("series_id") == candidate.get("series_id")
+                and str(item.get("season")) == str(candidate.get("season"))
+                and item.get("episode_num") == candidate.get("episode_num")
+            ):
+                return True
+        return False
+
     async def add_to_cart(self, data: dict) -> dict:
-        """Add item(s) to the cart. Returns {"added": n, "items": [...]} or {"error": ...}."""
+        """Add one cart request through the serialized mutation path."""
+        async with self._cart_mutation_lock:
+            return await self._add_to_cart(data)
+
+    def _resolve_item_destination(self, content_type: str, requested: str | None = None) -> str:
+        """Validate and capture a cart item's relative destination."""
+        destination = (
+            self.config_service.get_download_destination(content_type)
+            if requested is None
+            else requested
+        )
+        normalized, _ = resolve_download_destination(
+            self.config_service.get_download_path(),
+            destination,
+        )
+        return normalized
+
+    async def _add_to_cart(self, data: dict, save: bool = True) -> dict:
+        """Build cart items from one request, optionally deferring persistence."""
         content_type = data.get("content_type", "vod")
         add_mode = data.get("add_mode", "episode")
         added_items: list[dict] = []
+        skipped_count = 0
 
-        # Resolve monitor canonical name for series items so the folder
-        # name is always the monitor title, even for manual additions.
-        _series_monitor_canon: str | None = None
+        try:
+            destination = self._resolve_item_destination(content_type, data.get("destination"))
+        except (TypeError, ValueError) as exc:
+            return {"error": str(exc)}
+
+        # Resolve monitor canonical name for series items so the folder name
+        # is always the monitor title, even for manual additions.
+        series_monitor_canon: str | None = None
         if content_type == "series" and self.monitor_service is not None:
-            # Prefer explicit canonical from the frontend (already resolved)
-            _series_monitor_canon = data.get("monitor_canonical") or None
-            if not _series_monitor_canon:
-                _src_id = data.get("source_id", "")
-                _ref_id = data.get("series_id", data.get("stream_id", ""))
-                if _src_id and _ref_id:
-                    _series_monitor_canon = self.monitor_service.resolve_canonical_name_by_source(_src_id, _ref_id)
-            # Final fallback: match by series_name against monitored canonical names
-            if not _series_monitor_canon:
-                _sname = data.get("series_name", "")
-                if _sname:
-                    _series_monitor_canon = self.monitor_service.resolve_canonical_name_by_series_name(_sname)
+            series_monitor_canon = data.get("monitor_canonical") or None
+            if not series_monitor_canon:
+                source_id = data.get("source_id", "")
+                series_id = data.get("series_id", data.get("stream_id", ""))
+                if source_id and series_id:
+                    series_monitor_canon = self.monitor_service.resolve_canonical_name_by_source(source_id, series_id)
+            if not series_monitor_canon and data.get("series_name"):
+                series_monitor_canon = self.monitor_service.resolve_canonical_name_by_series_name(data["series_name"])
 
-        if content_type == "series" and add_mode in ("series", "season"):
+        if content_type == "series" and add_mode in ("series", "season", "episodes"):
             series_id = data.get("series_id", data.get("stream_id", ""))
             source_id = data.get("source_id", "")
             series_name = data.get("series_name", data.get("name", ""))
             season_filter = data.get("season_num") if add_mode == "season" else None
+            season_filters = {str(value) for value in season_filter} if isinstance(season_filter, list) else None
+            episode_ids = {str(value) for value in data.get("episode_ids", [])}
             episodes = await self.xtream_service.fetch_series_episodes(source_id, series_id)
             if not episodes:
                 return {"error": "Could not fetch series episodes"}
+
             for ep in episodes:
-                if season_filter and str(ep["season"]) != str(season_filter):
+                if season_filters is not None and str(ep["season"]) not in season_filters:
                     continue
-                if any(
-                    i.get("source_id") == source_id
-                    and i.get("stream_id") == ep["stream_id"]
-                    and i.get("status") in ("queued", "downloading")
-                    for i in self._download_cart
-                ):
+                if season_filters is None and season_filter and str(ep["season"]) != str(season_filter):
+                    continue
+                if add_mode == "episodes" and str(ep.get("stream_id", "")) not in episode_ids:
+                    continue
+                candidate = {
+                    "content_type": "series",
+                    "source_id": source_id,
+                    "stream_id": ep["stream_id"],
+                    "series_id": series_id,
+                    "season": ep["season"],
+                    "episode_num": ep.get("episode_num", 0),
+                }
+                if self._is_active_duplicate(candidate):
+                    skipped_count += 1
                     continue
                 item = self._build_cart_item(
                     source_id=source_id,
                     stream_id=ep["stream_id"],
                     content_type="series",
                     name=ep.get("title", "") or f"Episode {ep['episode_num']}",
-                    series_name=ep.get("series_name", series_name),
+                    series_name=series_name or ep.get("series_name", ""),
                     series_id=series_id,
                     season=ep["season"],
                     episode_num=ep.get("episode_num", 0),
@@ -971,19 +1232,28 @@ class CartService:
                     icon=data.get("icon", ""),
                     group=data.get("group", ""),
                     container_extension=ep.get("container_extension", "mp4"),
-                    monitor_canonical=_series_monitor_canon,
+                    monitor_canonical=series_monitor_canon,
+                    destination=destination,
                 )
                 self._download_cart.append(item)
                 added_items.append(item)
+
+            if add_mode == "episodes":
+                resolved_ids = {str(ep.get("stream_id", "")) for ep in episodes}
+                missing_ids = sorted(episode_ids - resolved_ids)
+                if missing_ids:
+                    return {
+                        "error": "Some selected episodes are no longer available",
+                        "missing_episode_ids": missing_ids,
+                        "added": len(added_items),
+                        "skipped": skipped_count,
+                        "items": added_items,
+                    }
         else:
             source_id = data.get("source_id", "")
             stream_id = data.get("stream_id", "")
-            if any(
-                i.get("source_id") == source_id
-                and i.get("stream_id") == stream_id
-                and i.get("status") in ("queued", "downloading")
-                for i in self._download_cart
-            ):
+            candidate = {"content_type": content_type, "source_id": source_id, "stream_id": stream_id}
+            if self._is_active_duplicate(candidate):
                 return {"error": "Item already in cart"}
             item = self._build_cart_item(
                 source_id=source_id,
@@ -999,19 +1269,136 @@ class CartService:
                 icon=data.get("icon", ""),
                 group=data.get("group", ""),
                 container_extension=data.get("container_extension", "mp4"),
-                monitor_canonical=_series_monitor_canon,
+                monitor_canonical=series_monitor_canon,
+                destination=destination,
             )
             self._download_cart.append(item)
             added_items.append(item)
 
-        self.save_cart()
-        if getattr(self, 'log_service', None) and added_items:
-            names = [i.get("name", "Unknown") for i in added_items[:5]]
-            label = ", ".join(names)
-            if len(added_items) > 5:
-                label += f" +{len(added_items) - 5} more"
-            await getattr(self, 'log_service', None).log("cart", "info", f"Added {len(added_items)} item(s) to cart: {label}")
-        return {"added": len(added_items), "items": added_items}
+        if save:
+            self.save_cart()
+            if getattr(self, "log_service", None) and added_items:
+                names = [i.get("name", "Unknown") for i in added_items[:5]]
+                label = ", ".join(names)
+                if len(added_items) > 5:
+                    label += f" +{len(added_items) - 5} more"
+                await self.log_service.log("cart", "info", f"Added {len(added_items)} item(s) to cart: {label}")
+        return {"added": len(added_items), "skipped": skipped_count, "items": added_items}
+
+    async def add_to_cart_batch(self, selections: list[dict]) -> dict:
+        """Add mixed movie/series selections with one persistence operation."""
+        async with self._cart_mutation_lock:
+            added_items: list[dict] = []
+            skipped: list[dict] = []
+            errors: list[dict] = []
+
+            for index, selection in enumerate(selections):
+                content_type = selection.get("content_type")
+                if content_type not in ("vod", "series"):
+                    errors.append({"index": index, "reason": "Unsupported content type"})
+                    continue
+
+                data = dict(selection)
+                if content_type == "series":
+                    scope = selection.get("scope") or {"mode": "all"}
+                    mode = scope.get("mode", "all")
+                    if mode == "all":
+                        data["add_mode"] = "series"
+                    elif mode == "seasons":
+                        seasons = scope.get("seasons") or []
+                        if not seasons:
+                            errors.append({"index": index, "reason": "No seasons selected"})
+                            continue
+                        data["add_mode"] = "season"
+                        data["season_num"] = seasons
+                    elif mode == "episodes":
+                        episode_ids = scope.get("episode_ids") or []
+                        if not episode_ids:
+                            errors.append({"index": index, "reason": "No episodes selected"})
+                            continue
+                        data["add_mode"] = "episodes"
+                        data["episode_ids"] = episode_ids
+                    else:
+                        errors.append({"index": index, "reason": "Unsupported series scope"})
+                        continue
+
+                result = await self._add_to_cart(data, save=False)
+                added_items.extend(result.get("items", []))
+                if result.get("skipped"):
+                    skipped.append({
+                        "index": index,
+                        "name": selection.get("name") or selection.get("series_name", ""),
+                        "count": result["skipped"],
+                        "reason": "already_queued",
+                    })
+                if result.get("error") == "Item already in cart":
+                    skipped.append({
+                        "index": index,
+                        "name": selection.get("name") or selection.get("series_name", ""),
+                        "count": 1,
+                        "reason": "already_queued",
+                    })
+                elif result.get("error"):
+                    errors.append({
+                        "index": index,
+                        "name": selection.get("name") or selection.get("series_name", ""),
+                        "reason": result["error"],
+                        "missing_episode_ids": result.get("missing_episode_ids", []),
+                    })
+
+            if added_items:
+                self.save_cart()
+                if getattr(self, "log_service", None):
+                    await self.log_service.log("cart", "info", f"Added {len(added_items)} item(s) to cart in batch")
+            return {"added": len(added_items), "skipped": skipped, "errors": errors, "items": added_items}
+
+    async def update_item_destination(self, item_id: str, requested: str | None) -> dict:
+        """Update a non-active cart item's destination and persist it."""
+        async with self._cart_mutation_lock:
+            for item in self._download_cart:
+                if item.get("id") != item_id:
+                    continue
+                if item.get("status") == "downloading":
+                    return {"error": "Cannot change the destination of an active download"}
+                try:
+                    item["destination"] = self._resolve_item_destination(
+                        item.get("content_type", "vod"),
+                        requested,
+                    )
+                except (TypeError, ValueError) as exc:
+                    return {"error": str(exc)}
+                if item.get("status") != "completed":
+                    item["file_path"] = None
+                self.save_cart()
+                return {"item": item}
+            return {"error": "Item not found"}
+
+    async def reorder_queued_items(self, item_ids: list[str]) -> dict:
+        """Reorder queued items while leaving active and finished rows in place."""
+        async with self._cart_mutation_lock:
+            queued_items = [item for item in self._download_cart if item.get("status") == "queued"]
+            queued_ids = [str(item.get("id", "")) for item in queued_items]
+            requested_ids = [str(item_id) for item_id in item_ids]
+
+            if len(requested_ids) != len(set(requested_ids)):
+                return {"error": "Queued item order contains duplicates"}
+            if set(requested_ids) != set(queued_ids) or len(requested_ids) != len(queued_ids):
+                return {"error": "Queued item order is out of date; reload the cart"}
+
+            items_by_id = {str(item["id"]): item for item in queued_items}
+            reordered_queued = [items_by_id[item_id] for item_id in requested_ids]
+            queued_index = 0
+            reordered_cart = []
+            for item in self._download_cart:
+                if item.get("status") == "queued":
+                    reordered_cart.append(reordered_queued[queued_index])
+                    queued_index += 1
+                else:
+                    reordered_cart.append(item)
+
+            self._download_cart[:] = reordered_cart
+            self.save_cart()
+            return {"status": "ok", "item_ids": requested_ids}
 
     @staticmethod
     def _build_cart_item(**kwargs) -> dict:
@@ -1039,6 +1426,7 @@ class CartService:
             "monitor_canonical": kwargs.get("monitor_canonical"),
             "expected_size": kwargs.get("expected_size"),
             "retried_once": kwargs.get("retried_once", False),
+            "destination": kwargs.get("destination", ""),
         }
 
     def cancel_download(self) -> bool:
@@ -1790,6 +2178,7 @@ class CartService:
         item["file_size"] = dest_size
         item["file_path"] = file_path
         item.pop("temp_path", None)
+        self.record_download_history(item)
         self.save_cart()
         logger.info(f"[MOVE] ✅ Completed: '{item_name}' -> {file_path} ({dest_size / 1024 / 1024:.1f} MB)")
         return True
@@ -1906,11 +2295,9 @@ class CartService:
             f.write(nfo_content)
         logger.info(f"[META] Wrote episode NFO: {nfo_path}")
 
-        # Series-level metadata (tvshow.nfo + poster in the series root folder)
-        # Series root = <download_path>/Series/<SeriesName>/
-        series_name = sanitize_filename(item.get("series_name", item.get("name", "")))
-        base_path = self.config_service.get_download_path()
-        series_root = os.path.join(base_path, "Series", series_name)
+        # Series-level metadata belongs beside the season directories, so it
+        # follows a custom cart destination automatically.
+        series_root = os.path.dirname(os.path.dirname(file_path))
         tvshow_nfo_path = os.path.join(series_root, "tvshow.nfo")
 
         if not os.path.exists(tvshow_nfo_path):
@@ -1921,6 +2308,7 @@ class CartService:
                 series_info = await self.xtream_service.fetch_series_info(source_id, series_id)
             if series_info:
                 safe_makedirs(series_root)
+                series_name = sanitize_filename(item.get("series_name", item.get("name", "")))
                 tvshow_content = generate_tvshow_nfo(series_info, name=series_name)
                 with open(tvshow_nfo_path, "w", encoding="utf-8") as f:
                     f.write(tvshow_content)

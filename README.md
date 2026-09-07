@@ -442,6 +442,9 @@ If a download schedule is enabled, automatic monitoring downloads wait until the
 ### Output Layout
 
 Downloads are organized into media-library-friendly folders and include metadata.
+The library root is the configured `download_path`. Movie and series destinations
+are configurable subfolders below that root; the cart also supports a per-item
+folder override through the in-app folder picker.
 
 Example layout:
 
@@ -492,6 +495,8 @@ when the queue is resumed. A process restart clears the pause state normally.
 | --- | --- | --- |
 | `/api/options/download_path` | `GET`, `POST` | Get or set the final download directory |
 | `/api/options/download_temp_path` | `GET`, `POST` | Get or set the temp directory |
+| `/api/options/download_destinations` | `GET`, `POST` | Get or set relative movie and series destinations |
+| `/api/options/download_folders` | `GET`, `POST` | Browse or create folders below the download root |
 | `/api/options/test_path` | `POST` | Validate write access to a path |
 | `/api/options/download_throttle` | `GET`, `POST` | Get or set throttling, pause, and profile options |
 | `/api/options/player_profiles` | `GET` | List supported player profiles |
@@ -677,6 +682,7 @@ Important areas:
 - `options.telegram`: Telegram credentials and enablement
 - `options.jellyfin`: Jellyfin base URL, API key, and refresh triggers
 - `options.download_path` and `options.download_temp_path`: file-system destinations
+- `options.download_movie_destination` and `options.download_series_destination`: relative folders below `download_path`
 - `options.download_*`: throttling, pause, profile, notifications, and scheduling
 
 Example shape:
@@ -722,7 +728,9 @@ Example shape:
       "trigger_queue": true
     },
     "download_path": "/downloads",
-    "download_temp_path": "/downloads/.tmp"
+    "download_temp_path": "/downloads/.tmp",
+    "download_movie_destination": "Films",
+    "download_series_destination": "Series"
   }
 }
 ```

@@ -1297,6 +1297,7 @@ class CacheService:
         tmdb_search_id: str | None = None,
         category_id: str = "",
         category_mode: str = "manual",
+        download_status: str = "all",
     ) -> tuple[dict[str, int], dict[str, str]]:
         """Aggregate browse group/source metadata for the given scope."""
         self._ensure_denormalized(conn)
@@ -1343,6 +1344,18 @@ class CacheService:
             )
             tmdb_prefixed = f"tmdb:{tmdb_search_id}"
             params.extend([tmdb_search_id, tmdb_search_id, tmdb_prefixed, tmdb_prefixed])
+        if download_status in ("downloaded", "not_downloaded"):
+            conditions.append("s.content_type IN ('vod', 'series')")
+            exists = "EXISTS" if download_status == "downloaded" else "NOT EXISTS"
+            conditions.append(
+                f"""{exists} (
+                    SELECT 1 FROM download_history dh
+                    WHERE dh.source_id = s.source_id
+                      AND dh.content_type = s.content_type
+                      AND ((s.content_type = 'vod' AND dh.stream_id = s.stream_id)
+                           OR (s.content_type = 'series' AND dh.series_id = s.stream_id))
+                )"""
+            )
 
         where_clause = " AND ".join(conditions)
         rows = conn.execute(
@@ -1375,6 +1388,7 @@ class CacheService:
         group: str = "",
         category_id: str = "",
         category_mode: str = "manual",
+        download_status: str = "all",
     ) -> int:
         """Count rows for a baseline scope without touching wide columns."""
         params: list = []
@@ -1403,6 +1417,16 @@ class CacheService:
         if group:
             sql += " AND s.group_name = ?"
             params.append(group)
+        if download_status in ("downloaded", "not_downloaded"):
+            sql += " AND s.content_type IN ('vod', 'series')"
+            exists = "EXISTS" if download_status == "downloaded" else "NOT EXISTS"
+            sql += f""" AND {exists} (
+                SELECT 1 FROM download_history dh
+                WHERE dh.source_id = s.source_id
+                  AND dh.content_type = s.content_type
+                  AND ((s.content_type = 'vod' AND dh.stream_id = s.stream_id)
+                       OR (s.content_type = 'series' AND dh.series_id = s.stream_id))
+            )"""
         return conn.execute(sql, params).fetchone()["cnt"]
 
     def _get_scope_metadata(
@@ -1412,6 +1436,7 @@ class CacheService:
         group: str = "",
         category_id: str = "",
         category_mode: str = "manual",
+        download_status: str = "all",
     ) -> tuple[int, dict[str, int], dict[str, str]]:
         """Return baseline totals/facets via the metadata cache.
 
@@ -1422,7 +1447,8 @@ class CacheService:
         """
         types_key = tuple(sorted(content_types))
         category_key = f"{category_mode}:{category_id}" if category_id else ""
-        key = (types_key, source, group, category_key)
+        # Keep category_key as the final component for existing cache tooling.
+        key = (types_key, source, group, download_status, category_key)
         with self._group_counts_lock:
             entry = self._group_counts_cache.get(key)
             generation = self._group_counts_generation
@@ -1435,10 +1461,12 @@ class CacheService:
                 conn, content_types,
                 source=source, group=group,
                 category_id=category_id, category_mode=category_mode,
+                download_status=download_status,
             )
             group_counts, source_set = self._query_group_counts(
                 conn, content_types,
                 source=source, category_id=category_id, category_mode=category_mode,
+                download_status=download_status,
             )
         finally:
             conn.close()
@@ -1545,6 +1573,7 @@ class CacheService:
         extra_where_sql: str = "",
         extra_where_params: list | None = None,
         _slim: bool = False,
+        download_status: str = "all",
     ) -> dict:
         """Query streams directly from SQLite with filters, sort and pagination.
 
@@ -1667,6 +1696,18 @@ class CacheService:
                 if min_rating > 0:
                     conditions.append("s.rating >= ?")
                     params.append(min_rating)
+                if download_status in ("downloaded", "not_downloaded"):
+                    conditions.append("s.content_type IN ('vod', 'series')")
+                    exists = "EXISTS" if download_status == "downloaded" else "NOT EXISTS"
+                    conditions.append(
+                        f"""{exists} (
+                            SELECT 1 FROM download_history dh
+                            WHERE dh.source_id = s.source_id
+                              AND dh.content_type = s.content_type
+                              AND ((s.content_type = 'vod' AND dh.stream_id = s.stream_id)
+                                   OR (s.content_type = 'series' AND dh.series_id = s.stream_id))
+                        )"""
+                    )
                 if extra_where_sql:
                     conditions.append(f"({extra_where_sql})")
                     params.extend(extra_where_params or [])
@@ -1717,6 +1758,7 @@ class CacheService:
                     group=group,
                     category_id=category_id,
                     category_mode=category_mode,
+                    download_status=download_status,
                 )
                 _, data_sql, qparams = build_scope_queries("")
                 rows = conn.execute(data_sql, qparams + limit_params).fetchall()
@@ -1731,6 +1773,7 @@ class CacheService:
                         tuple(sorted(content_types)),
                         source,
                         group,
+                        download_status,
                         hashlib.md5(
                             (extra_where_sql + "\x00" + repr(sorted(map(str, extra_where_params or [])))).encode()
                         ).hexdigest(),
@@ -1773,6 +1816,7 @@ class CacheService:
                         group=group,
                         category_id=category_id,
                         category_mode=category_mode,
+                        download_status=download_status,
                     )
                 else:
                     group_counts, source_set = self._query_group_counts(
@@ -1784,6 +1828,7 @@ class CacheService:
                         tmdb_search_id=tmdb_search_id,
                         category_id=category_id,
                         category_mode=category_mode,
+                        download_status=download_status,
                     )
 
             # Resolve source names from in-memory config

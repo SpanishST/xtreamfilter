@@ -58,6 +58,11 @@ async def cart_page(request: Request):
     return templates.TemplateResponse(request, "cart.html")
 
 
+@router.get("/history", response_class=HTMLResponse)
+async def history_page(request: Request):
+    return templates.TemplateResponse(request, "history.html")
+
+
 @router.get("/monitor", response_class=HTMLResponse)
 async def monitor_page(request: Request):
     return templates.TemplateResponse(request, "monitor.html")

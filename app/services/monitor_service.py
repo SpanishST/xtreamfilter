@@ -80,6 +80,11 @@ class MonitorService:
         self._check_in_progress: bool = False
         self.log_service = None  # set after init via attribute binding
 
+    def _download_destination(self, content_type: str) -> str | None:
+        """Capture a destination when supported by the configured service."""
+        getter = getattr(self._cfg, "get_download_destination", None)
+        return getter(content_type) if callable(getter) else None
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -858,6 +863,7 @@ class MonitorService:
                     "error": None,
                     "file_path": None,
                     "file_size": None,
+                    "destination": self._download_destination("series"),
                 }
 
                 # Resolve source name for logging
@@ -1049,6 +1055,7 @@ class MonitorService:
                     "error": None,
                     "file_path": None,
                     "file_size": None,
+                    "destination": self._download_destination("series"),
                 }
 
                 filepath = self.cart_service.build_download_filepath(cart_item)
@@ -1546,6 +1553,7 @@ class MonitorService:
             "error": None,
             "file_path": None,
             "file_size": None,
+            "destination": self._download_destination("vod"),
         }
 
         if should_download:

@@ -155,6 +155,101 @@ def test_options_get(client):
     assert r.status_code == 200
 
 
+def test_download_destinations_are_root_scoped_and_persisted(client, tmp_path):
+    cfg = client.app.state.config_service
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    cfg.config["options"]["download_path"] = str(library_root)
+    cfg.save()
+
+    response = client.get("/api/options/download_destinations")
+    assert response.status_code == 200
+    assert response.json()["movie"] == "Films"
+    assert response.json()["series"] == "Series"
+
+    response = client.post(
+        "/api/options/download_destinations",
+        json={"movie_destination": "Movies", "series_destination": "Television/Series"},
+    )
+    assert response.status_code == 200
+    assert response.json()["movie"] == "Movies"
+    assert response.json()["series"] == "Television/Series"
+
+    (library_root / "Movies").mkdir()
+    response = client.get("/api/options/download_folders")
+    assert response.status_code == 200
+    assert response.json()["folders"][0]["path"] == "Movies"
+
+    response = client.post("/api/options/download_folders", json={"path": "Kids/Movies"})
+    assert response.status_code == 200
+    assert response.json()["path"] == "Kids/Movies"
+    assert (library_root / "Kids" / "Movies").is_dir()
+
+    assert client.get("/api/options/download_folders", params={"path": "../outside"}).status_code == 400
+    assert client.post(
+        "/api/options/download_destinations",
+        json={"movie_destination": "/outside"},
+    ).status_code == 400
+
+
+def test_cart_items_capture_and_update_destination(client, tmp_path):
+    cfg = client.app.state.config_service
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    cfg.config["options"]["download_path"] = str(library_root)
+    cfg.config["options"]["download_movie_destination"] = "Movies"
+    cfg.save()
+
+    response = client.post(
+        "/api/cart",
+        json={
+            "source_id": "source-1",
+            "stream_id": "movie-1",
+            "content_type": "vod",
+            "name": "Test Movie",
+            "container_extension": "mp4",
+        },
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["destination"] == "Movies"
+
+    cart = client.app.state.cart_service
+    assert cart.build_download_filepath(item) == str(library_root / "Movies" / "Test Movie" / "Test Movie.mp4")
+
+    series_item = {
+        "content_type": "series",
+        "destination": "Television/Series",
+        "name": "Pilot",
+        "series_name": "Test Show",
+        "season": "1",
+        "episode_num": 1,
+        "episode_title": "Pilot",
+        "container_extension": "mkv",
+    }
+    assert cart.build_download_filepath(series_item) == str(
+        library_root / "Television" / "Series" / "Test Show" / "S01" / "Test Show S01E01.mkv"
+    )
+
+    response = client.patch(
+        f"/api/cart/{item['id']}/destination",
+        json={"destination": "Kids/Movies"},
+    )
+    assert response.status_code == 200
+    assert response.json()["item"]["destination"] == "Kids/Movies"
+    assert cart.build_download_filepath(response.json()["item"]) == str(
+        library_root / "Kids" / "Movies" / "Test Movie" / "Test Movie.mp4"
+    )
+    cart.load_cart()
+    assert cart._download_cart[0]["destination"] == "Kids/Movies"
+
+    cart._download_cart[0]["status"] = "downloading"
+    assert client.patch(
+        f"/api/cart/{item['id']}/destination",
+        json={"destination": "Other"},
+    ).status_code == 400
+
+
 def test_options_proxy_toggle(client):
     r = client.post("/api/options/proxy", json={"enabled": False})
     assert r.status_code == 200
@@ -348,6 +443,16 @@ def test_move_route_reuses_finalize_completed_download(client, monkeypatch):
     assert finalized == ["move-1"]
     assert cart._download_cart[0]["status"] == "completed"
     assert os.path.exists(cart._download_cart[0]["file_path"])
+    conn = db_connect(os.path.join(client.app.state.config_service.data_dir, DB_NAME))
+    try:
+        history = conn.execute(
+            "SELECT cart_item_id, file_path FROM download_history WHERE cart_item_id = ?",
+            ("move-1",),
+        ).fetchone()
+        assert history["cart_item_id"] == "move-1"
+        assert history["file_path"] == cart._download_cart[0]["file_path"]
+    finally:
+        conn.close()
 
 
 def test_queue_complete_helper_triggers_jellyfin_queue(client, monkeypatch):
@@ -706,6 +811,140 @@ def test_cart_pause_and_resume(client):
     assert client.get("/api/cart/status").json()["queue_paused"] is False
 
 
+def test_cart_reorder_persists_queued_order_and_keeps_nonqueued_rows_fixed(client):
+    cart = client.app.state.cart_service
+    cart.cart[:] = [
+        {"id": "queued-1", "stream_id": "1", "source_id": "source-1", "content_type": "vod", "name": "One", "status": "queued", "progress": 0},
+        {"id": "active", "stream_id": "2", "source_id": "source-1", "content_type": "vod", "name": "Active", "status": "downloading", "progress": 50},
+        {"id": "queued-2", "stream_id": "3", "source_id": "source-1", "content_type": "vod", "name": "Two", "status": "queued", "progress": 0},
+        {"id": "finished", "stream_id": "4", "source_id": "source-1", "content_type": "vod", "name": "Finished", "status": "completed", "progress": 100},
+    ]
+    cart.save_cart()
+
+    response = client.post("/api/cart/reorder", json={"item_ids": ["queued-2", "queued-1"]})
+
+    assert response.status_code == 200
+    assert [item["id"] for item in cart.cart] == ["queued-2", "active", "queued-1", "finished"]
+
+    cart.load_cart()
+    assert [item["id"] for item in cart.cart] == ["queued-2", "active", "queued-1", "finished"]
+
+
+def test_cart_reorder_rejects_stale_or_invalid_order(client):
+    cart = client.app.state.cart_service
+    cart.cart[:] = [
+        {"id": "queued-1", "stream_id": "1", "source_id": "source-1", "content_type": "vod", "name": "One", "status": "queued", "progress": 0},
+        {"id": "queued-2", "stream_id": "2", "source_id": "source-1", "content_type": "vod", "name": "Two", "status": "queued", "progress": 0},
+    ]
+    cart.save_cart()
+
+    response = client.post("/api/cart/reorder", json={"item_ids": ["queued-1", "queued-1"]})
+
+    assert response.status_code == 409
+    assert "duplicates" in response.json()["error"]
+
+
+def test_cart_batch_adds_movies_from_multiple_sources_and_reports_duplicates(client):
+    selections = [
+        {
+            "content_type": "vod",
+            "source_id": "source-1",
+            "stream_id": "movie-1",
+            "name": "Movie One",
+        },
+        {
+            "content_type": "vod",
+            "source_id": "source-2",
+            "stream_id": "movie-1",
+            "name": "Movie One (backup)",
+        },
+        {
+            "content_type": "vod",
+            "source_id": "source-1",
+            "stream_id": "movie-1",
+            "name": "Movie One duplicate",
+        },
+    ]
+
+    response = client.post("/api/cart/batch", json={"selections": selections})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["added"] == 2
+    assert data["errors"] == []
+    assert data["skipped"] == [{
+        "index": 2,
+        "name": "Movie One duplicate",
+        "count": 1,
+        "reason": "already_queued",
+    }]
+    assert {(item["source_id"], item["stream_id"]) for item in data["items"]} == {
+        ("source-1", "movie-1"),
+        ("source-2", "movie-1"),
+    }
+
+
+def test_cart_batch_resolves_series_scope_server_side(client, monkeypatch):
+    async def fetch_series_episodes(source_id, series_id):
+        assert source_id == "source-1"
+        assert series_id == "series-1"
+        return [
+            {
+                "stream_id": "episode-1",
+                "season": "1",
+                "episode_num": 1,
+                "title": "Pilot",
+                "container_extension": "mkv",
+                "info": {"duration": 42, "codec": "h264"},
+                "series_name": "Provider Series",
+            },
+            {
+                "stream_id": "episode-2",
+                "season": "1",
+                "episode_num": 2,
+                "title": "Second",
+                "container_extension": "mp4",
+                "info": {},
+                "series_name": "Provider Series",
+            },
+            {
+                "stream_id": "episode-3",
+                "season": "2",
+                "episode_num": 1,
+                "title": "Return",
+                "container_extension": "mp4",
+                "info": {},
+                "series_name": "Provider Series",
+            },
+        ]
+
+    monkeypatch.setattr(
+        client.app.state.xtream_service,
+        "fetch_series_episodes",
+        fetch_series_episodes,
+    )
+
+    response = client.post("/api/cart/batch", json={"selections": [{
+        "content_type": "series",
+        "source_id": "source-1",
+        "stream_id": "series-1",
+        "series_id": "series-1",
+        "name": "Example Series",
+        "series_name": "Example Series",
+        "scope": {"mode": "seasons", "seasons": ["1"]},
+    }]})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["added"] == 2
+    assert data["errors"] == []
+    assert {(item["stream_id"], item["season"], item["episode_num"]) for item in data["items"]} == {
+        ("episode-1", "1", 1),
+        ("episode-2", "1", 2),
+    }
+    assert data["items"][0]["episode_info"] == {"duration": 42}
+
+
 # -------------------------------------------------------------------
 # Monitor API
 # -------------------------------------------------------------------
@@ -778,17 +1017,29 @@ def test_index_page(client):
 def test_browse_page(client):
     r = client.get("/browse")
     assert r.status_code == 200
+    assert "download-history-badge" in r.text
+    assert "/api/download-history/item" in r.text
 
 
 def test_cart_page(client):
     r = client.get("/cart")
     assert r.status_code == 200
     assert "Jellyfin Refresh" not in r.text
+    assert "/api/cart/reorder" in r.text
+    assert "drag-handle" in r.text
 
 
 def test_monitor_page(client):
     r = client.get("/monitor")
     assert r.status_code == 200
+
+
+def test_history_page(client):
+    r = client.get("/history")
+    assert r.status_code == 200
+    assert "Download History" in r.text
+    assert 'id="history-pagination"' in r.text
+    assert "goToHistoryPage" in r.text
 
 
 # -------------------------------------------------------------------

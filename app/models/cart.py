@@ -35,12 +35,14 @@ class CartItem(BaseModel):
     group: str = ""
     container_extension: str = "mp4"
     added_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+    queue_order: Optional[int] = None
     status: str = "queued"
     progress: float = 0
     error: Optional[str] = None
     file_path: Optional[str] = None
     file_size: Optional[int] = None
     temp_path: Optional[str] = None
+    destination: str = ""
 
 
 class CartData(BaseModel):

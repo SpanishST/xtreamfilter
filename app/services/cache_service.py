@@ -33,6 +33,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _fts_literal_query(search: str) -> str:
+    """Build an FTS query that treats each user-supplied term literally."""
+    return " ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in search.split())
+
+
 REFRESH_STEP_DEFINITIONS: list[tuple[str, str, str]] = [
     ("live_categories", "Live categories", "get_live_categories"),
     ("vod_categories", "VOD categories", "get_vod_categories"),
@@ -1589,6 +1595,7 @@ class CacheService:
         current_time = int(time.time())
         news_cutoff = current_time - (news_days * 86400) if news_days > 0 else 0
         added_cutoff = current_time - (max_added_days * 86400) if max_added_days > 0 else 0
+        search = search.strip()
         content_types = [content_type] if isinstance(content_type, str) else list(content_type)
         if not content_types:
             return {
@@ -1686,7 +1693,7 @@ class CacheService:
                         conditions.append(
                             "s.rowid IN (SELECT rowid FROM streams_fts WHERE streams_fts MATCH ?)"
                         )
-                        params.append(search.replace('"', '""'))
+                        params.append(_fts_literal_query(search))
                     elif search_mode == "group":
                         conditions.append("lower(s.group_name) LIKE lower(?)")
                         params.append(f"%{search}%")

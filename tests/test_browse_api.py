@@ -292,6 +292,23 @@ def test_browse_search_case_insensitive(client, data_dir):
     assert data["total"] == 1
 
 
+def test_browse_search_series_name_with_punctuation(client, data_dir):
+    _seed_streams(data_dir, [
+        {"series_id": "1", "name": "S.W.A.T", "category_id": "10"},
+        {"series_id": "2", "name": "Another Series", "category_id": "10"},
+    ], "series")
+
+    cache = client.app.state.cache_service
+    cache.load_cache_from_disk()
+
+    response = client.get("/api/browse?type=series&search=S.W.A.T")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert data["items"][0]["name"] == "S.W.A.T"
+
+
 def test_browse_group_filter(client, data_dir):
     _seed_categories(data_dir, [
         {"category_id": "10", "category_name": "News"},

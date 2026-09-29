@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from app.services.jellyfin_service import JellyfinService
     from app.services.monitor_service import MonitorService
     from app.services.notification_service import NotificationService
+    from app.services.provider_gate import ProviderGate
     from app.services.xtream_service import XtreamService
 
 logger = logging.getLogger(__name__)
@@ -466,6 +467,8 @@ async def download_poster(url: str, dest_path: str) -> bool:
 class CartService:
     """Download cart with FIFO queue and background worker."""
 
+    provider_gate: ProviderGate | None = None
+
     def __init__(
         self,
         config_service: "ConfigService",
@@ -573,6 +576,8 @@ class CartService:
         self._discard_transient_item_metadata(self._download_current_item)
         self._download_current_item = None
         self._download_cancel_event = None
+        if self.provider_gate is not None:
+            self.provider_gate.end_transfer()
         try:
             task.result()
         except asyncio.CancelledError:
@@ -588,6 +593,17 @@ class CartService:
         """
         if self._download_task is not None and not self._download_task.done():
             return True
+        return any(item.get("status") == "downloading" for item in self._download_cart)
+
+    def is_download_transferring(self) -> bool:
+        """Return True only while an item is actively transferring bytes.
+
+        Unlike :meth:`is_download_active` this turns False between queued
+        items (and while the worker is idle/aborted), so background refresh
+        work can slip into those gaps instead of waiting for the whole queue.
+        """
+        if self.provider_gate is not None:
+            return self.provider_gate.is_transferring()
         return any(item.get("status") == "downloading" for item in self._download_cart)
 
     # ------------------------------------------------------------------
@@ -1494,6 +1510,10 @@ class CartService:
         self._download_cancel_event = asyncio.Event()
 
         while True:
+            if self.provider_gate is not None:
+                # Release the previous item's claim so background refresh work
+                # can use the upstream between items.
+                self.provider_gate.end_transfer()
             if self._queue_paused and not await self._wait_for_queue_resume():
                 break
             queued = [item for item in self._download_cart if item.get("status") == "queued"]
@@ -1516,6 +1536,11 @@ class CartService:
                 "paused": False,
                 "pause_remaining": 0,
             }
+            if self.provider_gate is not None:
+                # Handshake: wait for in-flight background fetches to finish so
+                # the stream never starts mid-fetch on a single-connection
+                # provider, then hold the claim for this item.
+                await self.provider_gate.begin_transfer()
             item["status"] = "downloading"
             item["progress"] = 0
             self.save_cart()
@@ -1622,6 +1647,10 @@ class CartService:
                                 f"Retry {attempt}/{max_retries}: {item.get('name', 'Unknown')}",
                                 {"attempt": attempt, "max_retries": max_retries, "delay_seconds": delay,
                                  "downloaded": downloaded, "expected": total})
+                        if self.provider_gate is not None:
+                            # Backoff sleeps with no stream open — let background
+                            # refresh work use the upstream meanwhile.
+                            self.provider_gate.end_transfer()
                         remaining = delay
                         while remaining > 0:
                             if self._download_cancel_event.is_set():
@@ -1640,6 +1669,8 @@ class CartService:
                         self._download_progress["paused"] = False
                         self._download_progress["pause_remaining"] = 0
                         item["error"] = None
+                        if self.provider_gate is not None:
+                            await self.provider_gate.begin_transfer()
 
                     while not download_complete and not download_failed:
                         request_headers = dict(player_headers)
@@ -1806,6 +1837,10 @@ class CartService:
                                     self._download_progress["speed"] = 0
                                     self._download_progress["eta_speed"] = 0
                                     self.save_cart()
+                                    if self.provider_gate is not None:
+                                        # Queue is user-paused: no bytes flow, let
+                                        # background refresh work use the upstream.
+                                        self.provider_gate.end_transfer()
                                     if not await self._wait_for_queue_resume():
                                         item["status"] = "cancelled"
                                         item["error"] = "Cancelled by user"
@@ -1822,6 +1857,8 @@ class CartService:
                                         self._download_current_item = None
                                         self._download_cancel_event.clear()
                                         return
+                                    if self.provider_gate is not None:
+                                        await self.provider_gate.begin_transfer()
                                     continue
                                 if should_reconnect:
                                     reconnect_count += 1
@@ -1965,6 +2002,10 @@ class CartService:
                             )
 
                 if pause_interval > 0 and pause_duration > 0:
+                    if self.provider_gate is not None:
+                        # Inter-item throttle sleep: stream is done, release the
+                        # claim so background refresh can use the upstream.
+                        self.provider_gate.end_transfer()
                     self._download_progress["paused"] = True
                     self._download_progress["pause_remaining"] = pause_duration
                     remaining = pause_duration

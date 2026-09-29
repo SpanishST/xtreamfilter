@@ -23,6 +23,7 @@ from app.database import (
     db_connect,
 )
 from app.services.filter_service import register_xf_norm
+from app.services.provider_gate import maybe_background_fetch
 
 if TYPE_CHECKING:
     from app.services.cart_service import CartService
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from app.services.http_client import HttpClientService
     from app.services.log_service import LogService
     from app.services.notification_service import NotificationService
+    from app.services.provider_gate import ProviderGate
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,8 @@ REFRESH_SOURCE_KEYS = tuple(step[0] for step in REFRESH_STEP_DEFINITIONS)
 
 class CacheService:
     """Manages the in-memory API cache, disk persistence, and stream-source mapping."""
+
+    provider_gate: ProviderGate | None = None
 
     def __init__(
         self,
@@ -2023,7 +2027,8 @@ class CacheService:
                 if http_client is None:
                     raise RuntimeError("HTTP client is not configured")
                 client = await http_client.get_client()
-                response = await client.get(url, params=params)
+                async with maybe_background_fetch(self.provider_gate):
+                    response = await client.get(url, params=params)
                 elapsed_ms = int((time.time() - start_time) * 1000)
                 if response.status_code == 200:
                     try:
@@ -2355,11 +2360,13 @@ class CacheService:
                 except (ValueError, TypeError):
                     pass
 
-        # If a download is currently active in the cart, delay the refresh
+        # If a download is currently transferring in the cart, delay the refresh
         # until it completes so we don't compete with it for upstream
-        # bandwidth / rate limits. We keep `in_progress=True` so concurrent
-        # refresh triggers coalesce into a single waiter.
-        if self.cart_service is not None and self.cart_service.is_download_active():
+        # bandwidth / rate limits. Only an active transfer counts — gaps between
+        # queued items let the refresh slip in (per-fetch gating then handles
+        # downloads that start mid-refresh). We keep `in_progress=True` so
+        # concurrent refresh triggers coalesce into a single waiter.
+        if self.cart_service is not None and self.cart_service.is_download_transferring():
             logger.info("Cache refresh delayed: download in progress in cart")
             await self._log_activity("warning", "Cache refresh delayed — download in progress")
             wait_started_at = datetime.now(timezone.utc).isoformat()
@@ -2392,7 +2399,7 @@ class CacheService:
             waited = 0
             last_heartbeat = 0
             try:
-                while self.cart_service.is_download_active():
+                while self.cart_service.is_download_transferring():
                     if waited >= max_wait_seconds:
                         logger.warning(
                             "Cache refresh waited %ss for downloads to finish; aborting",

@@ -48,6 +48,7 @@ from app.services.log_service import LogService
 from app.services.m3u_service import M3uService
 from app.services.monitor_service import MonitorService
 from app.services.notification_service import NotificationService
+from app.services.provider_gate import ProviderGate
 from app.services.xtream_service import XtreamService
 
 logging.basicConfig(
@@ -187,10 +188,19 @@ async def lifespan(app: FastAPI):
     cart = CartService(cfg, http, notif, xtream, jellyfin)
     monitor = MonitorService(cfg, cache, xtream, notif, cart)
     m3u = M3uService(cfg, cache)
+    gate = ProviderGate()
 
     cache.log_service = log_svc
     cart.log_service = log_svc
     monitor.log_service = log_svc
+
+    # Bind the shared upstream gate: background fetches (cache/EPG/monitor)
+    # defer to an active download stream, and download starts wait for
+    # in-flight fetches — single-connection providers can't take both.
+    cache.provider_gate = gate
+    cart.provider_gate = gate
+    epg_svc.provider_gate = gate
+    monitor.provider_gate = gate
 
     # --- attach to app.state for DI ---
     app.state.config_service = cfg
@@ -203,6 +213,7 @@ async def lifespan(app: FastAPI):
     app.state.jellyfin_service = jellyfin
     app.state.category_service = cat
     app.state.cart_service = cart
+    app.state.provider_gate = gate
     app.state.monitor_service = monitor
     app.state.m3u_service = m3u
     app.state.log_service = log_svc

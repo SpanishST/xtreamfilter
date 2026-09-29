@@ -152,3 +152,82 @@ async def test_pause_active_download_resumes_from_partial_file(tmp_path, monkeyp
     assert _AsyncClient.requests[1]["Range"] == "bytes=3-"
     assert (tmp_path / "destination.mp4").read_bytes() == b"abcdef"
     assert item["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_download_claims_provider_gate_while_streaming(tmp_path, monkeypatch):
+    from app.services.provider_gate import ProviderGate
+
+    _AsyncClient.requests = []
+    _AsyncClient.first_chunk_seen = asyncio.Event()
+    _AsyncClient.allow_second_chunk = asyncio.Event()
+    monkeypatch.setattr(cart_module.httpx, "AsyncClient", _AsyncClient)
+
+    config = _Config(tmp_path)
+    cart = CartService(config, None, None, None)
+    gate = ProviderGate(poll_interval=0.01)
+    cart.provider_gate = gate
+    item = {
+        "id": "item-1",
+        "stream_id": "stream-1",
+        "source_id": "source-1",
+        "content_type": "vod",
+        "name": "Test video",
+        "container_extension": "mp4",
+        "status": "queued",
+        "progress": 0,
+        "error": None,
+    }
+    cart.cart.append(item)
+    cart.save_cart = lambda: None
+    cart.build_upstream_url = lambda _: "https://provider.example/video"
+    cart.build_download_filepath = lambda _: str(tmp_path / "destination.mp4")
+
+    async def enrich(_):
+        pass
+
+    async def move(item_to_move, temp_path, file_path):
+        os.replace(temp_path, file_path)
+        item_to_move["status"] = "completed"
+        item_to_move["file_size"] = os.path.getsize(file_path)
+        return True
+
+    async def finalize(_):
+        pass
+
+    async def queue_complete():
+        pass
+
+    cart._enrich_item_name_from_metadata = enrich
+    cart._move_temp_to_destination = move
+    cart._finalize_completed_download = finalize
+    cart._handle_download_queue_complete = queue_complete
+
+    assert cart._try_start_worker() is True
+    task = cart.download_task
+
+    await asyncio.wait_for(_AsyncClient.first_chunk_seen.wait(), timeout=1)
+    assert gate.is_transferring()
+    assert cart.is_download_transferring()
+
+    # A background fetch must defer while the stream is running.
+    from app.services.provider_gate import maybe_background_fetch
+
+    fetch_ran = asyncio.Event()
+
+    async def fetcher():
+        async with maybe_background_fetch(gate):
+            fetch_ran.set()
+
+    fetch_task = asyncio.create_task(fetcher())
+    await asyncio.sleep(0.05)
+    assert not fetch_ran.is_set()
+
+    _AsyncClient.allow_second_chunk.set()
+    await asyncio.wait_for(asyncio.shield(task), timeout=1)
+
+    # Claim released once the item completes; deferred fetch now runs.
+    assert not gate.is_transferring()
+    assert not cart.is_download_transferring()
+    await asyncio.wait_for(fetch_task, timeout=1)
+    assert fetch_ran.is_set()

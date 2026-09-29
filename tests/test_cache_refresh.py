@@ -435,3 +435,94 @@ def test_cancel_refresh_does_not_publish_partial_cache_or_run_callback(tmp_path)
     assert callback_calls == []
     assert cache._api_cache["sources"]["src-1"]["vod_streams"] == old_vod_streams
     assert cache.load_refresh_progress()["status"] == "cancelled"
+
+
+class _StubResponse:
+    status_code = 200
+
+    def json(self):
+        return [{"category_id": "1", "category_name": "A"}]
+
+
+class _StubClient:
+    def __init__(self):
+        self.calls = 0
+
+    async def get(self, url, params=None):
+        self.calls += 1
+        return _StubResponse()
+
+
+class _StubHttpClient:
+    def __init__(self, client):
+        self._client = client
+
+    async def get_client(self):
+        return self._client
+
+
+def test_fetch_from_upstream_defers_to_active_transfer(tmp_path):
+    from app.services.provider_gate import ProviderGate
+
+    cache = _build_cache_service(tmp_path)
+    gate = ProviderGate(poll_interval=0.01)
+    cache.provider_gate = gate
+    client = _StubClient()
+    cache.http_client = _StubHttpClient(client)
+
+    async def exercise():
+        await gate.begin_transfer()
+        task = asyncio.create_task(
+            cache.fetch_from_upstream("http://provider.test", "user", "pass", "get_live_categories")
+        )
+        await asyncio.sleep(0.05)
+        assert client.calls == 0  # fetch is parked while the download streams
+        assert not task.done()
+        gate.end_transfer()
+        return await asyncio.wait_for(task, timeout=1)
+
+    result = asyncio.run(exercise())
+
+    assert result["ok"] is True
+    assert client.calls == 1
+    assert not gate.has_background_fetches()
+
+
+def test_transfer_handshake_waits_for_inflight_fetch(tmp_path):
+    from app.services.provider_gate import ProviderGate
+
+    cache = _build_cache_service(tmp_path)
+    gate = ProviderGate(poll_interval=0.01)
+    cache.provider_gate = gate
+    client = _StubClient()
+    cache.http_client = _StubHttpClient(client)
+
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+
+    class _BlockingClient(_StubClient):
+        async def get(self, url, params=None):
+            fetch_started.set()
+            await release_fetch.wait()
+            return await super().get(url, params=params)
+
+    cache.http_client = _StubHttpClient(_BlockingClient())
+
+    async def exercise():
+        task = asyncio.create_task(
+            cache.fetch_from_upstream("http://provider.test", "user", "pass", "get_live_categories")
+        )
+        await fetch_started.wait()
+        transfer = asyncio.create_task(gate.begin_transfer())
+        await asyncio.sleep(0.05)
+        assert not gate.is_transferring()  # download must not start mid-fetch
+        assert not transfer.done()
+        release_fetch.set()
+        await asyncio.wait_for(transfer, timeout=1)
+        assert gate.is_transferring()
+        gate.end_transfer()
+        return await asyncio.wait_for(task, timeout=1)
+
+    result = asyncio.run(exercise())
+
+    assert result["ok"] is True

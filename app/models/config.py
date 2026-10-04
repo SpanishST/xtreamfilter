@@ -113,6 +113,7 @@ class Options(BaseModel):
     proxy_streams: bool = True
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     jellyfin: JellyfinConfig = Field(default_factory=JellyfinConfig)
+    webhooks: list[dict] = Field(default_factory=list)
     download_path: str = "/downloads"
     download_temp_path: str = "/downloads/.tmp"
     download_movie_destination: str = "Films"

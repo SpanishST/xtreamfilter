@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from app.services.log_service import LogService
     from app.services.notification_service import NotificationService
     from app.services.provider_gate import ProviderGate
+    from app.services.webhook_service import WebhookService
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +63,12 @@ class CacheService:
         config_service: "ConfigService",
         http_client: "HttpClientService | None" = None,
         notification_service: "NotificationService | None" = None,
+        webhook_service: WebhookService | None = None,
     ):
         self.config_service = config_service
         self.http_client = http_client
         self.notification_service = notification_service
+        self.webhook_service = webhook_service
         self.cart_service: "CartService | None" = None
         self.log_service: "LogService | None" = None  # set after init via attribute binding
         self.data_dir = config_service.data_dir
@@ -117,6 +120,14 @@ class CacheService:
         log_service = self.log_service
         if log_service is not None:
             await log_service.log("cache", level, message, details)
+
+    async def _emit_webhook(self, event_name: str, data: dict) -> None:
+        if self.webhook_service is None:
+            return
+        try:
+            await self.webhook_service.publish_event(event_name, data)
+        except Exception:
+            logger.exception("Could not publish webhook event %s", event_name)
 
     @staticmethod
     def _empty_source_cache() -> dict[str, Any]:
@@ -2408,6 +2419,10 @@ class CacheService:
                         await self._log_activity(
                             "error", f"Cache refresh aborted — waited {waited}s for downloads to finish"
                         )
+                        await self._emit_webhook(
+                            "cache.refresh.failed",
+                            {"status": "failed", "error": "Cache refresh aborted: download still in progress", "waited_seconds": waited},
+                        )
                         async with self._cache_lock:
                             self._api_cache["refresh_in_progress"] = False
                         self.save_refresh_progress(
@@ -2452,6 +2467,10 @@ class CacheService:
                         )
             except asyncio.CancelledError:
                 await self._persist_cancelled_progress("Cancelled while waiting for downloads")
+                await self._emit_webhook(
+                    "cache.refresh.cancelled",
+                    {"status": "cancelled", "started_at": wait_started_at, "error": "Cancelled while waiting for downloads"},
+                )
                 raise
 
             logger.info("Download finished after %ss, resuming cache refresh", waited)
@@ -2481,6 +2500,10 @@ class CacheService:
         if not enabled_sources:
             logger.info("Cannot refresh - no valid sources configured")
             await self._log_activity("warning", "Cache refresh skipped — no valid sources configured")
+            await self._emit_webhook(
+                "cache.refresh.failed",
+                {"status": "failed", "error": "No valid sources configured", "total_sources": 0},
+            )
             async with self._cache_lock:
                 self._api_cache["refresh_in_progress"] = False
             self.save_refresh_progress(
@@ -2545,6 +2568,10 @@ class CacheService:
 
         logger.info(f"Starting full refresh at {datetime.now(timezone.utc).isoformat()} for {total_sources} source(s)")
         await self._log_activity("info", f"Cache refresh started ({total_sources} source(s))")
+        await self._emit_webhook(
+            "cache.refresh.started",
+            {"total_sources": total_sources, "started_at": progress.get("started_at")},
+        )
 
         new_sources_cache: dict[str, dict] = {}
         any_source_updated = False
@@ -2682,6 +2709,22 @@ class CacheService:
             if not cancelled and final_status == "failed" and not progress.get("last_error"):
                 progress["last_error"] = "Refresh failed for every source"
             await self.save_refresh_progress_async(progress, force=True)
+            event_name = (
+                "cache.refresh.cancelled" if cancelled
+                else "cache.refresh.failed" if final_status == "failed"
+                else "cache.refresh.completed"
+            )
+            await self._emit_webhook(
+                event_name,
+                {
+                    "status": "cancelled" if cancelled else final_status,
+                    "started_at": progress.get("started_at"),
+                    "finished_at": finished_at,
+                    "total_sources": total_sources,
+                    "summary": progress.get("summary", {}),
+                    "error": progress.get("last_error") or None,
+                },
+            )
             if not cancelled and final_status in {"partial", "failed"} and self.notification_service:
                 try:
                     await self.notification_service.send_cache_refresh_failure_notification(progress)

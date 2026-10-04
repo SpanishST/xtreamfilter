@@ -509,6 +509,28 @@ CREATE INDEX IF NOT EXISTS idx_activity_logs_cat_ts
     ON activity_logs (category, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_logs_ts
     ON activity_logs (timestamp DESC);
+
+-- ── Webhook delivery outbox ───────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    id                  TEXT PRIMARY KEY,
+    event_id            TEXT NOT NULL,
+    endpoint_id         TEXT NOT NULL,
+    event_name          TEXT NOT NULL,
+    payload             TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'pending',
+    attempts            INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at     TEXT NOT NULL,
+    created_at          TEXT NOT NULL,
+    delivered_at        TEXT,
+    last_status_code    INTEGER,
+    last_error          TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_due
+    ON webhook_deliveries (status, next_attempt_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_event
+    ON webhook_deliveries (event_id);
 """
 
 

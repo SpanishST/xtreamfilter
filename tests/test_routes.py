@@ -18,6 +18,7 @@ from app.services.jellyfin_service import JellyfinService
 from app.services.m3u_service import M3uService
 from app.services.monitor_service import MonitorService
 from app.services.notification_service import NotificationService
+from app.services.webhook_service import WebhookService
 from app.services.xtream_service import XtreamService
 
 
@@ -50,12 +51,13 @@ def _build_app(data_dir: str):
     init_db(os.path.join(data_dir, DB_NAME))
     http = HttpClientService()
     notif = NotificationService(cfg, http)
-    cache = CacheService(cfg, http, notif)
+    webhook_service = WebhookService(cfg, http, os.path.join(data_dir, DB_NAME))
+    cache = CacheService(cfg, http, notif, webhook_service=webhook_service)
     epg_svc = EpgService(cfg, http, cache)
     xtream = XtreamService(cfg, cache, http)
     jellyfin = JellyfinService(cfg, http)
     cat = CategoryService(cfg, cache, notif)
-    cart = CartService(cfg, http, notif, xtream, jellyfin)
+    cart = CartService(cfg, http, notif, xtream, jellyfin, webhook_service=webhook_service)
     monitor = MonitorService(cfg, cache, xtream, notif, cart)
     m3u = M3uService(cfg, cache)
     log_svc = LogService(os.path.join(data_dir, DB_NAME), cfg)
@@ -73,6 +75,7 @@ def _build_app(data_dir: str):
     app.state.epg_service = epg_svc
     app.state.xtream_service = xtream
     app.state.notification_service = notif
+    app.state.webhook_service = webhook_service
     app.state.jellyfin_service = jellyfin
     app.state.category_service = cat
     app.state.cart_service = cart
@@ -153,6 +156,41 @@ def test_version(client):
 def test_options_get(client):
     r = client.get("/api/options")
     assert r.status_code == 200
+
+
+def test_webhook_configuration_api_masks_secrets_and_supports_crud(client):
+    response = client.post(
+        "/api/config/webhooks",
+        json={
+            "name": "Automation",
+            "url": "https://example.test/events",
+            "secret": "top-secret",
+            "events": ["cache.refresh.started", "download.item.completed"],
+        },
+    )
+    assert response.status_code == 200
+    endpoint = response.json()["endpoint"]
+    endpoint_id = endpoint["id"]
+    assert endpoint["secret_configured"] is True
+    assert "secret" not in endpoint
+
+    response = client.get("/api/options")
+    assert response.status_code == 200
+    assert "secret" not in response.json()["webhooks"][0]
+
+    response = client.put(
+        f"/api/config/webhooks/{endpoint_id}",
+        json={"name": "Automation v2", "url": "https://example.test/new", "events": ["cache.refresh.failed"]},
+    )
+    assert response.status_code == 200
+    assert response.json()["endpoint"]["secret_configured"] is True
+
+    response = client.get("/api/config/webhooks")
+    assert response.json()["endpoints"][0]["name"] == "Automation v2"
+
+    response = client.delete(f"/api/config/webhooks/{endpoint_id}")
+    assert response.status_code == 200
+    assert client.get("/api/config/webhooks").json()["endpoints"] == []
 
 
 def test_download_destinations_are_root_scoped_and_persisted(client, tmp_path):

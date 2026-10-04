@@ -128,6 +128,16 @@ def _partial_refresh_responses() -> dict:
 
 def test_refresh_cache_preserves_stale_data_on_partial_failure(tmp_path):
     cache = _build_cache_service(tmp_path)
+
+    class _Webhook:
+        def __init__(self):
+            self.events = []
+
+        async def publish_event(self, event_name, data):
+            self.events.append((event_name, data))
+
+    webhook = _Webhook()
+    cache.webhook_service = webhook
     old_vod_streams, _ = _seed_existing_source(cache)
     responses = _partial_refresh_responses()
 
@@ -161,6 +171,8 @@ def test_refresh_cache_preserves_stale_data_on_partial_failure(tmp_path):
     assert refreshed_source["vod_streams"][0]["name"] == old_vod_streams[0]["name"]
     assert refreshed_source["series"][0]["series_id"] == "series-new"
     assert cache._api_cache["last_refresh"] is not None
+    assert [event for event, _ in webhook.events] == ["cache.refresh.started", "cache.refresh.completed"]
+    assert webhook.events[-1][1]["status"] == "partial"
 
 
 def test_refresh_cache_replaces_successful_steps_in_database(tmp_path):

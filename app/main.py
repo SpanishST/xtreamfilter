@@ -49,6 +49,7 @@ from app.services.m3u_service import M3uService
 from app.services.monitor_service import MonitorService
 from app.services.notification_service import NotificationService
 from app.services.provider_gate import ProviderGate
+from app.services.webhook_service import WebhookService
 from app.services.xtream_service import XtreamService
 
 logging.basicConfig(
@@ -176,8 +177,9 @@ async def lifespan(app: FastAPI):
     http = HttpClientService()
 
     notif = NotificationService(cfg, http)
+    webhook_service = WebhookService(cfg, http, db_path)
 
-    cache = CacheService(cfg, http, notif)
+    cache = CacheService(cfg, http, notif, webhook_service=webhook_service)
     database_maintenance = DatabaseMaintenanceService(cfg, cache)
     database_maintenance.recover_interrupted()
 
@@ -185,7 +187,7 @@ async def lifespan(app: FastAPI):
     xtream = XtreamService(cfg, cache, http)
     jellyfin = JellyfinService(cfg, http)
     cat = CategoryService(cfg, cache, notif)
-    cart = CartService(cfg, http, notif, xtream, jellyfin)
+    cart = CartService(cfg, http, notif, xtream, jellyfin, webhook_service=webhook_service)
     monitor = MonitorService(cfg, cache, xtream, notif, cart)
     m3u = M3uService(cfg, cache)
     gate = ProviderGate()
@@ -210,6 +212,7 @@ async def lifespan(app: FastAPI):
     app.state.epg_service = epg_svc
     app.state.xtream_service = xtream
     app.state.notification_service = notif
+    app.state.webhook_service = webhook_service
     app.state.jellyfin_service = jellyfin
     app.state.category_service = cat
     app.state.cart_service = cart
@@ -235,6 +238,7 @@ async def lifespan(app: FastAPI):
     # --- background tasks (start before yield so they run during app lifetime) ---
     bg_task = asyncio.create_task(background_refresh_loop(cache, epg_svc, monitor, cat))
     schedule_task = asyncio.create_task(download_schedule_loop(cart))
+    webhook_task = asyncio.create_task(webhook_service.run())
 
     # --- yield here so server can start accepting requests ASAP ---
     yield
@@ -255,12 +259,17 @@ async def lifespan(app: FastAPI):
     await cache.cancel_refresh("Application shutdown")
     bg_task.cancel()
     schedule_task.cancel()
+    webhook_task.cancel()
     try:
         await bg_task
     except asyncio.CancelledError:
         pass
     try:
         await schedule_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await webhook_task
     except asyncio.CancelledError:
         pass
     await database_maintenance.shutdown()

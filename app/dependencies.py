@@ -15,6 +15,7 @@ from app.services.log_service import LogService
 from app.services.m3u_service import M3uService
 from app.services.monitor_service import MonitorService
 from app.services.notification_service import NotificationService
+from app.services.webhook_service import WebhookService
 from app.services.xtream_service import XtreamService
 
 
@@ -40,6 +41,10 @@ def get_xtream_service(request: Request) -> XtreamService:
 
 def get_notification_service(request: Request) -> NotificationService:
     return request.app.state.notification_service
+
+
+def get_webhook_service(request: Request) -> WebhookService:
+    return request.app.state.webhook_service
 
 
 def get_jellyfin_service(request: Request) -> JellyfinService:

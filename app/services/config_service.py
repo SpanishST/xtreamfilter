@@ -110,6 +110,7 @@ class ConfigService:
                 "proxy_streams": True,
                 "telegram": cls._default_telegram_config(),
                 "jellyfin": cls._default_jellyfin_config(),
+                "webhooks": [],
                 "download_movie_destination": "Films",
                 "download_series_destination": "Series",
             },

@@ -71,6 +71,7 @@
         
         input[type="text"],
         input[type="password"],
+        input[type="url"],
         select {
             width: 100%;
             padding: 12px 15px;
@@ -1151,6 +1152,13 @@
                     <button type="button" class="btn btn-secondary btn-sm" onclick="openJellyfinModal()">⚙️ Configure</button>
                     <span style="color: #666; font-size: 0.8em;">(Trigger a Jellyfin library scan after successful downloads)</span>
                 </div>
+
+                <!-- Webhook Events -->
+                <div style="display: flex; align-items: center; gap: 15px; padding: 10px; background: rgba(255,255,255,0.03); border-radius: 8px;">
+                    <span style="color: #888;">🔗 Webhooks:</span>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="openWebhooksModal()">⚙️ Configure</button>
+                    <span style="color: #666; font-size: 0.8em;">(Send app events to one or more HTTP endpoints)</span>
+                </div>
                 
                 <!-- Refresh Interval -->
                 <div style="display: flex; align-items: center; gap: 15px; padding: 10px; background: rgba(255,255,255,0.03); border-radius: 8px; flex-wrap: wrap;">
@@ -1489,6 +1497,56 @@
                 </div>
 
                 <div id="jellyfin-status" style="margin-top: 15px; display: none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Webhook Settings Modal -->
+    <div class="modal" id="webhooks-modal">
+        <div class="modal-content" style="max-width: 760px;">
+            <div class="modal-header">
+                <h3>🔗 Webhook Events</h3>
+                <button class="modal-close" onclick="closeWebhooksModal()">✕</button>
+            </div>
+            <div class="modal-body" style="padding: 20px;">
+                <p style="color: #aaa; margin-bottom: 16px;">Configure multiple HTTP receivers and choose which events each one receives. Signed requests use HMAC-SHA256.</p>
+                <div class="form-group">
+                    <label>Endpoint</label>
+                    <select id="webhook-endpoint-select" onchange="selectWebhookEndpoint()" style="width: 100%;">
+                        <option value="">＋ Add a webhook endpoint</option>
+                    </select>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 2fr; gap: 12px;">
+                    <div class="form-group">
+                        <label>Name</label>
+                        <input type="text" id="webhook-name" maxlength="100" placeholder="Webhook name">
+                    </div>
+                    <div class="form-group">
+                        <label>URL</label>
+                        <input type="url" id="webhook-url" placeholder="https://example.com/webhook">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Signing secret <span style="color:#888; font-weight:normal;">(optional; leave blank to keep the saved secret)</span></label>
+                    <input type="password" id="webhook-secret" autocomplete="new-password" placeholder="Enter a secret to sign requests">
+                </div>
+                <div class="form-group">
+                    <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox" id="webhook-enabled" checked style="width:auto;"> Enabled</label>
+                </div>
+                <div class="form-group">
+                    <label>Events</label>
+                    <div id="webhook-event-options" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:7px 12px;"></div>
+                </div>
+                <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:18px;">
+                    <button class="btn btn-secondary" id="webhook-test-btn" onclick="testWebhookEndpoint()" disabled>🧪 Test</button>
+                    <button class="btn btn-secondary" id="webhook-delete-btn" onclick="deleteWebhookEndpoint()" disabled>🗑️ Delete</button>
+                    <button class="btn btn-primary" onclick="saveWebhookEndpoint()">💾 Save endpoint</button>
+                </div>
+                <div id="webhook-status" style="margin-top:12px; display:none;"></div>
+                <div style="margin-top:22px;">
+                    <strong>Recent deliveries</strong>
+                    <div id="webhook-deliveries" style="margin-top:8px; max-height:180px; overflow:auto; color:#aaa; font-size:0.85em;">Loading…</div>
+                </div>
             </div>
         </div>
     </div>
@@ -3357,6 +3415,7 @@
                 closeBrowser();
                 closeTelegramModal();
                 closeJellyfinModal();
+                closeWebhooksModal();
             }
         });
         
@@ -3377,6 +3436,10 @@
             if (e.target === this) {
                 closeJellyfinModal();
             }
+        });
+
+        document.getElementById('webhooks-modal').addEventListener('click', function(e) {
+            if (e.target === this) closeWebhooksModal();
         });
         
         // Handle Enter key in filter inputs
@@ -3600,6 +3663,161 @@
             }
 
             statusEl.textContent = message;
+        }
+
+        // ============================================
+        // WEBHOOK EVENTS
+        // ============================================
+
+        const webhookEventNames = [
+            'cache.refresh.started', 'cache.refresh.completed', 'cache.refresh.failed', 'cache.refresh.cancelled',
+            'cart.item.added', 'download.queue.started', 'download.queue.completed',
+            'download.item.started', 'download.item.completed', 'download.item.failed', 'download.item.cancelled'
+        ];
+        let webhookEndpoints = [];
+
+        function openWebhooksModal() {
+            document.getElementById('webhooks-modal').classList.add('active');
+            const options = document.getElementById('webhook-event-options');
+            options.replaceChildren();
+            webhookEventNames.forEach(eventName => {
+                const label = document.createElement('label');
+                label.style.cssText = 'display:flex; align-items:center; gap:7px; color:#ccc; font-size:0.9em;';
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.value = eventName;
+                checkbox.className = 'webhook-event-checkbox';
+                checkbox.style.width = 'auto';
+                label.append(checkbox, document.createTextNode(eventName));
+                options.appendChild(label);
+            });
+            loadWebhooks();
+            loadWebhookDeliveries();
+        }
+
+        function closeWebhooksModal() {
+            document.getElementById('webhooks-modal').classList.remove('active');
+            document.getElementById('webhook-status').style.display = 'none';
+        }
+
+        function loadWebhooks() {
+            fetch('/api/config/webhooks').then(r => r.json()).then(data => {
+                webhookEndpoints = data.endpoints || [];
+                const select = document.getElementById('webhook-endpoint-select');
+                const selected = select.value;
+                select.replaceChildren(new Option('＋ Add a webhook endpoint', ''));
+                webhookEndpoints.forEach(endpoint => select.add(new Option(endpoint.name, endpoint.id)));
+                select.value = webhookEndpoints.some(endpoint => endpoint.id === selected) ? selected : '';
+                selectWebhookEndpoint();
+            }).catch(() => showWebhookStatus('error', 'Could not load webhook endpoints'));
+        }
+
+        function selectWebhookEndpoint() {
+            const endpointId = document.getElementById('webhook-endpoint-select').value;
+            const endpoint = webhookEndpoints.find(item => item.id === endpointId);
+            document.getElementById('webhook-name').value = endpoint?.name || '';
+            document.getElementById('webhook-url').value = endpoint?.url || '';
+            document.getElementById('webhook-secret').value = '';
+            document.getElementById('webhook-secret').placeholder = endpoint?.secret_configured
+                ? 'Secret saved (enter a new value to replace it)' : 'Enter a secret to sign requests';
+            document.getElementById('webhook-enabled').checked = endpoint ? endpoint.enabled : true;
+            document.querySelectorAll('.webhook-event-checkbox').forEach(box => {
+                box.checked = endpoint ? endpoint.events.includes(box.value) : true;
+            });
+            document.getElementById('webhook-test-btn').disabled = !endpoint;
+            document.getElementById('webhook-delete-btn').disabled = !endpoint;
+        }
+
+        async function saveWebhookEndpoint() {
+            const endpointId = document.getElementById('webhook-endpoint-select').value;
+            const payload = {
+                name: document.getElementById('webhook-name').value.trim(),
+                url: document.getElementById('webhook-url').value.trim(),
+                enabled: document.getElementById('webhook-enabled').checked,
+                events: Array.from(document.querySelectorAll('.webhook-event-checkbox:checked')).map(box => box.value),
+                secret: document.getElementById('webhook-secret').value
+            };
+            try {
+                const response = await fetch(endpointId ? `/api/config/webhooks/${encodeURIComponent(endpointId)}` : '/api/config/webhooks', {
+                    method: endpointId ? 'PUT' : 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.message || 'Could not save webhook');
+                showWebhookStatus('success', 'Webhook endpoint saved');
+                loadWebhooks();
+                if (!endpointId) setTimeout(() => {
+                    const select = document.getElementById('webhook-endpoint-select');
+                    select.value = result.endpoint.id;
+                    selectWebhookEndpoint();
+                }, 100);
+            } catch (error) {
+                showWebhookStatus('error', error.message || 'Could not save webhook');
+            }
+        }
+
+        async function deleteWebhookEndpoint() {
+            const endpointId = document.getElementById('webhook-endpoint-select').value;
+            if (!endpointId || !confirm('Delete this webhook endpoint?')) return;
+            try {
+                const response = await fetch(`/api/config/webhooks/${encodeURIComponent(endpointId)}`, {method: 'DELETE'});
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.message || 'Could not delete webhook');
+                showWebhookStatus('success', 'Webhook endpoint deleted');
+                loadWebhooks();
+                loadWebhookDeliveries();
+            } catch (error) {
+                showWebhookStatus('error', error.message || 'Could not delete webhook');
+            }
+        }
+
+        async function testWebhookEndpoint() {
+            const endpointId = document.getElementById('webhook-endpoint-select').value;
+            if (!endpointId) return;
+            showWebhookStatus('info', 'Sending test event…');
+            try {
+                const response = await fetch(`/api/config/webhooks/${encodeURIComponent(endpointId)}/test`, {method: 'POST'});
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.message || 'Test request failed');
+                showWebhookStatus('success', `${result.message} (HTTP ${result.status_code})`);
+            } catch (error) {
+                showWebhookStatus('error', error.message || 'Webhook test failed');
+            }
+        }
+
+        function loadWebhookDeliveries() {
+            fetch('/api/config/webhooks/deliveries?limit=20').then(r => r.json()).then(data => {
+                const container = document.getElementById('webhook-deliveries');
+                container.replaceChildren();
+                const deliveries = data.deliveries || [];
+                if (!deliveries.length) {
+                    container.textContent = 'No webhook deliveries yet.';
+                    return;
+                }
+                deliveries.forEach(delivery => {
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex; gap:10px; justify-content:space-between; padding:5px 0; border-bottom:1px solid #333;';
+                    const event = document.createElement('span');
+                    event.textContent = `${delivery.event_name} · ${delivery.status}${delivery.attempts ? ` (${delivery.attempts} attempts)` : ''}`;
+                    const time = document.createElement('span');
+                    time.textContent = delivery.created_at || '';
+                    row.append(event, time);
+                    container.appendChild(row);
+                });
+            }).catch(() => {
+                document.getElementById('webhook-deliveries').textContent = 'Could not load delivery history.';
+            });
+        }
+
+        function showWebhookStatus(type, message) {
+            const status = document.getElementById('webhook-status');
+            status.style.display = 'block';
+            status.style.padding = '10px';
+            status.style.borderRadius = '4px';
+            status.style.background = type === 'error' ? 'rgba(239,68,68,.2)' : type === 'success' ? 'rgba(34,197,94,.2)' : 'rgba(59,130,246,.2)';
+            status.style.color = type === 'error' ? '#ef4444' : type === 'success' ? '#22c55e' : '#3b82f6';
+            status.textContent = message;
         }
 
         function checkVersion() {

@@ -232,9 +232,11 @@ async def move_cart_item(
             item["status"] = "downloading"
             move_ok = await cart._move_temp_to_destination(item, temp_path, file_path)
             if move_ok:
+                await cart._emit_webhook("download.item.completed", cart._webhook_item(item))
                 await cart._finalize_completed_download(item)
                 await log_service.log("cart", "info", f"Move retry succeeded: {item.get('name', '')}", {"item_id": item_id})
                 return {"status": "ok", "message": f"Moved successfully: {item.get('name', '')}"}
+            await cart._emit_webhook("download.item.failed", cart._webhook_item(item, include_error=True))
             await log_service.log("cart", "error", f"Move retry failed: {item.get('name', '')}", {"item_id": item_id, "error": item.get("error", "")})
             return JSONResponse(status_code=500, content={"error": item.get("error", "Move failed")})
     return JSONResponse(status_code=404, content={"error": "Item not found"})

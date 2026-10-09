@@ -151,14 +151,25 @@ async def get_source(source_id: str, cfg: ConfigService = Depends(get_config_ser
 
 
 @router.get("/{source_id}/info")
-async def get_source_info(source_id: str, cfg: ConfigService = Depends(get_config_service)):
+async def get_source_info(source_id: str, request: Request, cfg: ConfigService = Depends(get_config_service)):
     """Return live subscription details for a saved source.
 
     Calls the upstream Xtream ``player_api.php`` (no action) which returns
     ``user_info`` (status, expiry, trial flag, active/max connections,
     allowed output formats, created_at, message) and ``server_info``
     (timezone, server URL, ports, time_now, etc.).
+
+    Skipped while a download is transferring: on single-connection providers
+    this call would otherwise steal the stream's connection. The client-side
+    cache is left untouched so the next poll retries.
     """
+    gate = getattr(request.app.state, "provider_gate", None)
+    if gate is not None and gate.is_transferring():
+        return JSONResponse(
+            status_code=200,
+            content={"status": "skipped", "reason": "download in progress"},
+        )
+
     source = cfg.get_source_by_id(source_id) if hasattr(cfg, "get_source_by_id") else None
     if source is None:
         for s in cfg.config.get("sources", []):

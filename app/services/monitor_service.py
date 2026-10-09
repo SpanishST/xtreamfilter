@@ -13,6 +13,7 @@ from rapidfuzz import fuzz
 
 from app.database import DB_NAME, db_connect
 from app.services.filter_service import normalize_name
+from app.services.provider_gate import maybe_background_fetch
 from app.services.xtream_service import compact_episode_info
 
 if TYPE_CHECKING:
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from app.services.cart_service import CartService
     from app.services.config_service import ConfigService
     from app.services.notification_service import NotificationService
+    from app.services.provider_gate import ProviderGate
     from app.services.xtream_service import XtreamService
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,8 @@ def _normalize_imdb_id(value) -> str | None:
 
 class MonitorService:
     """Manages monitored series and checks for new episodes."""
+
+    provider_gate: ProviderGate | None = None
 
     def __init__(
         self,
@@ -812,7 +816,8 @@ class MonitorService:
             src_source_id = src["source_id"]
             src_series_id = str(src["series_id"])
 
-            episodes = await self.xtream_service.fetch_series_episodes(src_source_id, src_series_id)
+            async with maybe_background_fetch(self.provider_gate):
+                episodes = await self.xtream_service.fetch_series_episodes(src_source_id, src_series_id)
             if not episodes:
                 await asyncio.sleep(0.5)
                 continue

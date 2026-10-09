@@ -391,6 +391,30 @@ Jellyfin can also be used to trigger a full library scan after successful downlo
 | `/api/config/jellyfin` | `POST` | Update Jellyfin base URL, API key, and trigger settings |
 | `/api/config/jellyfin/test` | `POST` | Validate the configured Jellyfin connection |
 
+## Webhooks
+
+Configure one or more HTTP webhook receivers from **Settings → Webhooks**. Each endpoint has an independent URL, enabled flag, optional signing secret, and event subscriptions. Requests are queued in SQLite and delivered in the background, so a slow receiver does not block cache refresh or downloads. Failed requests retry with exponential backoff (up to 8 attempts); terminal delivery records are retained for 30 days and delivery history is visible in the Webhooks settings.
+
+Available events:
+
+- `cache.refresh.started`, `cache.refresh.completed`, `cache.refresh.failed`, `cache.refresh.cancelled`
+- `cart.item.added`
+- `download.queue.started`, `download.queue.completed`
+- `download.item.started`, `download.item.completed`, `download.item.failed`, `download.item.cancelled`
+
+Every request contains a versioned JSON event with an `id`, `event`, `occurred_at`, and `data`. The `Idempotency-Key` header contains the event ID; receivers should use it to recognize retries. When an endpoint has a signing secret, requests include `X-Webhook-Timestamp` and `X-Webhook-Signature`. The signature is `sha256=` followed by the HMAC-SHA256 hex digest of `<timestamp>.<raw request body>`. Other headers include `X-Webhook-Event` and `X-Webhook-Delivery`. The Test button sends a `webhook.test` event directly to that endpoint.
+
+Webhook management API:
+
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/api/config/webhooks` | `GET` | List configured endpoints (secrets are never returned) |
+| `/api/config/webhooks` | `POST` | Create an endpoint |
+| `/api/config/webhooks/{endpoint_id}` | `PUT` | Update an endpoint; omit `secret` to keep its current secret |
+| `/api/config/webhooks/{endpoint_id}` | `DELETE` | Remove an endpoint and cancel its pending deliveries |
+| `/api/config/webhooks/{endpoint_id}/test` | `POST` | Send a signed test event |
+| `/api/config/webhooks/deliveries` | `GET` | List recent delivery attempts; supports `limit` and `endpoint_id` |
+
 ## Download Manager
 
 The download workflow is exposed through the Browse page and the Cart page.

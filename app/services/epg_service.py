@@ -13,10 +13,12 @@ from lxml import etree
 
 from app.database import DB_NAME, db_connect
 from app.services.filter_service import matches_filter
+from app.services.provider_gate import maybe_background_fetch
 
 if TYPE_CHECKING:
     from app.services.cache_service import CacheService
     from app.services.config_service import ConfigService
+    from app.services.provider_gate import ProviderGate
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,8 @@ HEADERS = {
 
 class EpgService:
     """Manages the merged EPG / XMLTV cache."""
+
+    provider_gate: ProviderGate | None = None
 
     def __init__(
         self,
@@ -103,7 +107,8 @@ class EpgService:
                 timeout=httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0),
                 follow_redirects=True,
             ) as client:
-                response = await client.get(url, params=params)
+                async with maybe_background_fetch(self.provider_gate):
+                    response = await client.get(url, params=params)
                 if response.status_code == 200:
                     logger.info(
                         f"Fetched EPG from source '{source.get('name', source['id'])}': {len(response.content)} bytes"

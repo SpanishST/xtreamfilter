@@ -1,26 +1,100 @@
 """Configuration and options API routes."""
 from __future__ import annotations
 
+import copy
 import os
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
-from app.dependencies import get_config_service, get_http_client, get_jellyfin_service, get_notification_service
+from app.dependencies import (
+    get_config_service,
+    get_http_client,
+    get_jellyfin_service,
+    get_notification_service,
+    get_webhook_service,
+)
 from app.models.xtream import PLAYER_PROFILES
 from app.services.config_service import ConfigService, resolve_download_destination
 from app.services.http_client import HttpClientService
 from app.services.jellyfin_service import JellyfinService
 from app.services.notification_service import NotificationService
+from app.services.webhook_service import WebhookService
 
 router = APIRouter(tags=["config"])
 
 
+# ---- Webhooks ----
+
+@router.get("/api/config/webhooks")
+async def get_webhooks(webhooks: WebhookService = Depends(get_webhook_service)):
+    return {"endpoints": webhooks.list_endpoints()}
+
+
+@router.post("/api/config/webhooks")
+async def create_webhook(request: Request, webhooks: WebhookService = Depends(get_webhook_service)):
+    try:
+        endpoint = webhooks.save_endpoint(await request.json())
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(exc)})
+    return {"status": "ok", "endpoint": endpoint}
+
+
+@router.put("/api/config/webhooks/{endpoint_id}")
+async def update_webhook(
+    endpoint_id: str,
+    request: Request,
+    webhooks: WebhookService = Depends(get_webhook_service),
+):
+    try:
+        endpoint = webhooks.save_endpoint(await request.json(), endpoint_id=endpoint_id)
+    except KeyError as exc:
+        return JSONResponse(status_code=404, content={"status": "error", "message": str(exc).strip("'")})
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(exc)})
+    return {"status": "ok", "endpoint": endpoint}
+
+
+@router.delete("/api/config/webhooks/{endpoint_id}")
+async def delete_webhook(endpoint_id: str, webhooks: WebhookService = Depends(get_webhook_service)):
+    if not webhooks.delete_endpoint(endpoint_id):
+        return JSONResponse(status_code=404, content={"status": "error", "message": "Webhook endpoint not found"})
+    return {"status": "ok"}
+
+
+@router.post("/api/config/webhooks/{endpoint_id}/test")
+async def test_webhook(endpoint_id: str, webhooks: WebhookService = Depends(get_webhook_service)):
+    try:
+        result = await webhooks.send_test(endpoint_id)
+    except KeyError as exc:
+        return JSONResponse(status_code=404, content={"status": "error", "message": str(exc).strip("'")})
+    if not result.get("ok"):
+        return JSONResponse(status_code=502, content={"status": "error", **result})
+    return {"status": "ok", **result}
+
+
+@router.get("/api/config/webhooks/deliveries")
+def get_webhook_deliveries(
+    limit: int = Query(50, ge=1, le=200),
+    endpoint_id: str | None = Query(None),
+    webhooks: WebhookService = Depends(get_webhook_service),
+):
+    return {"deliveries": webhooks.list_deliveries(limit=limit, endpoint_id=endpoint_id)}
+
+
 # ---- Generic options ----
+
+def _public_options(options: dict) -> dict:
+    public = copy.deepcopy(options)
+    for endpoint in public.get("webhooks", []) or []:
+        if isinstance(endpoint, dict):
+            endpoint.pop("secret", None)
+    return public
+
 
 @router.get("/api/options")
 async def get_options(cfg: ConfigService = Depends(get_config_service)):
-    return cfg.config.get("options", {})
+    return _public_options(cfg.config.get("options", {}))
 
 
 @router.post("/api/options")
@@ -31,7 +105,7 @@ async def update_options(request: Request, cfg: ConfigService = Depends(get_conf
     for key, value in data.items():
         cfg.config["options"][key] = value
     cfg.save()
-    return {"status": "ok", "options": cfg.config["options"]}
+    return {"status": "ok", "options": _public_options(cfg.config["options"])}
 
 
 # ---- Proxy streaming ----

@@ -31,7 +31,9 @@ if TYPE_CHECKING:
     from app.services.jellyfin_service import JellyfinService
     from app.services.monitor_service import MonitorService
     from app.services.notification_service import NotificationService
+    from app.services.provider_gate import ProviderGate
     from app.services.xtream_service import XtreamService
+    from app.services.webhook_service import WebhookService
 
 logger = logging.getLogger(__name__)
 
@@ -466,6 +468,8 @@ async def download_poster(url: str, dest_path: str) -> bool:
 class CartService:
     """Download cart with FIFO queue and background worker."""
 
+    provider_gate: ProviderGate | None = None
+
     def __init__(
         self,
         config_service: "ConfigService",
@@ -473,12 +477,14 @@ class CartService:
         notification_service: "NotificationService",
         xtream_service: "XtreamService",
         jellyfin_service: "JellyfinService | None" = None,
+        webhook_service: WebhookService | None = None,
     ):
         self.config_service = config_service
         self.http_client = http_client
         self.notification_service = notification_service
         self.xtream_service = xtream_service
         self.jellyfin_service = jellyfin_service
+        self.webhook_service = webhook_service
         self.db_path = os.path.join(config_service.data_dir, DB_NAME)
         # Late-bound by main.py after MonitorService is constructed
         self.monitor_service: MonitorService | None = None
@@ -499,8 +505,32 @@ class CartService:
         self._download_resume_event = asyncio.Event()
         self._download_resume_event.set()
         self._force_started: bool = False
+        self._webhook_queue_item_ids: set[str] = set()
         self.log_service = None  # set after init via attribute binding
         self._cart_mutation_lock = asyncio.Lock()
+
+    async def _emit_webhook(self, event_name: str, data: dict) -> None:
+        if self.webhook_service is None:
+            return
+        try:
+            await self.webhook_service.publish_event(event_name, data)
+        except Exception:
+            logger.exception("Could not publish webhook event %s", event_name)
+
+    @staticmethod
+    def _webhook_item(item: dict, *, include_error: bool = False) -> dict:
+        result = {
+            "item_id": item.get("id"),
+            "name": str(item.get("name") or "")[:300],
+            "content_type": item.get("content_type", "vod"),
+            "source_id": item.get("source_id", ""),
+        }
+        for key in ("series_name", "season", "episode_num", "file_size"):
+            if item.get(key) is not None:
+                result[key] = item[key]
+        if include_error and item.get("error"):
+            result["error"] = str(item["error"])[:500]
+        return result
 
     # ------------------------------------------------------------------
     # Properties
@@ -573,6 +603,8 @@ class CartService:
         self._discard_transient_item_metadata(self._download_current_item)
         self._download_current_item = None
         self._download_cancel_event = None
+        if self.provider_gate is not None:
+            self.provider_gate.end_transfer()
         try:
             task.result()
         except asyncio.CancelledError:
@@ -588,6 +620,17 @@ class CartService:
         """
         if self._download_task is not None and not self._download_task.done():
             return True
+        return any(item.get("status") == "downloading" for item in self._download_cart)
+
+    def is_download_transferring(self) -> bool:
+        """Return True only while an item is actively transferring bytes.
+
+        Unlike :meth:`is_download_active` this turns False between queued
+        items (and while the worker is idle/aborted), so background refresh
+        work can slip into those gaps instead of waiting for the whole queue.
+        """
+        if self.provider_gate is not None:
+            return self.provider_gate.is_transferring()
         return any(item.get("status") == "downloading" for item in self._download_cart)
 
     # ------------------------------------------------------------------
@@ -1283,6 +1326,15 @@ class CartService:
                 if len(added_items) > 5:
                     label += f" +{len(added_items) - 5} more"
                 await self.log_service.log("cart", "info", f"Added {len(added_items)} item(s) to cart: {label}")
+        if save and added_items:
+            await self._emit_webhook(
+                "cart.item.added",
+                {
+                    "count": len(added_items),
+                    "items": [self._webhook_item(item) for item in added_items[:25]],
+                    "truncated_items": max(0, len(added_items) - 25),
+                },
+            )
         return {"added": len(added_items), "skipped": skipped_count, "items": added_items}
 
     async def add_to_cart_batch(self, selections: list[dict]) -> dict:
@@ -1350,6 +1402,14 @@ class CartService:
                 self.save_cart()
                 if getattr(self, "log_service", None):
                     await self.log_service.log("cart", "info", f"Added {len(added_items)} item(s) to cart in batch")
+                await self._emit_webhook(
+                    "cart.item.added",
+                    {
+                        "count": len(added_items),
+                        "items": [self._webhook_item(item) for item in added_items[:25]],
+                        "truncated_items": max(0, len(added_items) - 25),
+                    },
+                )
             return {"added": len(added_items), "skipped": skipped, "errors": errors, "items": added_items}
 
     async def update_item_destination(self, item_id: str, requested: str | None) -> dict:
@@ -1492,8 +1552,23 @@ class CartService:
         """Background worker that processes the download queue sequentially."""
         logger.info("download_worker: starting")
         self._download_cancel_event = asyncio.Event()
+        initial_queue = [item for item in self._download_cart if item.get("status") == "queued"]
+        self._webhook_queue_item_ids = {str(item.get("id", "")) for item in initial_queue}
+        if initial_queue:
+            await self._emit_webhook(
+                "download.queue.started",
+                {
+                    "queued_count": len(initial_queue),
+                    "items": [self._webhook_item(item) for item in initial_queue[:25]],
+                    "truncated_items": max(0, len(initial_queue) - 25),
+                },
+            )
 
         while True:
+            if self.provider_gate is not None:
+                # Release the previous item's claim so background refresh work
+                # can use the upstream between items.
+                self.provider_gate.end_transfer()
             if self._queue_paused and not await self._wait_for_queue_resume():
                 break
             queued = [item for item in self._download_cart if item.get("status") == "queued"]
@@ -1507,6 +1582,7 @@ class CartService:
                 break
 
             item = queued[0]
+            self._webhook_queue_item_ids.add(str(item.get("id", "")))
             self._download_current_item = item
             self._download_progress = {
                 "bytes_downloaded": 0,
@@ -1516,9 +1592,18 @@ class CartService:
                 "paused": False,
                 "pause_remaining": 0,
             }
+            if self.provider_gate is not None:
+                # Handshake: wait for in-flight background fetches to finish so
+                # the stream never starts mid-fetch on a single-connection
+                # provider, then hold the claim for this item.
+                await self.provider_gate.begin_transfer()
             item["status"] = "downloading"
             item["progress"] = 0
             self.save_cart()
+            await self._emit_webhook(
+                "download.item.started",
+                {**self._webhook_item(item), "attempt": int(item.get("retried_once", False)) + 1},
+            )
 
             upstream_url = self.build_upstream_url(item)
             if not upstream_url:
@@ -1527,6 +1612,7 @@ class CartService:
                 self.save_cart()
                 if getattr(self, 'log_service', None):
                     await getattr(self, 'log_service', None).log("cart", "error", f"Download failed: {item.get('name', 'Unknown')} — source not found")
+                await self._emit_webhook("download.item.failed", self._webhook_item(item, include_error=True))
                 continue
 
             # Enrich item name from upstream metadata (title, year) before
@@ -1622,6 +1708,10 @@ class CartService:
                                 f"Retry {attempt}/{max_retries}: {item.get('name', 'Unknown')}",
                                 {"attempt": attempt, "max_retries": max_retries, "delay_seconds": delay,
                                  "downloaded": downloaded, "expected": total})
+                        if self.provider_gate is not None:
+                            # Backoff sleeps with no stream open — let background
+                            # refresh work use the upstream meanwhile.
+                            self.provider_gate.end_transfer()
                         remaining = delay
                         while remaining > 0:
                             if self._download_cancel_event.is_set():
@@ -1629,6 +1719,9 @@ class CartService:
                                 item["error"] = "Cancelled by user"
                                 self._discard_transient_item_metadata(item)
                                 self.save_cart()
+                                await self._emit_webhook(
+                                    "download.item.cancelled", self._webhook_item(item, include_error=True)
+                                )
                                 if getattr(self, 'log_service', None):
                                     await getattr(self, 'log_service', None).log("cart", "warning", f"Download cancelled: {item.get('name', 'Unknown')}")
                                 self._download_current_item = None
@@ -1640,6 +1733,8 @@ class CartService:
                         self._download_progress["paused"] = False
                         self._download_progress["pause_remaining"] = 0
                         item["error"] = None
+                        if self.provider_gate is not None:
+                            await self.provider_gate.begin_transfer()
 
                     while not download_complete and not download_failed:
                         request_headers = dict(player_headers)
@@ -1673,6 +1768,7 @@ class CartService:
                                                 f"Download failed: {item.get('name', 'Unknown')} — HTTP {response.status_code}",
                                                 {"http_status": response.status_code})
                                         await self.notification_service.send_download_file_notification(item)
+                                        await self._emit_webhook("download.item.failed", self._webhook_item(item, include_error=True))
                                         try:
                                             if os.path.exists(temp_path):
                                                 os.remove(temp_path)
@@ -1724,6 +1820,7 @@ class CartService:
                                             item["error"] = "Cancelled by user"
                                             self._discard_transient_item_metadata(item)
                                             self.save_cart()
+                                            await self._emit_webhook("download.item.cancelled", self._webhook_item(item, include_error=True))
                                             if getattr(self, 'log_service', None):
                                                 await getattr(self, 'log_service', None).log("cart", "warning", f"Download cancelled: {item.get('name', 'Unknown')}")
                                             try:
@@ -1806,11 +1903,16 @@ class CartService:
                                     self._download_progress["speed"] = 0
                                     self._download_progress["eta_speed"] = 0
                                     self.save_cart()
+                                    if self.provider_gate is not None:
+                                        # Queue is user-paused: no bytes flow, let
+                                        # background refresh work use the upstream.
+                                        self.provider_gate.end_transfer()
                                     if not await self._wait_for_queue_resume():
                                         item["status"] = "cancelled"
                                         item["error"] = "Cancelled by user"
                                         self._discard_transient_item_metadata(item)
                                         self.save_cart()
+                                        await self._emit_webhook("download.item.cancelled", self._webhook_item(item, include_error=True))
                                         try:
                                             os.remove(temp_path)
                                         except OSError:
@@ -1822,6 +1924,8 @@ class CartService:
                                         self._download_current_item = None
                                         self._download_cancel_event.clear()
                                         return
+                                    if self.provider_gate is not None:
+                                        await self.provider_gate.begin_transfer()
                                     continue
                                 if should_reconnect:
                                     reconnect_count += 1
@@ -1869,6 +1973,7 @@ class CartService:
                                     {"downloaded": downloaded, "expected": total, "path": file_path,
                                      "pct": round(downloaded / total * 100, 1)})
                             await self.notification_service.send_download_file_notification(item)
+                            await self._emit_webhook("download.item.failed", self._webhook_item(item, include_error=True))
                             try:
                                 if os.path.exists(temp_path):
                                     os.remove(temp_path)
@@ -1913,6 +2018,7 @@ class CartService:
                                         f"Download failed (disk mismatch after retry): {item.get('name', 'Unknown')}",
                                         {"downloaded": downloaded, "disk_size": disk_size, "path": file_path})
                                 await self.notification_service.send_download_file_notification(item)
+                                await self._emit_webhook("download.item.failed", self._webhook_item(item, include_error=True))
                                 try:
                                     os.remove(temp_path)
                                 except OSError:
@@ -1931,6 +2037,7 @@ class CartService:
                     if not move_ok:
                         self._discard_transient_item_metadata(item)
                         self.save_cart()
+                        await self._emit_webhook("download.item.failed", self._webhook_item(item, include_error=True))
                         if getattr(self, 'log_service', None):
                             await getattr(self, 'log_service', None).log("cart", "error", f"File move failed: {item.get('name', 'Unknown')}", {"error": item.get("error", "")})
                         continue
@@ -1945,6 +2052,7 @@ class CartService:
                         await getattr(self, 'log_service', None).log("cart", "info",
                             f"File moved: {item.get('name', 'Unknown')} -> {file_path} ({_fs / 1024 / 1024:.1f} MB)",
                             _move_details)
+                    await self._emit_webhook("download.item.completed", self._webhook_item(item))
                     await self._finalize_completed_download(item)
                     if getattr(self, 'log_service', None):
                         _fp = item.get("file_path", "")
@@ -1965,6 +2073,10 @@ class CartService:
                             )
 
                 if pause_interval > 0 and pause_duration > 0:
+                    if self.provider_gate is not None:
+                        # Inter-item throttle sleep: stream is done, release the
+                        # claim so background refresh can use the upstream.
+                        self.provider_gate.end_transfer()
                     self._download_progress["paused"] = True
                     self._download_progress["pause_remaining"] = pause_duration
                     remaining = pause_duration
@@ -2007,6 +2119,7 @@ class CartService:
                             f"Download failed after retry: {item.get('name', 'Unknown')}",
                             {"error": str(e)})
                     await self.notification_service.send_download_file_notification(item)
+                    await self._emit_webhook("download.item.failed", self._webhook_item(item, include_error=True))
                     try:
                         if os.path.exists(temp_path):
                             os.remove(temp_path)
@@ -2216,6 +2329,20 @@ class CartService:
             self._discard_transient_item_metadata(item)
 
     async def _handle_download_queue_complete(self) -> None:
+        queue_items = [
+            item for item in self._download_cart if str(item.get("id", "")) in self._webhook_queue_item_ids
+        ]
+        statuses = [item.get("status") for item in queue_items]
+        await self._emit_webhook(
+            "download.queue.completed",
+            {
+                "total": len(statuses),
+                "completed": statuses.count("completed"),
+                "failed": sum(status in ("failed", "move_failed") for status in statuses),
+                "cancelled": statuses.count("cancelled"),
+            },
+        )
+        self._webhook_queue_item_ids.clear()
         await self.notification_service.send_download_queue_complete_notification(self._download_cart)
         await self._trigger_jellyfin_refresh("queue")
         if self.config_service.config.get("options", {}).get("download_clear_on_queue_complete", False):

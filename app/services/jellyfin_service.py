@@ -39,7 +39,7 @@ class JellyfinService:
     @staticmethod
     def _auth_headers(api_key: str) -> dict[str, str]:
         return {
-            "X-Emby-Token": api_key,
+            "Authorization": f'MediaBrowser Token="{api_key}"',
             "Accept": "application/json",
         }
 

@@ -41,7 +41,7 @@ DAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
 
 
 def sanitize_filename(name: str) -> str:
-    name = unicodedata.normalize("NFKD", name)
+    name = unicodedata.normalize("NFC", name)
     name = re.sub(r'[<>:"/\\|?*]', "", name)
     name = re.sub(r"\s+", " ", name).strip()
     name = name.strip(".")
